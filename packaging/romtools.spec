@@ -1,5 +1,5 @@
 # PyInstaller spec shared by the Linux and Windows builds (run by packaging/build.py).
-# One Analysis, three launchers (Verifier / Renamer / Converter) sharing one runtime folder;
+# One Analysis, three launchers (Verifier / Renamer / Optimizer) sharing one runtime folder;
 # romtools/__main__.py picks the app from the launcher's name.
 import os
 import sys
@@ -12,7 +12,7 @@ ICONS = Path(os.environ.get("ROMTOOLS_ICON_DIR", ROOT / "build" / "icons"))
 APPS = [  # (module, Windows name, Linux name, icon)
     ("verifier", "ROM Verifier", "rom-verifier", "rom-verifier"),
     ("renamer", "ROM Renamer", "rom-renamer", "rom-renamer"),
-    ("converter", "ROM Converter", "rom-converter", "rom-converter"),
+    ("converter", "ROM Optimizer", "rom-optimizer", "rom-optimizer"),
 ]
 
 a = Analysis(

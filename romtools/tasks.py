@@ -1,4 +1,4 @@
-"""Python-based batch tasks for ROM Converter (run by converter.Runner like chdman jobs).
+"""Python-based tasks for ROM Optimizer (run by converter.Runner like chdman jobs).
 
 Every task is lossless and verified before anything is replaced:
   * new files are written under a temporary name next to the target, checked, then renamed;

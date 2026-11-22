@@ -1,7 +1,7 @@
-romtools for Windows - ROM Verifier, ROM Renamer, ROM Converter
+romtools for Windows - ROM Verifier, ROM Renamer, ROM Optimizer
 ================================================================
 
-Start:  double-click "ROM Verifier.exe", "ROM Renamer.exe" or "ROM Converter.exe".
+Start:  double-click "ROM Verifier.exe", "ROM Renamer.exe" or "ROM Optimizer.exe".
         Keep the whole folder together (the _internal and tools folders are needed).
         Tip: right-click an .exe > Send to > Desktop (create shortcut).
 
@@ -18,7 +18,7 @@ Differences from the Linux version:
   * CHDs are always unpacked to temporary files ("SSD mode"). The RAM streaming mode
     relies on Linux features and is not available on Windows. Temp folder: Settings in
     ROM Verifier (default %TEMP%\romtools).
-  * chdman updates: ROM Converter > "chdman version & updates" > "Download latest official
+  * chdman updates: ROM Optimizer > "chdman (advanced)" > "chdman version & updates" > "Download latest official
     chdman.exe" downloads MAME's official Windows release, checks its SHA-256 and keeps only
     chdman.exe.
   * Files moved to the trash go to the Recycle Bin.

@@ -151,7 +151,7 @@ def trash(path: Path) -> bool:
 def launch_app(module: str) -> None:
     """Start another of the three apps (verifier / renamer / converter)."""
     if FROZEN:
-        names = {"verifier": "ROM Verifier.exe", "renamer": "ROM Renamer.exe", "converter": "ROM Converter.exe"}
+        names = {"verifier": "ROM Verifier.exe", "renamer": "ROM Renamer.exe", "converter": "ROM Optimizer.exe"}
         subprocess.Popen([str(app_dir() / names[module])], cwd=str(app_dir()))
     else:
         subprocess.Popen([sys.executable, "-m", f"romtools.gui.{module}"], cwd=str(app_dir()))

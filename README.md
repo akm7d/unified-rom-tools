@@ -1,4 +1,4 @@
-# romtools — ROM Verifier, ROM Renamer & ROM Converter
+# romtools — ROM Verifier, ROM Renamer & ROM Optimizer
 
 Three Linux-native Qt (PySide6) desktop apps for a RomM-style library (`roms/<system>/…`).
 
@@ -18,7 +18,7 @@ settings instead). On Linux, `./install.sh` inside the folder optionally adds me
 runs on distros with glibc 2.38 or newer (Ubuntu 24.04+, Debian 13, Fedora 39+, current Arch/CachyOS). To
 build either yourself, see [BUILDING.md](BUILDING.md).
 
-Adds `rom-verifier`, `rom-renamer` and `rom-converter` to `~/.local/bin` and to your app menu (Games / Utilities).
+Adds `rom-verifier`, `rom-renamer` and `rom-optimizer` (old name `rom-converter` still works) to `~/.local/bin` and to your app menu (Games / Utilities).
 Requirements (already present on this machine): `pyside6`, `mame-tools` (chdman), `7zip`.
 
 ## ROM Verifier (read-only)
@@ -109,9 +109,13 @@ discs are renamed (and renamed themselves when all of their discs are). Nothing 
 existing files are never overwritten. Every batch is journaled in `~/.local/share/romtools/rename-journal/`
 and can be reverted from **History / Undo**.
 
-## ROM Converter (chdman GUI)
+## ROM Optimizer (formerly ROM Converter)
 
-- **Batch** tab — pick a task, add files/folders (or drag & drop), *Start queue*:
+Converts, compresses, trims, patches and fixes ROMs and disc images. Four tabs, in the order you'd use them:
+**Tasks** (pick a task, add files, run the queue), **Save space** (find what can be stored smaller and send it
+to Tasks), **Patch**, and **chdman (advanced)** (run any chdman command; choose and update chdman).
+
+- **Tasks** tab — pick a task, add files/folders (or drag & drop), *Start queue*:
   - *Create CHD (auto)*: `.cue/.gdi/.toc/.nrg` → `createcd`. For `.iso` it **detects CD vs DVD** and shows why
     in the *Detected as* column: the disc's own contents first (PSP `PSP GAME`; PS2 `BOOT2` vs PS1 `BOOT` in
     `SYSTEM.CNF`; Xbox / Xbox 360 / GameCube / Wii / Saturn / Sega CD / Dreamcast headers), then for small PS2
@@ -136,7 +140,7 @@ and can be reverted from **History / Undo**.
     elapsed, ETA, throughput), a **Now running** card per active job (step "2/2 · Verifying CHD", chdman's
     live phase and compression ratio, step ETA, speed, output name), running rows highlighted with their
     step, and *Follow running job* keeps the live chdman log on screen. Progress is mirrored in the window
-    title, the Batch tab label and the bottom status bar, so it's visible from every tab.
+    title, the Tasks tab label and the bottom status bar, so it's visible from every tab.
   - Existing outputs are skipped unless *Overwrite* is ticked; half-written CHDs are removed on failure or
     Stop; a free-space check runs before starting. Every job keeps its full chdman log.
 - **Patch** tab — apply **IPS / EBP, BPS, UPS, PPF (1/2/3) and xdelta** patches (translations, hacks, fixes),
@@ -148,14 +152,14 @@ and can be reverted from **History / Undo**.
 - **Patch → Auto-match a folder of patches…** — each patch is matched to a ROM in your library: by the
   checksum BPS/UPS record (certain; unscanned files of the right size are hashed on the spot), by the original's
   name that xdelta patches store, or by name similarity (marked "check"). Tick and patch them all at once.
-- **Space saver** tab — analyses a folder and lists what can be stored smaller without losing anything (disc
+- **Save space** tab — analyses a folder and lists what can be stored smaller without losing anything (disc
   images → CHD, GameCube/Wii → RVZ, Switch → NSZ, NDS/3DS trimming, Xbox ISOs → CHD for archiving) or load
   faster (LZMA CHDs → Zstandard), with estimates from compressing samples of your files and a warning where the
   emulator can't read the result. Every file gets its own row with its own estimate and tick box (tick a
-  suggestion to tick all its files); *Queue ticked in Batch* sets the ticked files up.
-- **chdman commands** tab — every chdman command with a form generated from `chdman help` (so new options
-  appear automatically after an update), live command-line preview, *Run now* or *Add to batch queue*.
-- **chdman version & updates** tab — shows the selected chdman, the latest official MAME release and your
+  suggestion to tick all its files); *Add ticked to Tasks* queues the ticked files.
+- **chdman (advanced) → Run a chdman command** — every chdman command with a form generated from `chdman help` (so new options
+  appear automatically after an update), live command-line preview, *Run now* or *Add to task queue*.
+- **chdman (advanced) → chdman version & updates** — shows the selected chdman, the latest official MAME release and your
   pacman package. Update via *pacman* (opens a terminal: `sudo pacman -Syu mame-tools`) or *Build latest
   from official source* (MAME's GitHub tag, tools only, built in RAM when possible, installed to
   `~/.local/share/romtools/chdman/<tag>/`). Choose which chdman all three apps use.

@@ -1,7 +1,7 @@
 """Single entry point for all three apps (used by the packaged builds and `python -m romtools`).
 
 Which app starts is decided by --app, or else by the executable's name
-("ROM Renamer.exe", "rom-renamer", ...), so one build can ship three launchers.
+("ROM Renamer.exe", "rom-renamer", "rom-optimizer", ...), so one build can ship three launchers.
 
     python -m romtools --app converter
     rom-verifier --selftest [report-file]
@@ -25,6 +25,8 @@ def pick_app(argv: list[str]) -> str:
     for app in APPS:
         if app in name:
             return app
+    if "optimizer" in name:      # ROM Optimizer is the converter app (renamed in 1.3.0)
+        return "converter"
     return "verifier"
 
 

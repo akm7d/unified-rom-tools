@@ -3,6 +3,12 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.3.0
+- ROM Converter is now **ROM Optimizer** (`rom-optimizer`, `ROM Optimizer.exe`); `rom-converter` still starts it and
+  its settings carry over.
+- Clearer tabs: **Tasks** (was Batch), **Save space** (was Space saver), **Patch**, and **chdman (advanced)**, which
+  holds *Run a chdman command* and *chdman version & updates*. Every tab has a tooltip saying what it's for.
+
 ## 1.2.0
 - ROM Verifier: compressed GameCube / Wii images (RVZ, CISO, GCZ, WIA, WBFS) are checked by the disc inside
   them (via the bundled nodtool, in memory) instead of showing as Bad dump.

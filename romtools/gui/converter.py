@@ -1,4 +1,5 @@
-"""ROM Converter - chdman GUI: batch presets, every chdman command, and a chdman updater."""
+"""ROM Optimizer (formerly ROM Converter): task queue (convert / compress / trim / fix / playlists), ROM patching,
+the Save space advisor, and advanced chdman tools (every command, version & updates)."""
 
 from __future__ import annotations
 
@@ -164,8 +165,8 @@ class QueueStatusBar(QFrame):
         self.timing = QLabel()
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 4, 8, 4)
-        title = QLabel("<b>Batch queue — all jobs:</b>")
-        title.setToolTip("Progress of the whole batch queue. Each running job's own progress is in the "
+        title = QLabel("<b>Task queue — all jobs:</b>")
+        title.setToolTip("Progress of the whole task queue. Each running job's own progress is in the "
                          "Now running panel above.")
         self.bar.setToolTip("All jobs in this run, weighted by file size (a 4 GB disc counts more than a 50 MB one)")
         self.timing.setToolTip("Time since the queue started, estimated time left for the whole queue, and "
@@ -504,7 +505,7 @@ class BatchTab(QWidget):
         self.save_state()
 
     def enqueue_preset(self, preset: str, files: list[Path], **overrides) -> int:
-        """Queue files for a task chosen elsewhere (Space saver), using the current options plus overrides."""
+        """Queue files for a task chosen elsewhere (Save space), using the current options plus overrides."""
         import dataclasses
         opts = dataclasses.replace(self.options(), **overrides)
         jobs = cv.plan(preset, files, opts)
@@ -644,7 +645,7 @@ class BatchTab(QWidget):
         self.worker = RunnerWorker(lambda w: runner.run(), parent=self)
         self.worker.job_changed.connect(self.update_job)
         self.worker.done.connect(self._finished)
-        self.worker.failed.connect(lambda e: (self._finished(None), QMessageBox.critical(self, "Batch failed", e)))
+        self.worker.failed.connect(lambda e: (self._finished(None), QMessageBox.critical(self, "Task queue failed", e)))
         self.run_ids = [j.id for j in todo]
         for j in todo:
             j.measure()
@@ -1196,7 +1197,7 @@ class PatchTab(QWidget):
                              f"changed and no output was left behind.")
 
 
-# ====================================================================== Space saver tab
+# ====================================================================== Save space tab
 
 class SpaceTab(QWidget):
     COLS = ["Suggestion / file", "Folder", "Files", "Now", "After (est.)", "Saves", "Readable by", "Note"]
@@ -1229,7 +1230,7 @@ class SpaceTab(QWidget):
         collapse = QPushButton("Collapse all")
         collapse.clicked.connect(self.table.collapseAll)
         self.total = QLabel("Analyse a folder to see where space can be saved without losing anything.")
-        self.queue = QPushButton(QIcon.fromTheme("list-add"), "Queue ticked in Batch")
+        self.queue = QPushButton(QIcon.fromTheme("list-add"), "Add ticked to Tasks")
         self.queue.setEnabled(False)
         self.queue.clicked.connect(self.to_batch)
         top = QHBoxLayout()
@@ -1245,7 +1246,7 @@ class SpaceTab(QWidget):
         intro = QLabel("Every suggestion is lossless and verified before anything is replaced. Estimates come from "
                        "compressing samples of your actual files. Orange notes matter: e.g. Xenia can't play CHDs, "
                        "and NSZ needs your keys. To actually free the space, tick <i>Move the originals to the "
-                       "trash once the result is verified</i> in the Batch options.")
+                       "trash once the result is verified</i> in the Tasks options.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         lay.addLayout(top)
@@ -1263,7 +1264,7 @@ class SpaceTab(QWidget):
             return
         root = Path(self.root.text().strip()).expanduser()
         if not root.is_dir():
-            QMessageBox.information(self, "Space saver", "Choose a folder to analyse.")
+            QMessageBox.information(self, "Save space", "Choose a folder to analyse.")
             return
         cfg = get_config()
         cfg["window_state"]["advisor_dir"] = str(root)
@@ -1359,14 +1360,14 @@ class SpaceTab(QWidget):
         queued = 0
         for s, files in self._ticked():
             if s.preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(b.keys.text().strip()).is_file():
-                QMessageBox.warning(self, "Switch keys needed", "Set your prod.keys under Batch → Options → Switch "
+                QMessageBox.warning(self, "Switch keys needed", "Set your prod.keys under Tasks → Options → Switch "
                                     "keys first; the Switch files were not queued.")
                 continue
             over = {"cd_codec": "zstd", "dvd_codec": "zstd"} if s.kind == "speed" else {}
             queued += b.enqueue_preset(s.preset, files, **over)
         if queued:
             self.win.tabs.setCurrentWidget(b)
-            self.win.statusBar().showMessage(f"{queued} job(s) queued in Batch - check the options, then Start "
+            self.win.statusBar().showMessage(f"{queued} job(s) added to Tasks - check the options, then Start "
                                              f"queue.", 10000)
 
 
@@ -1397,12 +1398,12 @@ class CommandsTab(QWidget):
         self.stop_btn = QPushButton(QIcon.fromTheme("media-playback-stop"), "Stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(lambda: self.proc and self.proc.cancel())
-        queue_btn = QPushButton(QIcon.fromTheme("list-add"), "Add to batch queue")
+        queue_btn = QPushButton(QIcon.fromTheme("list-add"), "Add to task queue")
         queue_btn.clicked.connect(self.to_queue)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setFormat("this command: %p%")
-        self.bar.setToolTip("Progress of the command run with Run now (separate from the Batch queue)")
+        self.bar.setToolTip("Progress of the command run with Run now (separate from the task queue)")
         self.out = QPlainTextEdit()
         self.out.setReadOnly(True)
         self.out.setFont(mono())
@@ -1653,7 +1654,7 @@ class ChdmanTab(QWidget):
         exe = ct.chdman_bin()
         v = ct.version(exe) if exe else None
         self.using.setText(f"{exe or 'none'}" + (f" — {v.raw.replace('manager ', 'version ')}" if v else ""))
-        self.win.base_title = f"ROM Converter — chdman {v.number if v else 'missing'}"
+        self.win.base_title = f"ROM Optimizer — chdman {v.number if v else 'missing'}"
         self.win.setWindowTitle(self.win.base_title)
         self._verdict()
 
@@ -1672,7 +1673,7 @@ class ChdmanTab(QWidget):
         cfg.save()
         self.refresh()
         self.win.commands.reload()
-        self.win.statusBar().showMessage("chdman selection saved — used by ROM Converter, Verifier and Renamer.",
+        self.win.statusBar().showMessage("chdman selection saved — used by ROM Optimizer, Verifier and Renamer.",
                                          6000)
 
     def check(self):
@@ -1813,7 +1814,7 @@ class ChdmanTab(QWidget):
 class ConverterWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ROM Converter")
+        self.setWindowTitle("ROM Optimizer")
         self.resize(1400, 860)
         self._busy = 0
         tb = QToolBar("Main")
@@ -1835,17 +1836,28 @@ class ConverterWindow(QMainWindow):
         self.space = SpaceTab(self)
         self.commands = CommandsTab(self)
         self.chdman = ChdmanTab(self)
-        self.tabs.addTab(self.batch, QIcon.fromTheme("view-list-details"), "Batch")
-        self.tabs.addTab(self.patch, QIcon.fromTheme("document-edit"), "Patch")
-        self.tabs.addTab(self.space, QIcon.fromTheme("drive-harddisk"), "Space saver")
-        self.tabs.addTab(self.commands, QIcon.fromTheme("utilities-terminal"), "chdman commands")
-        self.tabs.addTab(self.chdman, QIcon.fromTheme("system-software-update"), "chdman version && updates")
+        # chdman's own tools are for advanced use: one tab, two sub-tabs
+        self.advanced = QTabWidget()
+        self.advanced.setDocumentMode(True)
+        self.advanced.addTab(self.commands, QIcon.fromTheme("utilities-terminal"), "Run a chdman command")
+        self.advanced.addTab(self.chdman, QIcon.fromTheme("system-software-update"), "chdman version && updates")
+        for w, icon, label, tip in (
+                (self.batch, "view-list-details", "Tasks",
+                 "Pick a task (convert to CHD/RVZ/NSZ, extract, trim, fix CHD types, playlists…), add files and "
+                 "run the queue"),
+                (self.space, "drive-harddisk", "Save space",
+                 "Analyse a folder: which files can be stored smaller (or load faster) without losing anything"),
+                (self.patch, "document-edit", "Patch",
+                 "Apply IPS / BPS / UPS / PPF / xdelta patches (translations, hacks), with auto-matching"),
+                (self.advanced, "utilities-terminal", "chdman (advanced)",
+                 "Run any chdman command by hand, choose which chdman is used, and update it")):
+            self.tabs.setTabToolTip(self.tabs.addTab(w, QIcon.fromTheme(icon), label), tip)
         self.setCentralWidget(self.tabs)
         self.statusBar().showMessage("Ready")
         self.mini_label = QLabel()
-        self.mini_label.setToolTip("The Batch queue is still running. Switch to the Batch tab for details.")
+        self.mini_label.setToolTip("The task queue is still running. Switch to the Tasks tab for details.")
         self.mini_bar = QProgressBar()
-        self.mini_bar.setToolTip("Batch queue progress (all jobs). Shown here only while you're on another tab.")
+        self.mini_bar.setToolTip("Task queue progress (all jobs). Shown here only while you're on another tab.")
         self.mini_bar.setRange(0, 1000)
         self.mini_bar.setMaximumWidth(220)
         self.mini_bar.setMaximumHeight(16)
@@ -1871,7 +1883,7 @@ class ConverterWindow(QMainWindow):
         self.mini_bar.setValue(int(p * 1000))
         self.mini_bar.setFormat(f"{p * 100:.0f}% · {finished}/{total} jobs")
         eta = next((b for b in bits if b.startswith("ETA")), "")
-        self.mini_label.setText(f"<b>Batch queue:</b> {finished} of {total} jobs done" + (f" · {eta}" if eta else ""))
+        self.mini_label.setText(f"<b>Task queue:</b> {finished} of {total} jobs done" + (f" · {eta}" if eta else ""))
         if current:
             self.statusBar().showMessage(f"Now running: {current}" if off_batch else f"Now running: {current}")
 
@@ -1881,11 +1893,11 @@ class ConverterWindow(QMainWindow):
         self._queue_state = (p, finished, total, current, bits) if active else None
         self._apply_queue_state()
         if active:
-            self.tabs.setTabText(0, f"Batch ({finished}/{total})")
-            self.setWindowTitle(f"ROM Converter — {p * 100:.0f}% · {finished}/{total} jobs")
+            self.tabs.setTabText(0, f"Tasks ({finished}/{total})")
+            self.setWindowTitle(f"ROM Optimizer — {p * 100:.0f}% · {finished}/{total} jobs")
         else:
-            self.tabs.setTabText(0, "Batch")
-            self.setWindowTitle(getattr(self, "base_title", "ROM Converter"))
+            self.tabs.setTabText(0, "Tasks")
+            self.setWindowTitle(getattr(self, "base_title", "ROM Optimizer"))
 
     def set_busy(self, on: bool):
         self._busy += 1 if on else -1
@@ -1911,7 +1923,7 @@ class ConverterWindow(QMainWindow):
 
 
 def main():
-    app = make_app("ROM Converter", "rom-converter")
+    app = make_app("ROM Optimizer", "rom-optimizer")
     app.setApplicationVersion(__version__)
     w = ConverterWindow()
     w.show()

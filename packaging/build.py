@@ -138,7 +138,7 @@ def check_selftest(report: Path, label: str) -> None:
 
 PORTABLE_TXT = """This copy of romtools is PORTABLE.
 
-While this file is here, ROM Verifier, ROM Renamer and ROM Converter keep their settings, DATs, hack/translation
+While this file is here, ROM Verifier, ROM Renamer and ROM Optimizer keep their settings, DATs, hack/translation
 tags, rename history and remembered scans in the "data" folder next to the programs. Copy or move the whole
 folder (USB stick, another PC) and everything comes along.
 

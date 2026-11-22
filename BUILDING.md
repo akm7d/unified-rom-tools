@@ -73,7 +73,7 @@ Edit `packaging/versions.toml`, then `make all`:
 - **Bundled chdman**: change `mame_tag` under both `[chdman_windows]` and `[chdman_linux]` (e.g. `mame0290`).
   Windows takes `chdman.exe` from the release (checksum from MAME's `SHA256SUMS`); Linux builds it from
   that release's source package the first time (a few minutes, then cached). Users can also update chdman
-  from inside ROM Converter.
+  from inside ROM Optimizer.
 - **Linux Python**: `[python_linux]`, a python-build-standalone `install_only_stripped` x86_64 build, with its
   SHA-256 from that release's `SHA256SUMS`.
 - **7-Zip**: change `version`, `url` and `sha256` (compare the GitHub and 7-zip.org copies).

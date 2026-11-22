@@ -15,7 +15,7 @@ if ((${#missing[@]})); then
 fi
 
 for app in verifier renamer converter; do
-  name="rom-$app"
+  name="rom-$app"; [ "$app" = converter ] && name=rom-optimizer
   cat > "$BIN/$name" <<SH
 #!/bin/sh
 export PYTHONPATH="$HERE\${PYTHONPATH:+:\$PYTHONPATH}"
@@ -51,19 +51,22 @@ Categories=Game;Utility;Emulator;
 Keywords=rom;rename;redump;nointro;dat;m3u;
 StartupWMClass=rom-renamer
 D
-cat > "$APPS/rom-converter.desktop" <<D
+cat > "$APPS/rom-optimizer.desktop" <<D
 [Desktop Entry]
 Type=Application
-Name=ROM Converter
-GenericName=ROM format converter
-Comment=Convert to and from CHD with chdman (batch), run any chdman command, keep chdman updated
-Exec=$BIN/rom-converter
-Icon=rom-converter
+Name=ROM Optimizer
+GenericName=ROM converter, compressor and patcher
+Comment=Convert, compress, trim, patch and fix ROMs and disc images; find space savings
+Exec=$BIN/rom-optimizer
+Icon=rom-optimizer
 Terminal=false
 Categories=Game;Utility;Emulator;
-Keywords=rom;chd;chdman;convert;compress;iso;cue;gdi;
-StartupWMClass=rom-converter
+Keywords=rom;chd;chdman;convert;compress;patch;rvz;nsz;trim;iso;cue;gdi;
+StartupWMClass=rom-optimizer
 D
+# renamed from ROM Converter in 1.3.0: keep the old command working, drop the old menu entry
+ln -sf "$BIN/rom-optimizer" "$BIN/rom-converter"
+rm -f "$APPS/rom-converter.desktop" "$ICONS/rom-converter.svg"
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" >/dev/null 2>&1 || true
 command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
-echo "Installed: rom-verifier, rom-renamer, rom-converter (menu: Games / Utilities)"
+echo "Installed: rom-verifier, rom-renamer, rom-optimizer (rom-converter still works) (menu: Games / Utilities)"
