@@ -206,7 +206,7 @@ class BatchTab(QWidget):
         # ---- what to do
         self.preset = QComboBox()
         groups = [[cv.TO_CHD, cv.FROM_CHD, cv.RECOMPRESS, cv.FIX_CHD, cv.VERIFY, cv.INFO],
-                  [cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ],
+                  [cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS],
                   [cv.M3U, cv.TRIM, cv.UNTRIM]]
         for gi, group in enumerate(groups):
             if gi:
@@ -400,7 +400,7 @@ class BatchTab(QWidget):
         conversions = (cv.TO_CHD, cv.RECOMPRESS, cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ, cv.TRIM, cv.UNTRIM)
         show = {"codec": p in (cv.TO_CHD, cv.RECOMPRESS), "iso": p == cv.TO_CHD, "split": p == cv.FROM_CHD,
                 "verify": p in (cv.TO_CHD, cv.RECOMPRESS), "trash": p in conversions,
-                "keys": p in (cv.TO_NSZ, cv.FROM_NSZ)}
+                "keys": p in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS)}
         self.trash.setText("Move source files to the trash after a verified success"
                            if p in (cv.TO_CHD, cv.RECOMPRESS) else
                            "Move the originals to the trash once the result is verified")
@@ -494,8 +494,8 @@ class BatchTab(QWidget):
                 return
             self.add_jobs(jobs)
             return
-        if preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(self.keys.text().strip()).is_file():
-            QMessageBox.warning(self, "Switch keys needed", "NSZ needs your own prod.keys file. Set it under "
+        if preset in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS) and not Path(self.keys.text().strip()).is_file():
+            QMessageBox.warning(self, "Switch keys needed", "This task needs your own prod.keys file. Set it under "
                                 "Options → Switch keys.")
             return
         files = cv.collect(paths, preset)

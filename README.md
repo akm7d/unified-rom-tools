@@ -148,6 +148,10 @@ to Tasks), **Patch**, and **chdman (advanced)** (run any chdman command; choose 
   - **GameCube / Wii ↔ RVZ** (Dolphin's format, via the bundled `nodtool`; checked against the disc's SHA-1, and
     nodtool confirms Redump matches), **Switch NSP/XCI ↔ NSZ/XCZ** (bundled `nsz`, with your own `prod.keys`;
     verified by nsz, and decompressing gives back the identical NSP).
+  - **Switch NSP / XCI → RomFS + ExeFS folders** (bundled `nstool`, your own `prod.keys`): one folder per game,
+    `Title [TitleID] (vUpdate)/exefs` and `/romfs`, with the **newest update applied** (found in the same package
+    or next to it, e.g. in the game's folder); DLC gets `Title [DLC ID] (DLC)/romfs`. The NCAs are copied out
+    of the package into a work folder beside the output and removed afterwards. NSZ / XCZ: convert back first.
   - **Multi-disc playlists**: writes `Game (Region).m3u` for every set of `(Disc N)` files that lacks one.
   - **Trim / untrim NDS & 3DS** (reversible: only trims when the cut-off part is plain padding, checks that untrim
     gives back the exact file first; untrim picks the padding that matches No-Intro).

@@ -60,6 +60,15 @@ linux_sha256 = "112b39019ebe284b9a6f8c1d4e28205d79f5cc8ae935508ad1b5049b7d5ffb28
 windows_url = "https://github.com/nicoboss/nsz/releases/download/5.0.0/nsz-cli-windows-x64.exe"
 windows_sha256 = "341b395c18679bf4c01f0bf2fb0e22e315a64b34fad51064781f5155a978883d"
 
+[nstool]
+# Switch RomFS / ExeFS extraction (incl. applying updates): official nstool release zips from github.com/jakcron/nstool
+# (MIT). The Linux binary is built on Ubuntu 24.04 (glibc 2.39). Users supply their own keys.
+version = "1.9.2"
+linux_url = "https://github.com/jakcron/nstool/releases/download/v1.9.2/nstool-v1.9.2-ubuntu_x86_64.zip"
+linux_sha256 = "2ab1d484d79199d1bb428cb920a49cece0ae4d7129c80120eaf48b7361785351"
+windows_url = "https://github.com/jakcron/nstool/releases/download/v1.9.2/nstool-v1.9.2-win_x64.zip"
+windows_sha256 = "34659dc47249a3c00f7fc88a11f4e5ba14dfbec0a6a96b4f3f71368a7e1c9374"
+
 [sevenzip_windows]
 # 7z.exe / 7z.dll bundled in the Windows build (archive hashing, chdman updates).
 # Same file on github.com/ip7z/7zip and 7-zip.org (checked 2026-11-22).

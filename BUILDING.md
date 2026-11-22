@@ -27,7 +27,7 @@ Makefile               shortcuts (below)
 | `make windows` | `dist/romtools-<version>-windows-x64.zip` (built with Wine on Linux) |
 | `make all` | both |
 | `make capture-theme` | save this desktop's colour scheme as the apps' Dark theme (`packaging/theme/dark-palette.json`) |
-| `make tools` | source checkout only: fetch the pinned `nodtool`, `nsz`, `xdelta3` into `./tools` (run by `./install.sh`) |
+| `make tools` | source checkout only: fetch the pinned `nodtool`, `nsz`, `nstool`, `xdelta3` into `./tools` (run by `./install.sh`) |
 | `make test-portable` | self-test the Linux build on a clean Ubuntu 24.04 in Docker (no chdman/7-Zip installed) |
 | `make clean` / `make distclean` | remove `build/` + `dist/` / also the download, venv and Wine cache |
 
@@ -84,6 +84,8 @@ Edit `packaging/versions.toml`, then `make all`:
 - **xdelta3**: `[xdelta3]`, official release binaries from github.com/jmacd/xdelta (pin both SHA-256s).
 - **nodtool** (RVZ) and **nsz** (NSZ): `[nodtool]` / `[nsz]`, official single-file release binaries (pin both
   SHA-256s). nsz never ships keys; users point it at their own `prod.keys`.
+- **nstool** (Switch RomFS / ExeFS): `[nstool]`, official release zips (one binary each; the Linux one is built on
+  Ubuntu 24.04, glibc 2.39). No keys included.
 
 Downloads whose SHA-256 doesn't match are refused.
 

@@ -25,6 +25,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import zipfile
 import tomllib
 import urllib.request
 import zipfile
@@ -194,6 +195,8 @@ TOOL_LICENSES = {
                "Licensed under the Apache License 2.0 or MIT license.",
     "nsz": "nsz {v} (https://github.com/nicoboss/nsz), official release binary, unmodified. Licensed under the MIT "
            "license. No keys are included; you supply your own prod.keys.",
+    "nstool": "nstool {v} (https://github.com/jakcron/nstool), official release binary, unmodified. Licensed under "
+              "the MIT license. No keys are included; you supply your own prod.keys.",
 }
 
 
@@ -207,6 +210,15 @@ def _single_binaries(dest: Path, platform: str) -> None:
         target.chmod(0o755)
         nl = "\r\n" if platform == "windows" else "\n"
         (dest / f"{name}-LICENSE.txt").write_text(TOOL_LICENSES[name].format(v=pin["version"]) + nl)
+    # nstool ships as a zip holding one binary
+    pin = PINS["nstool"]
+    exe = "nstool" + (".exe" if platform == "windows" else "")
+    with zipfile.ZipFile(download(pin[f"{platform}_url"], pin[f"{platform}_sha256"])) as zf:
+        member = next(n for n in zf.namelist() if n.rsplit("/", 1)[-1] == exe)
+        (dest / exe).write_bytes(zf.read(member))
+    (dest / exe).chmod(0o755)
+    nl = "\r\n" if platform == "windows" else "\n"
+    (dest / "nstool-LICENSE.txt").write_text(TOOL_LICENSES["nstool"].format(v=pin["version"]) + nl)
 
 
 def linux_tools(dest: Path) -> None:
@@ -242,7 +254,7 @@ def linux_tools(dest: Path) -> None:
 
 def source_tools() -> Path:
     """For running from the source checkout (install.sh launchers): put the same pinned, checksum-verified
-    nodtool, nsz and xdelta3 the builds bundle into <repo>/tools, where romtools.compat.find_tool looks.
+    nodtool, nsz, nstool and xdelta3 the builds bundle into <repo>/tools, where romtools.compat.find_tool looks.
     chdman and 7-Zip are left to the system (and ROM Optimizer's chdman choice), as before."""
     dest = ROOT / "tools"
     dest.mkdir(exist_ok=True)
@@ -482,7 +494,7 @@ def main() -> int:
     if args.target == "tools":
         if sys.platform == "win32":
             raise SystemExit("`tools` is for a Linux source checkout; Windows builds bundle their tools")
-        step(f"Fetching nodtool, nsz and xdelta3 into {source_tools()}")
+        step(f"Fetching nodtool, nsz, nstool and xdelta3 into {source_tools()}")
         return 0
     if args.target == "test-portable":
         test_portable()

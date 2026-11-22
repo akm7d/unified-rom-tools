@@ -26,6 +26,7 @@ from .scanner import _cue_parts, _gdi_parts
 TO_CHD, FROM_CHD, VERIFY, INFO, RECOMPRESS, CUSTOM = "to_chd", "from_chd", "verify", "info", "recompress", "custom"
 FIX_CHD, M3U, TRIM, UNTRIM = "fix_chd", "m3u", "trim", "untrim"
 TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ = "to_rvz", "from_rvz", "to_nsz", "from_nsz"
+SWITCH_FS = "switch_fs"
 DISC_EXTS = (".chd", ".cue", ".gdi", ".iso", ".pbp", ".rvz", ".ccd", ".mds")
 
 PRESETS = {
@@ -40,6 +41,7 @@ PRESETS = {
     FROM_RVZ: ("RVZ → ISO", (".rvz",)),
     TO_NSZ: ("Switch NSP / XCI → NSZ / XCZ", (".nsp", ".xci")),
     FROM_NSZ: ("Switch NSZ / XCZ → NSP / XCI", (".nsz", ".xcz")),
+    SWITCH_FS: ("Switch NSP / XCI → RomFS + ExeFS folders (newest update applied)", (".nsp", ".xci", ".nsz", ".xcz")),
     TRIM: ("Trim NDS / 3DS ROMs (reversible)", (".nds", ".dsi", ".3ds", ".cci")),
     UNTRIM: ("Untrim NDS / 3DS ROMs back to the full dump", (".nds", ".dsi", ".3ds", ".cci")),
 }
@@ -238,7 +240,100 @@ def plan_playlists(paths: list[Path], opts: Options) -> list[Job]:
     return jobs
 
 
+def plan_switch_fs(files: list[Path], opts: Options) -> list[Job]:
+    """One job per game (its base program NCA, with the newest update found in the same package or next to it
+    applied) and one per DLC, whichever of their packages were picked."""
+    from . import packages as pk
+    from . import tasks
+    keys = Path(opts.switch_keys) if opts.switch_keys else None
+    if not keys or not keys.is_file():
+        return [_skipped(f"extract: {f.name}", f, "set your Switch prod.keys under Options → Switch keys first")
+                for f in files]
+    pool: set[Path] = set()
+    for f in files:
+        for d in {f.parent, f.parent.parent}:
+            try:
+                pool.update(p for p in d.glob("*") if p.suffix.lower() in (".nsp", ".xci"))
+                pool.update(p for p in d.glob("*/*") if p.suffix.lower() in (".nsp", ".xci"))
+            except OSError:
+                pass
+    layouts: dict[Path, list] = {}
+    for p in sorted(pool | {f for f in files if f.suffix.lower() in (".nsp", ".xci")}):
+        try:
+            layouts[p] = pk.switch_layout(p, keys)
+        except Exception:  # noqa: BLE001
+            continue
+    games, updates = {}, {}
+    for p, ts in layouts.items():
+        for t in ts:
+            if t.kind == pk.GAME and t.ncas.get(1):
+                games.setdefault(t.title_id, (p, t))
+            elif t.kind == pk.UPDATE and t.ncas.get(1):
+                b = f"{int(t.title_id, 16) & ~0x800:016X}"
+                if b not in updates or t.version > updates[b][1].version:
+                    updates[b] = (p, t)
+    jobs, seen = [], set()
+    for f in files:
+        if f.suffix.lower() in (".nsz", ".xcz"):
+            jobs.append(_skipped(f"extract: {f.name}", f, "compressed: convert it back to NSP / XCI first "
+                                                          "(Switch NSZ / XCZ → NSP / XCI)"))
+            continue
+        if f not in layouts:
+            jobs.append(_skipped(f"extract: {f.name}", f, "couldn't read the package's contents (keys?)"))
+            continue
+        for t in layouts[f]:
+            if t.kind == pk.DLC:
+                key = ("dlc", t.title_id)
+                if key in seen or not t.ncas.get(2):
+                    continue
+                seen.add(key)
+                try:
+                    title = pk.clean_title(pk.read(f, keys).title)
+                except Exception:  # noqa: BLE001
+                    title = f.stem
+                out = _out_dir(f, opts) / CIFS_SAFE(f"{title} [{t.title_id}] (DLC)")
+                tik = [(f, n) for n in t.tickets]
+                jobs.append(_task_job(f"extract DLC: {f.name}", f, tasks.extract_switch_fs(
+                    out, keys, (f, t.ncas[2][0]), None, tik, {"romfs": 0}), "Extracting", [out], [],
+                    detail=f"DLC {t.title_id} v{t.version} → {out.name}/romfs"))
+                continue
+            base_id = t.title_id if t.kind == pk.GAME else f"{int(t.title_id, 16) & ~0x800:016X}"
+            if ("game", base_id) in seen:
+                continue
+            seen.add(("game", base_id))
+            if base_id not in games:
+                jobs.append(_skipped(f"extract: {f.name}", f, f"the base game {base_id} wasn't found next to this "
+                                                              f"update"))
+                continue
+            gp, gt = games[base_id]
+            up = updates.get(base_id)
+            try:
+                title = pk.clean_title(pk.read(gp, keys).title)
+            except Exception:  # noqa: BLE001
+                title = gp.stem
+            name = f"{title} [{base_id}]" + (f" (v{up[1].version})" if up else "")
+            out = _out_dir(gp, opts) / CIFS_SAFE(name)
+            tik = [(gp, n) for n in gt.tickets] + ([(up[0], n) for n in up[1].tickets] if up else [])
+            if up:
+                main, base = (up[0], up[1].ncas[1][0]), (gp, gt.ncas[1][0])
+                detail = (f"base game + update v{up[1].version}" +
+                          ("" if up[0] == gp else f" from {up[0].name}") + f" → {out.name}/exefs, romfs")
+            else:
+                main, base = (gp, gt.ncas[1][0]), None
+                detail = f"base game (no update found) → {out.name}/exefs, romfs"
+            jobs.append(_task_job(f"extract: {gp.name}", gp, tasks.extract_switch_fs(
+                out, keys, main, base, tik, {"exefs": 0, "romfs": 1}), "Extracting", [out], [], detail=detail))
+    return jobs
+
+
+def CIFS_SAFE(name: str) -> str:   # noqa: N802 - folder names that also work on Samba / Windows
+    import re as _re
+    return _re.sub(r'[\\/:*?"<>|]', "", name).strip(" .")
+
+
 def plan(preset: str, files: list[Path], opts: Options) -> list[Job]:
+    if preset == SWITCH_FS:
+        return plan_switch_fs(files, opts)
     jobs = []
     for src in files:
         j = _plan_one(preset, src, opts)

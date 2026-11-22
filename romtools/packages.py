@@ -404,6 +404,96 @@ def read_switch(path: Path, keys_path: Path | None) -> PackageInfo:
     return info
 
 
+@dataclass
+class TitleLayout:
+    """Where one title's content lives inside a Switch package (for extraction)."""
+    kind: str                      # Game | Update | DLC
+    title_id: str
+    version: int
+    ncas: dict[int, list[str]]     # content type (1 Program, 2 Data, 3 Control, ...) -> NCA file names
+    tickets: list[str]             # .tik files in the container (title-key encrypted content)
+
+
+def switch_layout(path: Path, keys_path: Path | None) -> list[TitleLayout]:
+    """The titles in an NSP / XCI with the file names of their NCAs, from the content metadata."""
+    keys = _Keys(keys_path)
+    c = _Container(path)
+    try:
+        names = set(c.files)
+        tickets = sorted(n for n in names if n.endswith(".tik"))
+        out: list[TitleLayout] = []
+        xmls = [n for n in names if n.endswith(".cnmt.xml")]
+        if xmls:
+            types = {"Program": 1, "Data": 2, "Control": 3, "HtmlDocument": 4, "LegalInformation": 5,
+                     "DeltaFragment": 6}
+            for n in xmls:
+                x = c.read(n).decode("utf-8", "replace")
+                typ = re.search(r"<Type>(\w+)</Type>", x)
+                tid = re.search(r"<Id>0x([0-9a-fA-F]+)</Id>", x)
+                ver = re.search(r"<Version>(\d+)</Version>", x)
+                ncas: dict[int, list[str]] = {}
+                for t, i in re.findall(r"<Content>\s*<Type>(\w+)</Type>\s*<Id>([0-9a-f]+)</Id>", x):
+                    ncas.setdefault(types.get(t, 0), []).append(f"{i}.nca")
+                out.append(TitleLayout(_CNMT_KIND.get(typ.group(1), typ.group(1)) if typ else "",
+                                       tid.group(1).upper().zfill(16) if tid else "", int(ver.group(1)) if ver else 0,
+                                       ncas, tickets))
+        else:
+            if not keys.get("header_key"):
+                raise PackageError("needs your prod.keys")
+            for n in sorted(x for x in names if x.endswith(".cnmt.nca")):
+                for blob in _Nca(c, n, keys).pfs0_files().values():
+                    tid, ver, typ, recs = _cnmt_records(blob)
+                    ncas: dict[int, list[str]] = {}
+                    for i, t in recs:
+                        ncas.setdefault(t, []).append(f"{i}.nca")
+                    out.append(TitleLayout(_CNMT_KIND.get(typ, hex(typ)), f"{tid:016X}", ver, ncas, tickets))
+        for t in out:      # NSZ: the content is stored as .ncz
+            for typ, files in t.ncas.items():
+                t.ncas[typ] = [f if f in names else f[:-4] + ".ncz" if f[:-4] + ".ncz" in names else f
+                               for f in files]
+        return out
+    finally:
+        c.close()
+
+
+def nca_sections(container_path: Path, nca: str, keys_path: Path | None) -> list[tuple[int, int, int]]:
+    """(index, fs type 0=RomFS 1=PartitionFS, encryption type) for each section of an NCA inside a package."""
+    keys = _Keys(keys_path)
+    c = _Container(container_path)
+    try:
+        n = _Nca(c, nca, keys)
+        out = []
+        for i in range(4):
+            start, end, fsh = n.section(i)
+            if end > start:
+                out.append((i, fsh[2], fsh[4]))
+        return out
+    finally:
+        c.close()
+
+
+def copy_member(container_path: Path, name: str, dest: Path, progress=None, cancel=None) -> None:
+    """Copy one file (an NCA or ticket) out of an NSP / XCI."""
+    c = _Container(container_path)
+    try:
+        off, size = c.files[name]
+        c.f.seek(off)
+        done = 0
+        with open(dest, "wb") as out:
+            while done < size:
+                if cancel is not None and cancel.is_set():
+                    raise PackageError("cancelled")
+                chunk = c.f.read(min(8 << 20, size - done))
+                if not chunk:
+                    raise PackageError("package is shorter than its header says")
+                out.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, size)
+    finally:
+        c.close()
+
+
 # ============================================================================ common
 
 def read(path: Path, keys_path: Path | None = None) -> PackageInfo:

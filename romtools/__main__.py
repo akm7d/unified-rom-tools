@@ -152,7 +152,7 @@ def selftest(report: str | None) -> int:
 
     def disc_tools():
         from romtools.compat import FROZEN, find_tool
-        found = {t: find_tool(t) for t in ("nodtool", "nsz")}
+        found = {t: find_tool(t) for t in ("nodtool", "nsz", "nstool")}
         from romtools.nod import parse_verify
         got = parse_verify(["Title: X", "Game ID: GZ2E01", "Redump: X ✅", "CRC32 : 0ab54d43 ✅",
                             "SHA-1 : 75EDD3DDFF41F125D1B4CE1A40378F1B565519E7 ✅", "XXH64 : 0123456789abcdef"])
@@ -220,7 +220,7 @@ def selftest(report: str | None) -> int:
         os.environ["ROMTOOLS_HOME"] = str(Path(home) / "portable")   # never touch the build's own data folder
         for label, fn in (("imports", imports), ("paths", paths), ("chdman", chdman), ("7-Zip", sevenzip),
                           ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui), ("theme", theme),
-                          ("patching", patching), ("RVZ / NSZ tools", disc_tools), ("console packages", console_packages)):
+                          ("patching", patching), ("RVZ / NSZ / nstool tools", disc_tools), ("console packages", console_packages)):
             check(label, fn)
     lines.append("RESULT " + ("OK" if ok else "FAILED"))
     if report:

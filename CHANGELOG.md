@@ -3,6 +3,11 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.6.0
+- ROM Optimizer: **Switch NSP / XCI → RomFS + ExeFS folders** task (bundled nstool 1.9.2, MIT). One job per game
+  with the newest update applied (from the same package or one next to it) and one per DLC. Needs your
+  prod.keys; NSZ/XCZ must be decompressed first.
+
 ## 1.5.0
 - ROM Verifier: **PS4 PKG and Switch NSP/NSZ/XCI/XCZ are identified** from their own data (title, Title ID,
   type, version, region, firmware, bundle contents) with new statuses *Identified* and *Check*. *Check* flags an

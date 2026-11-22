@@ -382,3 +382,83 @@ def convert_nsz(src: Path, out: Path, keys: Path | None) -> Callable[[TaskContex
         ratio = out.stat().st_size / max(src.stat().st_size, 1) if src.exists() else 0
         return (f"{ratio:.0%} of the original, " if ratio else "") + "verified by nsz" + (f"; {note}" if note else "")
     return run
+
+
+# ====================================================================== Switch RomFS / ExeFS (nstool)
+
+def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base: tuple[Path, str] | None,
+                      tickets: list[tuple[Path, str]], parts: dict[str, int]) -> Callable[[TaskContext], str]:
+    """Extract sections of a Switch NCA into folders (``exefs/``, ``romfs/``) with nstool.
+
+    ``main`` is (package, NCA name) of the program (or DLC data) NCA; with ``base`` (the base game's program NCA)
+    the update's RomFS patch is applied, so ``romfs/`` is the updated game. The NCAs are copied out of the
+    package into a work folder next to the output first (nstool reads NCA files), and removed afterwards."""
+    def run(ctx: TaskContext) -> str:
+        import shutil
+        from .compat import find_tool
+        from . import packages as pk
+        exe = find_tool("nstool")
+        if not exe:
+            raise RuntimeError("nstool not found (it's bundled in the builds; from source run ./install.sh)")
+        if not keys or not Path(keys).is_file():
+            raise RuntimeError("your Switch prod.keys file is needed - set it in the Switch keys option")
+        if out.exists():
+            raise TaskSkipped(f"{out.name} already exists")
+        work = out.parent / f".romtools-switch-{uuid.uuid4().hex[:8]}"
+        dest = work / "out"
+        try:
+            (work / "nca").mkdir(parents=True)
+            todo = [main] + ([base] if base else [])
+            sizes = []
+            for cont, name in todo:
+                c = pk._Container(cont)
+                try:
+                    sizes.append(c.files[name][1])
+                finally:
+                    c.close()
+            total = sum(sizes) or 1
+            done_before = 0
+            local: list[Path] = []
+            for (cont, name), size in zip(todo, sizes):
+                target = work / "nca" / f"{len(local)}-{name}"
+                ctx.log(f"copying {name} out of {cont.name} ({size / 2**30:.2f} GiB)")
+                pk.copy_member(cont, name, target,
+                               lambda d, _t, b=done_before: ctx.progress(0.4 * (b + d) / total, "Copying NCA"),
+                               ctx.cancel)
+                done_before += size
+                local.append(target)
+            tiks = []
+            for cont, name in tickets:
+                t = work / "nca" / name
+                if not t.exists():
+                    pk.copy_member(cont, name, t)
+                tiks += ["--tik", str(t)]
+            ctx.check()
+            base_args = ["--basenca", str(local[1])] if base else []
+            for i, (part, idx) in enumerate(parts.items()):
+                argv = [exe, "-k", str(keys), *tiks, *base_args, "-x", f"/{idx}", str(dest / part), str(local[0])]
+                lo, hi = 0.4 + 0.6 * i / len(parts), 0.4 + 0.6 * (i + 1) / len(parts)
+                stop = threading.Event()
+
+                def watch(lo=lo, hi=hi, part=part):
+                    expect = sizes[0] * (0.05 if part == "exefs" else 0.95) or 1
+                    while not stop.wait(1.0):
+                        got = sum(f.stat().st_size for f in (dest / part).rglob("*") if f.is_file()) \
+                            if (dest / part).exists() else 0
+                        ctx.progress(lo + (hi - lo) * min(0.99, got / expect), f"Extracting {part}")
+                threading.Thread(target=watch, daemon=True).start()
+                try:
+                    _run_tool(argv, ctx, f"Extracting {part}")
+                finally:
+                    stop.set()
+                if not (dest / part).is_dir() or not any((dest / part).rglob("*")):
+                    raise RuntimeError(f"nstool produced no {part} (wrong keys, or a missing ticket?)")
+            if "exefs" in parts and not ((dest / "exefs" / "main").exists() or (dest / "exefs" / "main.npdm").exists()):
+                raise RuntimeError("the ExeFS has no main / main.npdm - extraction looks incomplete")
+            os.rename(dest, out)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        files = sum(1 for f in out.rglob("*") if f.is_file())
+        size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
+        return f"{', '.join(parts)}: {files} files, {size / 2**30:.2f} GiB" + (" (update applied)" if base else "")
+    return run
