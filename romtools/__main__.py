@@ -53,7 +53,7 @@ def selftest(report: str | None) -> int:
     def imports():
         import romtools
         from romtools import (cache, chd, chdfix, chdman_tool, compat, config, converter, dat, datmanager,  # noqa
-                              discdetect, hashing, renamer, scanner, systems, tags, updater)
+                              discdetect, hashing, library, renamer, scanner, systems, tags, updater)
         from romtools.gui import common, converter as c2, datdialog, renamer as r2, verifier  # noqa
         return f"romtools {romtools.__version__}, Python {sys.version.split()[0]}, {sys.platform}"
 

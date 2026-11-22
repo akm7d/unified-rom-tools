@@ -305,12 +305,32 @@ class SystemList(QTreeWidget):
         self.root = Path()
 
     def load(self, root: Path) -> None:
+        from .. import library
         self.root = root
         cfg = get_config()
-        folders = library_folders(root)
+        folders, others, loose = library.split(cfg, root)
         ensure_mapping(cfg, folders)
-        checked = set(cfg["window_state"].get("checked_systems", folders))
+        checked = set(cfg["window_state"].get("checked_systems", folders + [library.OTHER]))
         self.clear()
+        if others or loose:
+            label, dat_text = library.other_label(cfg, root)
+            it = QTreeWidgetItem([label, dat_text])
+            it.setData(0, Qt.ItemDataRole.UserRole, library.OTHER)
+            it.setIcon(0, QIcon.fromTheme("folder-open"))
+            parts = []
+            if loose:
+                parts.append(f"{len(loose)} file(s) directly in this folder")
+            if others:
+                parts.append(f"{len(others)} other folder(s): " + ", ".join(o.name for o in others[:8])
+                             + (" …" if len(others) > 8 else ""))
+            tip = ("ROMs and archives that aren't inside a system folder. No system needs to be picked: each "
+                   "file is identified against all your downloaded DATs.\n\n" + "\n".join(parts))
+            it.setToolTip(0, tip)
+            it.setToolTip(1, tip)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(0, Qt.CheckState.Checked if (library.OTHER in checked or not folders)
+                             else Qt.CheckState.Unchecked)
+            self.addTopLevelItem(it)
         for f in folders:
             s = cfg.system(f)
             sysdef = system_for(cfg, f)
@@ -324,6 +344,7 @@ class SystemList(QTreeWidget):
             else:
                 label, icon = "no system mapped", "dialog-warning"
             it = QTreeWidgetItem([f, label])
+            it.setData(0, Qt.ItemDataRole.UserRole, f)
             it.setIcon(1, QIcon.fromTheme(icon))
             tip = UNVERIFIABLE_HINT.get(f, "")
             it.setToolTip(1, tip or label)
@@ -335,8 +356,13 @@ class SystemList(QTreeWidget):
         self.resizeColumnToContents(0)
 
     def checked(self) -> list[str]:
-        return [self.topLevelItem(i).text(0) for i in range(self.topLevelItemCount())
-                if self.topLevelItem(i).checkState(0) == Qt.CheckState.Checked]
+        """Keys of the ticked rows: system folder names, or library.OTHER."""
+        out = []
+        for i in range(self.topLevelItemCount()):
+            it = self.topLevelItem(i)
+            if it.checkState(0) == Qt.CheckState.Checked:
+                out.append(it.data(0, Qt.ItemDataRole.UserRole) or it.text(0))
+        return out
 
     def set_all(self, on: bool) -> None:
         for i in range(self.topLevelItemCount()):

@@ -119,16 +119,18 @@ def apply_rules(name: str, rules: Rules, is_dir: bool = False) -> str:
     return stem + ext
 
 
-def plan_from_rules(folders: dict[str, Path], rules: Rules) -> list[Op]:
+def plan_from_rules(folders, rules: Rules) -> list[Op]:
+    """folders: {key: folder} or [(key, folder, names to skip)] (see library.rule_folders)."""
     from .scanner import IGNORE_EXTS
     ops = []
-    for system, folder in folders.items():
+    entries = [(k, f, set()) for k, f in folders.items()] if isinstance(folders, dict) else folders
+    for system, folder, skip in entries:
         try:
             children = sorted(folder.iterdir(), key=lambda p: p.name.lower())
         except OSError:
             continue
         for p in children:
-            if p.name.startswith("."):
+            if p.name.startswith(".") or p.name in skip:
                 continue
             is_dir = p.is_dir()
             if is_dir and not rules.include_folders:

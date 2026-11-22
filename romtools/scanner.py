@@ -116,13 +116,16 @@ def _gdi_parts(gdi: Path) -> list[Path]:
     return parts
 
 
-def _items_in(system: str, folder: Path, depth: int = 0) -> list[Item]:
+MAX_DEPTH = 3   # system/game/disc-style nesting
+
+
+def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | frozenset = frozenset()) -> list[Item]:
     try:
         children = sorted(folder.iterdir(), key=lambda p: p.name.lower())
     except OSError:
         return []
     files = [p for p in children if p.is_file() and not p.name.startswith(".")]
-    dirs = [p for p in children if p.is_dir() and not p.name.startswith(".")]
+    dirs = [p for p in children if p.is_dir() and not p.name.startswith(".") and p.name not in skip_dirs]
     consumed: set[Path] = set()
     items: list[Item] = []
     for f in files:
@@ -142,7 +145,7 @@ def _items_in(system: str, folder: Path, depth: int = 0) -> list[Item]:
         kind = "chd" if ext == ".chd" else "archive" if ext in ARCHIVE_EXTS else "file"
         items.append(Item(system, f, kind))
     for d in dirs:
-        if depth == 0 and _has_roms(d):
+        if depth < MAX_DEPTH and (_has_roms(d) or _has_rom_subdirs(d)):
             items.extend(_items_in(system, d, depth + 1))
         else:
             items.append(Item(system, d, "folder"))
@@ -153,6 +156,13 @@ def _has_roms(d: Path) -> bool:
     try:
         return any(p.is_file() and p.suffix.lower() in ROM_EXTS and p.suffix.lower() not in (".bin", ".elf")
                    for p in d.iterdir()) or any(p.suffix.lower() == ".cue" for p in d.iterdir())
+    except OSError:
+        return False
+
+
+def _has_rom_subdirs(d: Path) -> bool:
+    try:
+        return any(p.is_dir() and not p.name.startswith(".") and _has_roms(p) for p in d.iterdir())
     except OSError:
         return False
 
@@ -329,6 +339,11 @@ class Scanner:
         r = match(item, entries, index)
         r.chd_info = extra
         r.cached = cached
+        if item.system == "(other)":
+            # identified across several DATs: show (and use) the system the matching DAT belongs to
+            from .library import system_for_dat
+            detected = system_for_dat(r.dat) if r.dat else None
+            item.system = detected or "(other)"
         if item.kind == "chd":
             from .discdetect import check_chd
             from .systems import guess_system

@@ -23,6 +23,12 @@ Requirements (already present on this machine): `pyside6`, `mame-tools` (chdman)
 
 ## ROM Verifier (read-only)
 
+Point it at **any folder**. Sub-folders recognised as systems (`psx/`, `snes/`, … as RomM, ES-DE or Batocera
+lay them out) are checked against their own DAT. Everything else (ROMs and zip/7z/rar archives lying directly
+in the folder, game-named folders like `Blue Stinger (USA)/`, nested collections up to 3 levels deep) appears
+as **Other folders & loose files** and is identified against all your DATs at once, so no system has to be
+picked. If the folder you choose is itself a system folder (e.g. `…/gb`), its own DAT is used.
+
 1. **Manage DATs…** → *Download all missing*. Disc systems get official **Redump** DATs; cartridge systems
    get **No-Intro** DATs (libretro mirror). *Add DAT file…* imports any Logiqx / ClrMamePro DAT
    (Dat-o-Matic packs, translation DATs, …); several DATs per folder are merged.

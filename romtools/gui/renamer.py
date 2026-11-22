@@ -299,29 +299,25 @@ class RenamerWindow(QMainWindow):
         cfg, cache, idxc = self.cfg, self.cache, self.indexes
 
         def job(w: Worker):
+            from .. import library
             if not mode_dat:
-                return rn.plan_from_rules({s: root / s for s in systems}, rules), []
-            results, skipped, nodat = [], [], []
-            items, indexes = [], {}
-            for s in systems:
-                dats = cfg.system(s)["dats"]
-                if not dats:
-                    nodat.append(s)
+                return rn.plan_from_rules(library.rule_folders(cfg, root, systems), rules), []
+            results, skipped = [], []
+            items = []
+            listed, indexes = library.collect(cfg, root, systems, idxc, lambda m: w.progress.emit(0, 0, m, 0))
+            nodat = sorted({it.system for it in listed if indexes.get(it.system) is None})
+            for it in listed:
+                if indexes.get(it.system) is None or it.kind == "folder":
                     continue
-                w.progress.emit(0, 0, f"Loading DAT for {s}…", 0)
-                indexes[s] = idxc.get(dats)
-                for it in sc.enumerate_system(s, root / s):
-                    if it.kind == "folder":
-                        continue
-                    if skip_unc and it.kind == "chd":
-                        try:
-                            st = it.path.stat()
-                            if not cache.get(it.path, st.st_size, st.st_mtime):
-                                skipped.append(it)
-                                continue
-                        except OSError:
+                if skip_unc and it.kind == "chd":
+                    try:
+                        st = it.path.stat()
+                        if not cache.get(it.path, st.st_size, st.st_mtime):
+                            skipped.append(it)
                             continue
-                    items.append(it)
+                    except OSError:
+                        continue
+                items.append(it)
             scanner = sc.make_scanner(cfg, cache, sc.QUICK)
             scanner.cancel = w.cancel
             scanner.run(items, indexes, results.append, lambda d, t, m, f: w.progress.emit(d, t, m, f))

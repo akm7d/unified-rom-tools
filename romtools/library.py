@@ -1,0 +1,114 @@
+"""How a chosen folder is split into things to scan.
+
+Any folder works:
+  * sub-folders recognised as systems (psx/, snes/, ... or mapped in Manage DATs) are scanned with their own DAT;
+  * everything else - ROMs and archives lying directly in the folder, game-named folders like
+    "Blue Stinger (USA)/", download folders - goes into one "Other folders & loose files" group whose ROMs are
+    identified against ALL available DATs, so no system has to be picked.
+If the chosen folder is itself a system folder (e.g. .../roms/gb), it is used with that system's DAT.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from .config import DAT_DIR, Config
+from .datmanager import IndexCache, library_folders
+from .systems import BY_ID, CATALOG, guess_system
+
+OTHER = "(other)"                       # group key for loose files / unrecognised folders
+OTHER_LABEL = "Other folders & loose files"
+
+
+def is_system_folder(cfg: Config, name: str) -> bool:
+    s = (cfg["systems"] or {}).get(name) or {}
+    return bool(s.get("system") or s.get("dats") or guess_system(name))
+
+
+def root_system(cfg: Config, root: Path) -> str | None:
+    """The chosen folder itself is a system folder (e.g. roms/gb): its key, else None."""
+    return root.name if root.name and is_system_folder(cfg, root.name) else None
+
+
+def split(cfg: Config, root: Path) -> tuple[list[str], list[Path], list[Path]]:
+    """(system folder names, other sub-folders, loose files directly in root)."""
+    from .scanner import IGNORE_EXTS
+    systems, others = [], []
+    for name in library_folders(root):
+        (systems if is_system_folder(cfg, name) else others).append(name)
+    try:
+        loose = sorted(p for p in root.iterdir()
+                       if p.is_file() and not p.name.startswith(".") and p.suffix.lower() not in IGNORE_EXTS)
+    except OSError:
+        loose = []
+    return systems, [root / o for o in others], loose
+
+
+def other_label(cfg: Config, root: Path) -> tuple[str, str]:
+    """(label, DAT column text) for the OTHER row."""
+    rs = root_system(cfg, root)
+    if rs:
+        return f"{root.name} (this folder)", "its own DAT"
+    return OTHER_LABEL, "identified using all your DATs"
+
+
+def all_dats(cfg: Config) -> list[str]:
+    found = {str(p) for p in DAT_DIR.glob("*") if p.suffix.lower() in (".dat", ".xml", ".zip")} \
+        if DAT_DIR.is_dir() else set()
+    for s in (cfg["systems"] or {}).values():
+        found.update(d for d in (s or {}).get("dats", []) if Path(d).is_file())
+    return sorted(found)
+
+
+def system_for_dat(dat_name: str) -> str | None:
+    """Catalog id for a DAT header name ("Nintendo - Game Boy", "Sony - PlayStation")."""
+    n = dat_name.lower().strip()
+    for s in CATALOG:
+        if n in (s.ref.lower(), s.name.lower()) or n.startswith(s.ref.lower() + " ("):
+            return s.id
+    return None
+
+
+def collect(cfg: Config, root: Path, keys: list[str], index_cache: IndexCache,
+            progress: Callable[[str], None] = lambda s: None):
+    """(items, indexes) for the checked groups. Items in the OTHER group get system == OTHER."""
+    from .scanner import _items_in, enumerate_system
+    systems, others, _loose = split(cfg, root)
+    items, indexes = [], {}
+    for key in keys:
+        if key == OTHER:
+            progress("Listing loose files and other folders…")
+            items += _items_in(OTHER, root, skip_dirs=set(systems))
+            rs = root_system(cfg, root)
+            dats = (cfg["systems"].get(rs) or {}).get("dats", []) if rs else []
+            if not dats:
+                dats = all_dats(cfg)
+                if dats:
+                    progress(f"Loading all {len(dats)} DATs (first time takes a few seconds)…")
+            indexes[OTHER] = index_cache.get(dats) if dats else None
+        else:
+            progress(f"Listing {key}…")
+            items += enumerate_system(key, root / key)
+            dats = cfg.system(key)["dats"]
+            if dats:
+                progress(f"Loading DAT for {key}…")
+            indexes[key] = index_cache.get(dats)
+    return items, indexes
+
+
+def rule_folders(cfg: Config, root: Path, keys: list[str]) -> list[tuple[str, Path, set[str]]]:
+    """(key, folder, names to skip) for the Renamer's cleanup rules."""
+    systems, others, _ = split(cfg, root)
+    out = []
+    for key in keys:
+        if key == OTHER:
+            out.append((OTHER, root, set(systems)))
+            out += [(OTHER, o, set()) for o in others]
+        else:
+            out.append((key, root / key, set()))
+    return out
+
+
+__all__ = ["OTHER", "OTHER_LABEL", "split", "collect", "all_dats", "system_for_dat", "rule_folders",
+           "other_label", "is_system_folder", "root_system", "BY_ID"]

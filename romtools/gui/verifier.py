@@ -490,18 +490,18 @@ class VerifierWindow(QMainWindow):
 
         def job(w: ScanWorker):
             scanner.cancel = w.cancel
-            todo = items
-            if todo is None:
-                todo = []
-                for s in systems:
-                    w.progress.emit(0, 0, f"Listing {s}…", 0)
-                    todo += sc.enumerate_system(s, root / s)
-            indexes = {}
-            for s in sorted({it.system for it in todo}):
-                dats = cfg.system(s)["dats"]
-                if dats:
-                    w.progress.emit(0, 0, f"Loading DAT for {s}…", 0)
-                indexes[s] = indexes_cache.get(dats)
+            from .. import library
+            if items is None:
+                todo, indexes = library.collect(cfg, root, systems, indexes_cache,
+                                                lambda msg: w.progress.emit(0, 0, msg, 0))
+            else:   # re-check of selected rows: their systems may be detected ones or the "other" group
+                todo = items
+                keys = sorted({it.system for it in todo})
+                _t, indexes = library.collect(cfg, root, [k for k in keys if k == library.OTHER], indexes_cache)
+                for k in keys:
+                    if k != library.OTHER:
+                        indexes[k] = indexes_cache.get(cfg.system(k)["dats"]) if cfg.system(k)["dats"] else \
+                            indexes_cache.get(library.all_dats(cfg))
             scanner.run(todo, indexes, w.result.emit, lambda d, t, msg, f: w.progress.emit(d, t, msg, f))
             return len(todo)
 
