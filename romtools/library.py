@@ -97,6 +97,49 @@ def collect(cfg: Config, root: Path, keys: list[str], index_cache: IndexCache,
     return items, indexes
 
 
+def item_for_file(path: Path):
+    """A scan item for one picked file (ROM, archive, CHD, or a .cue/.gdi with its tracks)."""
+    from .hashing import ARCHIVE_EXTS
+    from .scanner import Item, _cue_parts, _gdi_parts
+    ext = path.suffix.lower()
+    if ext == ".chd":
+        return Item(OTHER, path, "chd")
+    if ext in ARCHIVE_EXTS:
+        return Item(OTHER, path, "archive")
+    if ext == ".cue":
+        return Item(OTHER, path, "cueset", [p for p in _cue_parts(path) if p.exists()])
+    if ext == ".gdi":
+        return Item(OTHER, path, "cueset", [p for p in _gdi_parts(path) if p.exists()])
+    return Item(OTHER, path, "file")
+
+
+def collect_paths(cfg: Config, paths: list[Path], index_cache: IndexCache,
+                  progress: Callable[[str], None] = lambda s: None):
+    """(items, indexes) for files/folders picked anywhere (Check file / Check folder / drag and drop).
+    Folders are split like a library; single files and everything outside system folders are identified
+    against all DATs."""
+    items, indexes = [], {}
+    for p in paths:
+        if p.is_dir():
+            systems, _others, _loose = split(cfg, p)
+            its, idx = collect(cfg, p, systems + [OTHER], index_cache, progress)
+            items += its
+            indexes.update({k: v for k, v in idx.items() if k != OTHER})
+        elif p.is_file():
+            items.append(item_for_file(p))
+    if any(it.system == OTHER for it in items):
+        dats = all_dats(cfg)
+        if dats:
+            progress(f"Loading all {len(dats)} DATs…")
+        indexes[OTHER] = index_cache.get(dats) if dats else None
+    seen, unique = set(), []
+    for it in items:                       # the same file picked twice, or a file inside a picked folder
+        if it.path not in seen:
+            seen.add(it.path)
+            unique.append(it)
+    return unique, indexes
+
+
 def rule_folders(cfg: Config, root: Path, keys: list[str]) -> list[tuple[str, Path, set[str]]]:
     """(key, folder, names to skip) for the Renamer's cleanup rules."""
     systems, others, _ = split(cfg, root)

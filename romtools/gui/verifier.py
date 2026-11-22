@@ -11,10 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-                               QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu,
-                               QMessageBox, QProgressBar, QPushButton, QSpinBox, QSplitter, QTableView,
-                               QTextBrowser, QToolBar, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QSplitter, QTableView, QTextBrowser, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, chd
 from .. import scanner as sc
@@ -93,7 +90,7 @@ class ResultsModel(QAbstractTableModel):
             if c == C_TAG:
                 return (r.tag + (" ✎" if r.tag_source == "marked by you" else "")) if r.tag else ""
             if c == C_SYSTEM:
-                return r.item.system
+                return "?" if r.item.system == "(other)" else r.item.system
             if c == C_FILE:
                 return r.item.path.name
             if c == C_GAME:
@@ -254,6 +251,8 @@ class VerifierWindow(QMainWindow):
         self.cfg = get_config()
         self.cache = HashCache()
         self.marks = tg.MarkStore()
+        self.targets = None
+        self.setAcceptDrops(True)
         self.indexes = IndexCache()
         self.worker: ScanWorker | None = None
         self.started = 0.0
@@ -288,8 +287,24 @@ class VerifierWindow(QMainWindow):
         act_rename.triggered.connect(self.open_renamer)
         act_settings = QAction(QIcon.fromTheme("configure"), "Settings…", self)
         act_settings.triggered.connect(lambda: (SettingsDialog(self, self.cache).exec(), self.mode.sync()))
-        for a in (self.act_scan, self.act_full, self.act_stop):
+        for a in (self.act_scan, self.act_full):
             tb.addAction(a)
+        self.check_btn = QToolButton()
+        self.check_btn.setText("Check file/folder")
+        self.check_btn.setIcon(QIcon.fromTheme("document-open"))
+        self.check_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.check_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.check_btn.setToolTip("Verify any ROM, archive or folder right away - no library or system needed.\n"
+                                  "You can also drag files or folders onto this window.")
+        cm = QMenu(self.check_btn)
+        a = cm.addAction(QIcon.fromTheme("document-open"), "ROM / archive file(s)…", self.check_files)
+        a.setShortcut(QKeySequence("Ctrl+O"))
+        a = cm.addAction(QIcon.fromTheme("folder-open"), "Folder…", self.check_folder)
+        a.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.addActions(cm.actions())          # shortcuts work without opening the menu
+        self.check_btn.setMenu(cm)
+        tb.addWidget(self.check_btn)
+        tb.addAction(self.act_stop)
         tb.addSeparator()
         self.mode = TempModeCombo(lambda: bool(self.worker and self.worker.isRunning()),
                                   lambda m: self.statusBar().showMessage(m, 8000))
@@ -458,12 +473,17 @@ class VerifierWindow(QMainWindow):
         running = bool(self.worker and self.worker.isRunning())
         self.act_fix.setEnabled(not running and any(r.media.fixable for r in wrong))
 
-    def start_scan(self, items: list[sc.Item] | None = None, mode: str = sc.QUICK):
+    def start_scan(self, items: list[sc.Item] | None = None, mode: str = sc.QUICK,
+                   targets: list[Path] | None = None):
         if self.worker and self.worker.isRunning():
+            if targets:
+                QMessageBox.information(self, "Busy", "Wait for the current scan to finish, or press Stop.")
             return
         root = self.picker.path()
         systems = self.systems.checked()
-        if items is None and not systems:
+        if targets is not None:
+            items = None
+        elif items is None and not systems:
             if mode != sc.REMEMBERED:
                 QMessageBox.information(self, "Scan", "Tick at least one system on the left.")
             return
@@ -477,9 +497,11 @@ class VerifierWindow(QMainWindow):
             box.setDefaultButton(QMessageBox.StandardButton.Cancel)
             if box.exec() != QMessageBox.StandardButton.Yes:
                 return
-        self.systems.remember()
+        if targets is None:
+            self.systems.remember()
         if items is None:
             self.model.clear()
+        self.targets = targets
         cfg = self.cfg
         scanner = sc.make_scanner(cfg, self.cache, mode)
         scanner.marks = self.marks
@@ -491,7 +513,10 @@ class VerifierWindow(QMainWindow):
         def job(w: ScanWorker):
             scanner.cancel = w.cancel
             from .. import library
-            if items is None:
+            if targets is not None:
+                todo, indexes = library.collect_paths(cfg, targets, indexes_cache,
+                                                      lambda msg: w.progress.emit(0, 0, msg, 0))
+            elif items is None:
                 todo, indexes = library.collect(cfg, root, systems, indexes_cache,
                                                 lambda msg: w.progress.emit(0, 0, msg, 0))
             else:   # re-check of selected rows: their systems may be detected ones or the "other" group
@@ -562,6 +587,9 @@ class VerifierWindow(QMainWindow):
                 msg = "Ready — run a Quick scan (F5)"
         else:
             kind = "Full scan" if self.scan_mode == sc.FULL else "Quick scan"
+            if getattr(self, "targets", None):
+                names = ", ".join(p.name for p in self.targets[:3]) + (" …" if len(self.targets) > 3 else "")
+                kind = f"Check of {names}"
             msg = (f"{kind} {'stopped' if cancelled else 'finished'} in {took}: {n} items "
                    f"({st['remembered']} from earlier scans, {st['hashed']} hashed now; {self.run_mode} mode). "
                    f"Next run uses {'RAM' if self.cfg['temp_mode'] == 'ram' else 'SSD'} mode.")
@@ -660,6 +688,38 @@ class VerifierWindow(QMainWindow):
 
     def _recheck(self, res: list[sc.Result]):
         self.start_scan([r.item for r in res], mode=sc.FULL)
+
+    # ------------------------------------------------------------------ check any file / folder
+    def check_files(self):
+        from ..hashing import ARCHIVE_EXTS
+        from ..scanner import ROM_EXTS
+        exts = " ".join(f"*{e}" for e in sorted(ROM_EXTS | ARCHIVE_EXTS))
+        start = self.cfg["window_state"].get("last_check_dir") or self.picker.path_str()
+        files, _ = QFileDialog.getOpenFileNames(self, "Check ROM / archive files", start,
+                                                f"ROMs and archives ({exts});;All files (*)")
+        if files:
+            self.check_paths([Path(f) for f in files])
+
+    def check_folder(self):
+        start = self.cfg["window_state"].get("last_check_dir") or self.picker.path_str()
+        d = QFileDialog.getExistingDirectory(self, "Check a folder (searched 3 levels deep)", start)
+        if d:
+            self.check_paths([Path(d)])
+
+    def check_paths(self, paths: list[Path]):
+        paths = [p for p in paths if p.exists()]
+        if not paths:
+            return
+        self.cfg["window_state"]["last_check_dir"] = str(paths[0] if paths[0].is_dir() else paths[0].parent)
+        self.cfg.save()
+        self.start_scan(mode=sc.QUICK, targets=paths)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls() and any(u.isLocalFile() for u in e.mimeData().urls()):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        self.check_paths([Path(u.toLocalFile()) for u in e.mimeData().urls() if u.isLocalFile()])
 
     # ------------------------------------------------------------------ hack / translation tags
     def mark(self, res: list[sc.Result], tag: str | None):

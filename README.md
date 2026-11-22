@@ -29,6 +29,9 @@ in the folder, game-named folders like `Blue Stinger (USA)/`, nested collections
 as **Other folders & loose files** and is identified against all your DATs at once, so no system has to be
 picked. If the folder you choose is itself a system folder (e.g. `…/gb`), its own DAT is used.
 
+**Check file/folder** (toolbar, `Ctrl+O` / `Ctrl+Shift+O`, or drag files and folders onto the window) verifies
+any ROM, archive or folder right away, wherever it is, without touching your library setting or ticked systems.
+
 1. **Manage DATs…** → *Download all missing*. Disc systems get official **Redump** DATs; cartridge systems
    get **No-Intro** DATs (libretro mirror). *Add DAT file…* imports any Logiqx / ClrMamePro DAT
    (Dat-o-Matic packs, translation DATs, …); several DATs per folder are merged.
