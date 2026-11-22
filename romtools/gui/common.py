@@ -23,6 +23,8 @@ STATUS_COLORS = {
     sc.PARTIAL: "#d49a1b",
     sc.BAD: "#d1452f",
     sc.UNKNOWN: "#8a6fc9",
+    sc.IDENTIFIED: "#3a9a7a",
+    sc.ATTENTION: "#e07b1f",
     sc.NODAT: "#7f8790",
     sc.ERROR: "#c2185b",
     sc.SKIPPED: "#7f8790",
@@ -35,6 +37,9 @@ STATUS_HELP = {
     sc.PARTIAL: "Some tracks/files match, others don't",
     sc.BAD: "The name is in the DAT but the data differs: bad dump, hack, trimmed or modified",
     sc.UNKNOWN: "Not in the DAT at all (hacks, translations, homebrew, or wrong system)",
+    sc.IDENTIFIED: "Console package (PS4 PKG, Switch NSP/XCI) identified from its own data - no DAT exists for these",
+    sc.ATTENTION: "Console package with a problem: an update or DLC without its game, DLC for another region, a "
+                  "duplicate or an older update",
     sc.NODAT: "No DAT loaded for this system - open Manage DATs",
     sc.ERROR: "Could not read the file",
     sc.SKIPPED: "Folders and non-game files are not checked",
@@ -337,6 +342,8 @@ class SystemList(QTreeWidget):
             dats = [d for d in s["dats"] if Path(d).is_file()]
             if dats:
                 label, icon = ", ".join(Path(d).stem for d in dats), "emblem-ok-symbolic"
+            elif f in ("ps4", "switch") or (sysdef and sysdef.id in ("ps4", "switch")):
+                label, icon = "identified from package data", "dialog-information"
             elif f in UNVERIFIABLE_HINT:
                 label, icon = "no public DAT", "dialog-information"
             elif sysdef:

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import chd, nod
+from . import chd, nod, packages
 from .cache import HashCache
 from .compat import ram_mode_supported
 from .dat import DatIndex, Game
@@ -30,7 +30,9 @@ ROM_EXTS = {".nes", ".fds", ".unf", ".sfc", ".smc", ".fig", ".swc", ".bs", ".st"
 
 VERIFIED, MISNAMED, MODIFIED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED = (
     "Verified", "Misnamed", "Modified", "Partial", "Bad dump", "Unknown", "No DAT", "Error", "Skipped")
-STATUS_ORDER = [VERIFIED, MISNAMED, MODIFIED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED]
+# console packages (PS4 PKG, Switch NSP/XCI) have no DAT: they are identified from their own metadata
+IDENTIFIED, ATTENTION = "Identified", "Check"
+STATUS_ORDER = [VERIFIED, MISNAMED, MODIFIED, IDENTIFIED, PARTIAL, ATTENTION, BAD, UNKNOWN, NODAT, ERROR, SKIPPED]
 TAGGABLE = {BAD, UNKNOWN, PARTIAL}   # statuses a hack/translation tag can replace
 
 
@@ -38,7 +40,8 @@ TAGGABLE = {BAD, UNKNOWN, PARTIAL}   # statuses a hack/translation tag can repla
 class Item:
     system: str
     path: Path                 # main file (or folder)
-    kind: str                  # file | archive | chd | disc (RVZ/CISO/... read by nodtool) | cueset | folder
+    kind: str                  # file | archive | chd | disc (RVZ/CISO/... read by nodtool) | package (PS4/Switch)
+                               # | cueset | folder
     parts: list[Path] = field(default_factory=list)  # extra files for cue/gdi sets
     member: str = ""           # one game inside a multi-game archive (its file name inside the archive)
 
@@ -153,7 +156,7 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
         if f in consumed or ext in (".cue", ".gdi") or ext in IGNORE_EXTS:
             continue
         kind = ("chd" if ext == ".chd" else "disc" if ext in nod.DISC_EXTS
-                else "archive" if ext in ARCHIVE_EXTS else "file")
+                else "package" if ext in packages.PACKAGE_EXTS else "archive" if ext in ARCHIVE_EXTS else "file")
         items.append(Item(system, f, kind))
     for d in dirs:
         if depth < MAX_DEPTH and (_has_roms(d) or _has_rom_subdirs(d)):
@@ -306,6 +309,7 @@ class Scanner:
         self.cancel = threading.Event()
         self.mode = QUICK
         self.marks = None          # tags.MarkStore; set by the caller to apply your hack marks
+        self.switch_keys: Path | None = None   # prod.keys for reading Switch packages (make_scanner sets it)
         self.stats = {"remembered": 0, "hashed": 0, "not_scanned": 0}
         self._stats_lock = threading.Lock()
 
@@ -378,6 +382,8 @@ class Scanner:
               progress: ProgressCb | None = None) -> Result | list[Result] | None:
         if item.kind == "folder":
             return Result(item, SKIPPED, note="Folder (extracted game / installed title) - not checked")
+        if item.kind == "package":
+            return self.check_package(item)
         if index is None:
             from .systems import UNVERIFIABLE_HINT
             return Result(item, NODAT, note=UNVERIFIABLE_HINT.get(item.system, "No DAT loaded for this system"))
@@ -394,6 +400,28 @@ class Scanner:
         if parts:
             return [self._finish(sub, ents, index, extra, cached) for sub, ents in parts]
         return self._finish(item, entries, index, extra, cached)
+
+    # -- console packages ------------------------------------------------
+    def check_package(self, item: Item) -> Result:
+        """PS4 PKG / Switch NSP·XCI: identified from the package's own metadata (no DAT exists). Problems that
+        only show when looking at the whole folder (update without its game, DLC for another region, duplicates,
+        older updates) come from reading the other packages next to it."""
+        try:
+            info = _package_info(item.path, self.switch_keys)
+        except packages.PackageError as exc:
+            if item.system == "(other)" and item.path.suffix.lower() in packages.SWITCH_EXTS:
+                item.system = "switch"
+            if (item.path.suffix.lower() == ".pkg" and "PS3" in str(exc)) or "prod.keys" in str(exc):
+                return Result(item, NODAT, note=str(exc))
+            return Result(item, ERROR, note=str(exc))
+        problems = _package_problems(item, info, self.switch_keys)
+        if item.system == "(other)":
+            item.system = info.platform
+        r = Result(item, ATTENTION if problems else IDENTIFIED, packages.clean_title(info.title),
+                   "PS4 package data" if info.platform == "ps4" else "Switch package data",
+                   packages.describe(info) + ("" if not problems else " ⚠ " + "; ".join(problems)))
+        r.chd_info = {"package": info.as_dict(), "problems": problems}
+        return r
 
     def _finish(self, item: Item, entries: list[Entry], index: DatIndex, extra: dict, cached: bool) -> Result:
         if item.kind == "disc":
@@ -466,7 +494,72 @@ def make_scanner(cfg, cache=None, mode: str = QUICK) -> "Scanner":
     s = Scanner(Path(cfg["tmp_dir"]), cfg["workers"], cfg["chd_workers"], cache,
                 ram_mode=cfg["temp_mode"] == "ram" and ram_mode_supported())
     s.mode = mode
+    try:
+        s.switch_keys = packages.switch_keys(cfg)
+    except Exception:  # noqa: BLE001
+        s.switch_keys = None
     return s
+
+
+# ---------------------------------------------------------------- console packages
+
+_PKG_CACHE: dict[tuple, object] = {}
+_PKG_LOCK = threading.Lock()
+
+
+def _package_info(path: Path, keys: Path | None) -> "packages.PackageInfo":
+    """Read (and remember, per size + mtime) one package's metadata. Errors are remembered too."""
+    st = path.stat()
+    key = (str(path), st.st_size, st.st_mtime, str(keys or ""))
+    with _PKG_LOCK:
+        hit = _PKG_CACHE.get(key)
+    if hit is None:
+        try:
+            hit = packages.read(path, keys)
+        except packages.PackageError as exc:
+            hit = exc
+        with _PKG_LOCK:
+            _PKG_CACHE[key] = hit
+    if isinstance(hit, Exception):
+        raise hit
+    return hit
+
+
+def _package_scope(item: Item) -> Path:
+    """The folder whose packages belong together: the system folder (e.g. roms/ps4), else the file's folder."""
+    for parent in item.path.parents:
+        if parent.name == item.system or parent.name.lower() in PACKAGE_FOLDERS:
+            return parent
+    return item.path.parent
+
+
+# folder names that hold one console's packages (they have no DAT, so they're scanned as "other" folders)
+PACKAGE_FOLDERS = {"ps4", "switch", "switch-2", "switch2", "nsw", "ns"}
+
+
+_SCOPE_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+
+def _package_problems(item: Item, info, keys: Path | None) -> list[str]:
+    """Problems for this package, from checking every package in its folder together. The folder's result is
+    reused for a minute so a scan of N packages reads the folder once, not N times."""
+    import time
+    scope = _package_scope(item)
+    ck = (str(scope), str(keys or ""))
+    with _PKG_LOCK:
+        hit = _SCOPE_CACHE.get(ck)
+    if hit is None or time.monotonic() - hit[0] > 60:
+        infos = []
+        for f in sorted(p for p in scope.rglob("*") if p.suffix.lower() in packages.PACKAGE_EXTS
+                        and len(p.relative_to(scope).parts) <= MAX_DEPTH + 1):
+            try:
+                infos.append(_package_info(f, keys))
+            except (packages.PackageError, OSError):
+                continue
+        hit = (time.monotonic(), packages.check_set(infos))
+        with _PKG_LOCK:
+            _SCOPE_CACHE[ck] = hit
+    return hit[1].get(str(item.path), [])
 
 
 def _safe_size(p: Path) -> int:

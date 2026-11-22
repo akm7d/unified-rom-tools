@@ -164,6 +164,35 @@ def selftest(report: str | None) -> int:
         return ", ".join(f"{t}: {'bundled' if p and 'tools' in p else (p or 'not installed (bundled in builds)')}"
                          for t, p in found.items())
 
+    def console_packages():
+        import struct
+        import tempfile
+        from romtools import packages as pk
+        # a minimal PS4 package: header + entry table + PARAM.SFO
+        keys = b"APP_VER\0CATEGORY\0CONTENT_ID\0TITLE\0TITLE_ID\0"
+        vals = [b"01.05\0\0\0", b"gp\0\0", b"UP0001-CUSA11111_00-TEST000000000000\0".ljust(40, b"\0"),
+                b"GAME\xe2\x84\xa2 ONE\0".ljust(12, b"\0"), b"CUSA11111\0\0\0"]
+        idx, data, ko = b"", b"", 0
+        for k, v in zip(keys.split(b"\0")[:-1], vals):
+            idx += struct.pack("<HHIII", ko, 0x204, len(v.rstrip(b"\0")) + 1, len(v), len(data))
+            ko += len(k) + 1
+            data += v
+        ks = 20 + len(idx)
+        sfo = b"\0PSF" + struct.pack("<IIII", 0x101, ks, ks + len(keys), 5) + idx + keys + data
+        head = bytearray(0x200)
+        head[:4] = b"\x7fCNT"
+        head[0x10:0x14], head[0x18:0x1C] = struct.pack(">I", 1), struct.pack(">I", 0x100)
+        head[0x100:0x118] = struct.pack(">IIIIII", 0x1000, 0, 0, 0, 0x200, len(sfo))
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "x.pkg"
+            f.write_bytes(bytes(head) + sfo)
+            i = pk.read(f)
+        assert (i.kind, i.title_id, i.version_str, i.region) == ("Update", "CUSA11111", "1.05", "USA"), i
+        name = pk.suggested_name(i, "Game One")
+        assert name == "Game One [CUSA11111] (Update v1.05)", name
+        assert pk.check_set([i])[str(f)] == ["no base game (CUSA11111) found next to this update"]
+        return f"PS4 PKG metadata, naming and checks; Switch reader {'with' if pk.switch_keys() else 'without'} keys"
+
     def theme():
         from romtools.gui.common import _captured_palette, current_theme, default_theme
         cap = _captured_palette()
@@ -191,7 +220,7 @@ def selftest(report: str | None) -> int:
         os.environ["ROMTOOLS_HOME"] = str(Path(home) / "portable")   # never touch the build's own data folder
         for label, fn in (("imports", imports), ("paths", paths), ("chdman", chdman), ("7-Zip", sevenzip),
                           ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui), ("theme", theme),
-                          ("patching", patching), ("RVZ / NSZ tools", disc_tools)):
+                          ("patching", patching), ("RVZ / NSZ tools", disc_tools), ("console packages", console_packages)):
             check(label, fn)
     lines.append("RESULT " + ("OK" if ok else "FAILED"))
     if report:

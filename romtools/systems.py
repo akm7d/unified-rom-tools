@@ -105,9 +105,10 @@ def guess_system(folder: str) -> System | None:
 
 # Systems where DATs are absent or the dumps are not plain files; we say so instead of "unknown".
 UNVERIFIABLE_HINT = {
-    "switch": "No public DAT matches NSP/XCI dumps (they are personalised). Use the renamer's cleanup rules.",
+    "switch": "No public DAT matches NSP/XCI dumps (they are personalised): they're identified from their own "
+              "data instead (title, ID, version; needs your prod.keys).",
     "switch-2": "No public DAT for Switch 2 dumps.",
-    "ps4": "PS4 PKGs have no public DAT.",
+    "ps4": "PS4 PKGs have no public DAT: they're identified from their own data (title, ID, type, version, region).",
     "ps5": "PS5 dumps have no public DAT.",
     "ps3": "PS3 folder (JB) dumps can't be compared with Redump's ISO hashes; only ISOs can.",
     "wiiu": "WUA files are Cemu archives, not disc images; only .wud/.wux/.iso match Redump.",

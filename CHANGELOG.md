@@ -3,6 +3,15 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.5.0
+- ROM Verifier: **PS4 PKG and Switch NSP/NSZ/XCI/XCZ are identified** from their own data (title, Title ID,
+  type, version, region, firmware, bundle contents) with new statuses *Identified* and *Check*. *Check* flags an
+  update/DLC without its base game, DLC for another region's version, duplicates and older updates.
+- ROM Verifier: **Check game updates** (Switch, via the public titledb) and *Look up updates online* for PS4.
+- ROM Verifier → Settings: **Switch keys** (shared by all three apps).
+- ROM Renamer: new **Console packages** tab (names from package data, optional one folder per game; undoable,
+  including the moves).
+
 ## 1.4.1
 - Fix: running from the source folder (the `./install.sh` menu launchers), RVZ/CISO files showed *Error*
   ("nodtool not found") because nodtool, nsz and xdelta3 only came with the packaged builds. `./install.sh` now

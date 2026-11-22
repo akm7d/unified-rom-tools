@@ -34,6 +34,9 @@ def media_text(r: sc.Result) -> str:
         return ("⚠ " if not r.media.ok else "") + r.media.label
     if r.chd_info and "disc" in r.chd_info:      # RVZ/CISO/... read with nodtool
         return str(r.chd_info["disc"].get("container", "")).upper()
+    if r.chd_info and "package" in r.chd_info:   # PS4 PKG / Switch NSP·XCI
+        p = r.chd_info["package"]
+        return f"{'PS4' if p.get('platform') == 'ps4' else 'Switch'} · {p.get('kind', '')}"
     kind = r.chd_info.get("kind", "") if r.chd_info else ""
     return kind.upper()
 
@@ -221,6 +224,18 @@ class SettingsDialog(QDialog):
         tmprow = QHBoxLayout()
         tmprow.addWidget(self.tmp, 1)
         tmprow.addWidget(browse)
+        from .. import packages as _pk
+        self.keys = QLineEdit(str(_pk.switch_keys(cfg) or ""))
+        self.keys.setPlaceholderText("your prod.keys (to read Switch NSP / XCI names and versions)")
+        self.keys.setToolTip("Your own console keys. Used to read Switch packages' titles, IDs and versions (and by "
+                             "ROM Optimizer for NSZ). Only read, never copied.")
+        kbrowse = QPushButton("Browse…")
+        kbrowse.clicked.connect(lambda: (f := QFileDialog.getOpenFileName(
+            self, "Switch keys", self.keys.text(), "Keys (prod.keys keys.txt);;All files (*)")[0])
+            and self.keys.setText(f))
+        keyrow = QHBoxLayout()
+        keyrow.addWidget(self.keys, 1)
+        keyrow.addWidget(kbrowse)
         clear = QPushButton(QIcon.fromTheme("edit-clear-history"), "Forget all remembered scans")
         clear.setToolTip("Deletes the stored hashes. The next Quick scan will re-hash everything.")
         clear.clicked.connect(self._forget)
@@ -233,6 +248,7 @@ class SettingsDialog(QDialog):
         form.addRow("", QLabel("<small>" + ("Only used in SSD mode (RAM mode streams through /dev/shm). "
                                              if ram_mode_supported() else "Used for unpacking CHDs. ") +
                                "PS2 DVDs need up to ~9 GB each here.</small>"))
+        form.addRow("Switch keys:", keyrow)
         form.addRow("Remembered scans:", clear)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
@@ -252,6 +268,11 @@ class SettingsDialog(QDialog):
         cfg["workers"], cfg["chd_workers"] = self.workers.value(), self.chd.value()
         from ..compat import default_tmp_dir
         cfg["tmp_dir"] = self.tmp.text().strip() or default_tmp_dir()
+        k = self.keys.text().strip()
+        if k and not Path(k).is_file():
+            QMessageBox.warning(self, "Switch keys", f"{k} doesn't exist.")
+            return
+        cfg["switch_keys"] = k
         cfg.save()
         super().accept()
 
@@ -328,7 +349,12 @@ class VerifierWindow(QMainWindow):
                                 "or every fixable one if none are selected. Originals go to the trash.")
         self.act_fix.setEnabled(False)
         self.act_fix.triggered.connect(lambda: self.fix_media(self._fix_candidates()))
-        for a in (self.act_fix, act_dats, act_export, act_rename, act_settings):
+        self.act_updates = QAction(QIcon.fromTheme("system-software-update"), "Check game updates", self)
+        self.act_updates.setToolTip("Switch: compare your updates with the newest official version (public title "
+                                    "database, downloaded once a day).\nPS4: right-click a package → Look up "
+                                    "updates online.")
+        self.act_updates.triggered.connect(self.check_updates)
+        for a in (self.act_fix, self.act_updates, act_dats, act_export, act_rename, act_settings):
             tb.addAction(a)
         tb.addWidget(ThemeButton(self))
 
@@ -645,6 +671,25 @@ class VerifierWindow(QMainWindow):
                        f"{', ' + e(d['title']) if d.get('title') else ''}"
                        f"{' (' + e(d['game_id']) + ')' if d.get('game_id') else ''}, "
                        f"disc SHA-1 {e(d.get('sha1', ''))} <small>(read with nodtool)</small></p>")
+        elif r.chd_info and "package" in r.chd_info:
+            p = r.chd_info["package"]
+            rows = [("Title", p.get("title")), ("Type", p.get("kind")), ("Title ID", p.get("title_id")),
+                    ("Base game ID", p.get("base_id") if p.get("base_id") != p.get("title_id") else ""),
+                    ("Version", p.get("version_str")), ("Display version", p.get("display_version")),
+                    ("Region", p.get("region")), ("Content ID", p.get("content_id")),
+                    ("Needs firmware", p.get("firmware")), ("Backport", "yes" if p.get("backport") else ""),
+                    ("Note", p.get("note"))]
+            out.append("<p><b>Package:</b><br>" + "<br>".join(f"&nbsp;&nbsp;{k}: {e(str(v))}" for k, v in rows if v)
+                       + "</p>")
+            if len(p.get("contents", [])) > 1:
+                out.append("<p><b>Inside:</b><br>" + "<br>".join(
+                    f"&nbsp;&nbsp;{e(c['kind'])} {e(c['title_id'])} {e(c['version_str'])}"
+                    f"{' (' + e(c['display_version']) + ')' if c.get('display_version') else ''}"
+                    for c in p["contents"]) + "</p>")
+            if r.chd_info.get("update"):
+                out.append(f"<p><b>Updates:</b> {e(r.chd_info['update'])}</p>")
+            for msg in r.chd_info.get("problems", []):
+                out.append(f"<p style='color:{STATUS_COLORS[sc.ATTENTION]}'>⚠ {e(msg)}</p>")
         elif r.chd_info:
             out.append(f"<p><b>CHD:</b> v{r.chd_info.get('version')} {e(str(r.chd_info.get('kind', '')).upper())}, "
                        f"SHA-1 {e(r.chd_info.get('sha1', ''))}</p>")
@@ -702,6 +747,13 @@ class VerifierWindow(QMainWindow):
         tagm.addSeparator()
         tagm.addAction("Not modified (remove tag)", lambda: self.mark(res, ""))
         tagm.addAction("Automatic (tag from file name)", lambda: self.mark(res, None))
+        ps4 = [r for r in res if r.chd_info and r.chd_info.get("package", {}).get("platform") == "ps4"]
+        if ps4:
+            from .. import updates as up
+            ids = sorted({r.chd_info["package"]["title_id"] for r in ps4})[:5]
+            m.addSeparator()
+            m.addAction(QIcon.fromTheme("internet-web-browser"), "Look up updates online (orbispatches.com)",
+                        lambda: [QDesktopServices.openUrl(QUrl(up.ps4_patch_page(t))) for t in ids])
         fixable = [r for r in res if r.media_wrong and r.media.fixable]
         if fixable:
             m.addSeparator()
@@ -709,6 +761,55 @@ class VerifierWindow(QMainWindow):
                             f"Fix CHD type of {len(fixable)} selected…", lambda: self.fix_media(fixable))
             a.setEnabled(not (self.worker and self.worker.isRunning()))
         m.exec(self.table.viewport().mapToGlobal(pos))
+
+    # ------------------------------------------------------------------ game updates (Switch)
+    def check_updates(self):
+        sw = [r for r in self.model.rows if r.chd_info and r.chd_info.get("package", {}).get("platform") == "switch"]
+        ps4 = [r for r in self.model.rows if r.chd_info and r.chd_info.get("package", {}).get("platform") == "ps4"]
+        if not sw:
+            QMessageBox.information(self, "Game updates", "Scan your Switch folder first (with your Switch keys set "
+                                    "in Settings)." + ("\n\nFor PS4 games, right-click a package → Look up updates "
+                                                       "online." if ps4 else ""))
+            return
+        from .. import updates as up
+        self.act_updates.setEnabled(False)
+        self.statusBar().showMessage("Getting the Switch title database (once a day, ~1.7 MB)…")
+        w = Worker(lambda _w: up.switch_versions(), parent=self)
+        w.done.connect(lambda db: self._show_updates(sw, db))
+        w.failed.connect(lambda e: (self.act_updates.setEnabled(True),
+                                    QMessageBox.warning(self, "Game updates", f"Couldn't get the title database:\n{e}")))
+        self._upd_worker = w
+        w.start()
+
+    def _show_updates(self, rows: list[sc.Result], db: dict):
+        from .. import updates as up
+        self.act_updates.setEnabled(True)
+        have: dict[str, int] = {}          # base id -> newest update version you have
+        for r in rows:
+            p = r.chd_info["package"]
+            for c in p.get("contents", []):
+                if c["kind"] == "Update":
+                    have[p["base_id"]] = max(have.get(p["base_id"], 0), c["version"])
+        newer = 0
+        for r in rows:
+            p = r.chd_info["package"]
+            latest = up.switch_latest(p["base_id"], db)
+            mine = have.get(p["base_id"], 0)
+            if latest is None:
+                msg = "no update information for this title"
+            elif latest.version > mine:
+                msg = (f"⬆ update v{latest.version} ({latest.date}) available - you have "
+                       f"{'v' + str(mine) if mine else 'no update'}")
+                newer += 1
+            else:
+                msg = f"✔ newest update (v{latest.version}, {latest.date})"
+            r.chd_info["update"] = msg
+            r.note = r.note.split("  ⟶ ")[0] + "  ⟶ " + msg
+        self.model.dataChanged.emit(self.model.index(0, 0),
+                                    self.model.index(len(self.model.rows) - 1, len(COLS) - 1))
+        games = len({r.chd_info["package"]["base_id"] for r in rows})
+        self.statusBar().showMessage(f"Game updates: checked {games} Switch game(s); {newer} file(s) have a newer "
+                                     f"update available (see Notes).", 15000)
 
     def _recheck(self, res: list[sc.Result]):
         import dataclasses

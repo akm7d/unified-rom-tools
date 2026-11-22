@@ -33,6 +33,7 @@ class Op:
     enabled: bool = True
     problem: str = ""
     system: str = ""
+    move: bool = False          # may go to another folder (console packages: one folder per game)
 
     @property
     def ok(self) -> bool:
@@ -202,7 +203,7 @@ def validate(ops: list[Op]) -> list[Op]:
         name = op.dst.name
         if not name or name in (".", "..") or INVALID.search(name):
             op.problem = "invalid name"
-        elif op.dst.parent != op.src.parent:
+        elif op.dst.parent != op.src.parent and not op.move:
             op.problem = "must stay in the same folder"
         elif len(name.encode()) > 255:
             op.problem = "name too long"
@@ -223,6 +224,85 @@ def validate(ops: list[Op]) -> list[Op]:
     return ops
 
 
+# ---------------------------------------------------------------- console packages
+
+def plan_packages(folders: list[tuple], keys: Path | None, rename: bool = True,
+                  organize: bool = False, only_multi: bool = True, progress=None) -> tuple[list[Op], list[str]]:
+    """Names for PS4 PKGs and Switch NSP/XCI from their own metadata, and (optionally) one folder per game
+    holding its base game, updates and DLC. Returns (ops, notes)."""
+    from . import packages as pk
+    from .scanner import MAX_DEPTH, _package_info
+    ops: list[Op] = []
+    notes: list[str] = []
+    seen: set[Path] = set()          # a file is planned once even if two listed folders contain it
+    for entry in folders:            # (key, folder) or (key, folder, sub-folder names to skip)
+        key, folder = entry[0], entry[1]
+        skip = entry[2] if len(entry) > 2 else set()
+        if not folder.is_dir():
+            continue
+        files = sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in pk.PACKAGE_EXTS
+                       and len(p.relative_to(folder).parts) <= MAX_DEPTH + 1
+                       and p.relative_to(folder).parts[0] not in skip and p not in seen)
+        seen.update(files)
+        infos: list[tuple[Path, pk.PackageInfo]] = []
+        unread = 0
+        for f in files:
+            if progress:
+                progress(f"Reading {f.name}")
+            try:
+                infos.append((f, _package_info(f, keys)))
+            except (pk.PackageError, OSError):
+                unread += 1
+        if unread:
+            notes.append(f"{key}: {unread} package(s) couldn't be read" +
+                         (" (set your Switch keys in ROM Verifier → Settings)" if not keys else ""))
+        groups: dict[tuple, list[tuple[Path, pk.PackageInfo]]] = {}
+        for f, i in infos:
+            groups.setdefault((i.platform, i.base_id), []).append((f, i))
+        for (_plat, base_id), members in groups.items():
+            game = next(((f, i) for f, i in members if i.kind.startswith(pk.GAME)), None)
+            # keep the title the library already uses for this game ("Bloodborne - Game of the Year Edition")
+            base_title, base_sfo = "", ""
+            if game:
+                gf, gi = game
+                base_sfo = gi.title
+                m = re.match(rf"(.+?)\s*\[{re.escape(gi.title_id)}\]", gf.stem, re.I)
+                base_title = m.group(1).strip() if m else pk.clean_title(gi.title)
+            target_dir = None
+            if organize and (len(members) > 1 or not only_multi):
+                parents = [f.parent for f, _ in members if f.parent != folder]
+                if parents:
+                    target_dir = max(set(parents), key=parents.count)     # the game's folder you already have
+                else:
+                    title = base_title or pk.clean_title(members[0][1].title)
+                    target_dir = folder / CIFS_UNSAFE.sub("", title).strip(" .")
+            for f, i in members:
+                new_name = f.name
+                if rename:
+                    own_title = base_title
+                    if not own_title:      # update / DLC without its game: keep its own title part if it has one
+                        m = re.match(rf"(.+?)\s*\[{re.escape(i.title_id)}\]", f.stem, re.I)
+                        own_title = m.group(1).strip() if m else ""
+                    stem = pk.suggested_name(i, own_title, base_sfo)
+                    new_name = CIFS_UNSAFE.sub("", stem).strip() + f.suffix.lower()
+                    low = f.name.lower()
+                    if i.platform == "switch" and f"[{i.title_id.lower()}]" in low and f"[v{i.version}]" in low:
+                        new_name = f.name       # already has the right ID and version: keep your wording
+                    elif re.sub(r"[^a-z0-9]", "", new_name.lower()) == re.sub(r"[^a-z0-9]", "", low):
+                        new_name = f.name       # only punctuation would change
+                dst_dir = target_dir or f.parent
+                dst = dst_dir / new_name
+                if dst == f:
+                    continue
+                why = []
+                if new_name != f.name:
+                    why.append(f"{'PS4' if i.platform == 'ps4' else 'Switch'} {i.kind} {i.title_id}")
+                if dst_dir != f.parent:
+                    why.append(f"into {dst_dir.name}/")
+                ops.append(Op(f, dst, " · ".join(why), system=key, move=dst_dir != f.parent))
+    return ops, notes
+
+
 # ---------------------------------------------------------------- apply / undo
 
 @dataclass
@@ -233,6 +313,7 @@ class JournalEntry:
     old_text: str | None = None
     new_text: str | None = None
     done: bool = False
+    made_dir: str | None = None   # folder created for this move (removed again by undo if empty)
 
 
 def _rename(src: Path, dst: Path) -> None:
@@ -280,6 +361,9 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
         try:
             src, dst = Path(e.src), Path(e.dst)
             if e.kind == FILE:
+                if not dst.parent.exists():
+                    dst.parent.mkdir(parents=True)
+                    e.made_dir = str(dst.parent)
                 _rename(src, dst)
                 if cache:
                     cache.rename(src, dst)
@@ -333,6 +417,12 @@ def undo(jpath: Path, cache=None) -> list[str]:
             e.done = False
         except OSError as exc:
             errors.append(f"{dst.name}: {exc}")
+    for e in entries:                       # folders made for moves: remove them once they're empty again
+        if e.made_dir:
+            try:
+                Path(e.made_dir).rmdir()
+            except OSError:
+                pass
     data["undone"] = not errors
     data["entries"] = [asdict(e) for e in entries]
     jpath.write_text(json.dumps(data, indent=1), encoding="utf-8")

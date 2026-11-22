@@ -284,7 +284,7 @@ class BatchTab(QWidget):
             flags.addWidget(w)
         g.addRow("Safety:", flags)
         from .. import tasks as _tasks
-        self.keys = QLineEdit(saved.get("switch_keys") or str(
+        self.keys = QLineEdit(get_config()["switch_keys"] or saved.get("switch_keys") or str(
             _tasks.find_switch_keys([Path(get_config()["library_root"])]) or ""))
         self.keys.setPlaceholderText("your prod.keys (needed for NSZ)")
         self.keys.setToolTip("NSZ needs your own console keys (prod.keys). They're only passed to nsz, never copied.")
@@ -459,6 +459,8 @@ class BatchTab(QWidget):
             "dvd_codec": o.dvd_codec, "custom_codec": o.custom_codec, "hunk": o.hunk_size, "iso_mode": o.iso_as,
             "split_bin": o.split_bin, "verify_after": o.verify_after, "parallel": self.parallel.value(),
             "procs": o.processors, "switch_keys": o.switch_keys}
+        if o.switch_keys and Path(o.switch_keys).is_file():
+            cfg["switch_keys"] = o.switch_keys      # shared with ROM Verifier / Renamer (reading Switch packages)
         cfg.save()
 
     # -------------------------------------------------------------- queue

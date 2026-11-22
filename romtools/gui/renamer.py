@@ -207,6 +207,26 @@ class RenamerWindow(QMainWindow):
         rg.addWidget(fbox, 1)
         self.tabs.addTab(rules_tab, QIcon.fromTheme("tools"), "Cleanup rules")
 
+        pkg_tab = QWidget()
+        pl = QVBoxLayout(pkg_tab)
+        pinfo = QLabel("Names <b>PS4 PKGs</b> and <b>Switch NSP / NSZ / XCI / XCZ</b> from their own data: "
+                       "“Title [CUSA00000]”, “… (Update v1.09)”, “… (DLC - Name)”, and for Switch "
+                       "“Title [0100…][v0]”. Titles you already use for a game are kept. Switch packages need "
+                       "your prod.keys (ROM Verifier → Settings).")
+        pinfo.setWordWrap(True)
+        self.p_rename = QCheckBox("Rename from the package data")
+        self.p_rename.setChecked(True)
+        self.p_org = QCheckBox("Put each game's base game, updates and DLC into one folder (your existing game "
+                               "folder if there is one)")
+        self.p_multi = QCheckBox("…only for games with more than one file")
+        self.p_multi.setChecked(True)
+        self.p_org.toggled.connect(self.p_multi.setEnabled)
+        self.p_multi.setEnabled(False)
+        for w in (pinfo, self.p_rename, self.p_org, self.p_multi):
+            pl.addWidget(w)
+        pl.addStretch(1)
+        self.tabs.addTab(pkg_tab, QIcon.fromTheme("package-x-generic"), "Console packages")
+
         # ---- preview table
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["", "System", "Current name", "New name (double-click to edit)",
@@ -292,6 +312,8 @@ class RenamerWindow(QMainWindow):
             return
         self.systems.remember()
         mode_dat = self.tabs.currentIndex() == 0
+        mode_pkg = self.tabs.currentIndex() == 2
+        p_opts = (self.p_rename.isChecked(), self.p_org.isChecked(), self.p_multi.isChecked())
         self.cfg["rename_use_dat_ext"] = self.use_dat_ext.isChecked()
         self.cfg.save()
         rules = self._rules()
@@ -300,6 +322,11 @@ class RenamerWindow(QMainWindow):
 
         def job(w: Worker):
             from .. import library
+            if mode_pkg:
+                from .. import packages as pk
+                folders = library.rule_folders(cfg, root, systems)
+                return rn.plan_packages(folders, pk.switch_keys(cfg), *p_opts,
+                                        progress=lambda m: w.progress.emit(0, 0, m, 0))
             if not mode_dat:
                 return rn.plan_from_rules(library.rule_folders(cfg, root, systems), rules), []
             results, skipped = [], []
@@ -372,11 +399,17 @@ class RenamerWindow(QMainWindow):
             chk.setCheckState(Qt.CheckState.Checked if op.enabled else Qt.CheckState.Unchecked)
             self.table.setItem(r, C_ON, chk)
             for c, text in ((C_SYS, op.system or op.src.parent.name), (C_OLD, op.src.name), (C_WHY, op.reason)):
+                if c == C_OLD and op.move:
+                    text = f"{op.src.parent.name}/{op.src.name}"
                 it = QTableWidgetItem(text)
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 it.setToolTip(str(op.src) if c == C_OLD else text)
                 self.table.setItem(r, c, it)
             new = QTableWidgetItem(op.dst.name)
+            if op.move:
+                new.setToolTip(f"moves to {op.dst.parent}")
+                new.setText(f"{op.dst.name}")
+                new.setData(Qt.ItemDataRole.UserRole, str(op.dst.parent))
             if op.kind == rn.M3U_EDIT:
                 new.setFlags(new.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 new.setToolTip("Playlist contents:\n" + (op.new_text or ""))
@@ -396,7 +429,7 @@ class RenamerWindow(QMainWindow):
         if item.column() == C_ON:
             op.enabled = item.checkState() == Qt.CheckState.Checked
         elif item.column() == C_NEW:
-            op.dst = op.src.with_name(item.text().strip())
+            op.dst = op.dst.with_name(item.text().strip())
             op.enabled = True
         else:
             return

@@ -38,6 +38,16 @@ any ROM, archive or folder right away, wherever it is, without touching your lib
 them: the bundled `nodtool` decompresses the image in memory (nothing is written to disk) and its SHA-1 is
 compared with the Redump entry for the plain `.iso`. WBFS files are scrubbed when made, so they can't match.
 
+**Console packages** (PS4 `.pkg`, Switch `.nsp` / `.nsz` / `.xci` / `.xcz`) have no DAT, so they are
+**Identified** from their own data instead of hashed (only headers are read, so it takes milliseconds): title,
+Title ID, Game / Update / DLC (and what a Switch bundle contains), version and display version, region,
+content ID, required firmware, backport. Looking at the whole folder together, packages are marked **Check**
+when an update or DLC has no base game, DLC is for another region's version of your game, a file is a
+duplicate, or an update is older than another one you have. Switch packages need your own `prod.keys`
+(*Settings → Switch keys*; shared with ROM Optimizer). **Check game updates** compares your Switch updates with
+the newest official version from the public, key-free title database (github.com/blawar/titledb, fetched at
+most once a day); for PS4, right-click a package → *Look up updates online* opens its patch page.
+
 1. **Manage DATs…** → *Download all missing*. Disc systems get official **Redump** DATs; cartridge systems
    get **No-Intro** DATs (libretro mirror). *Add DAT file…* imports any Logiqx / ClrMamePro DAT
    (Dat-o-Matic packs, translation DATs, …); several DATs per folder are merged.
@@ -110,6 +120,14 @@ items → same name, invalid name) are flagged and never applied. **`.m3u` playl
 discs are renamed (and renamed themselves when all of their discs are). Nothing changes until **Apply**;
 existing files are never overwritten. Every batch is journaled in `~/.local/share/romtools/rename-journal/`
 and can be reverted from **History / Undo**.
+
+**Console packages** tab: names PS4 PKGs and Switch packages from their own data, in the library's style:
+`Title [CUSA00000]`, `Title [CUSA00000] (Update v1.09)`, `Title [CUSA00000] (DLC - Name)`, and for Switch
+`Title [0100…][v0]` (bundles add `(+Update v…)` / `(+2 DLC)`). The title you already use for a game is kept,
+release-group prefixes, ™ and full-width colons go, and names that only differ in punctuation are left alone.
+Optionally **puts each game's base game, updates and DLC into one folder** (your existing game folder if
+there is one; only for games with more than one file by default). Moves are undoable too; folders created
+for them are removed again by Undo.
 
 ## ROM Optimizer (formerly ROM Converter)
 
