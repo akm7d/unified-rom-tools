@@ -3,6 +3,13 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.7.0
+- **Title keys**: a `title.keys` setting (ROM Verifier → Settings, ROM Optimizer → Options), shared by all apps. Used
+  to read Switch packages without a ticket and passed to nstool for RomFS / ExeFS extraction.
+- ROM Optimizer asks you to **locate prod.keys / title.keys** when a Switch task needs one that isn't set (and
+  saves it for all apps); games that still lack a title key are skipped with the reason.
+- ROM Verifier offers to **download missing DATs** when a Quick or Full scan includes systems without one.
+
 ## 1.6.1
 - Fix: Switch RomFS / ExeFS extraction asked nstool for partition "/0" instead of "/0/" and failed with "Failed to
   extract virtual path". The output folder is created first, and if a part still comes out empty the log now

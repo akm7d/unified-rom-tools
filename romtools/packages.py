@@ -132,16 +132,29 @@ def read_ps4(path: Path) -> PackageInfo:
 # ============================================================================ Switch
 
 class _Keys:
-    def __init__(self, path: Path | None):
+    def __init__(self, path: Path | None, title_path: Path | None | bool = True):
         self.k: dict[str, bytes] = {}
-        if path and Path(path).is_file():
-            for line in Path(path).read_text(errors="replace").splitlines():
-                if "=" in line:
-                    name, val = line.split("=", 1)
-                    try:
-                        self.k[name.strip().lower()] = bytes.fromhex(val.strip())
-                    except ValueError:
-                        pass
+        self.titles: dict[str, bytes] = {}      # rights ID -> title key (as stored in tickets, titlekek-encrypted)
+        self._load(path, self.k)
+        if title_path is True:                  # default: the title.keys set in the settings, if any
+            try:
+                title_path = title_keys()
+            except Exception:  # noqa: BLE001
+                title_path = None
+        self._load(title_path or None, self.titles)
+
+    @staticmethod
+    def _load(path, into: dict) -> None:
+        if not path or not Path(path).is_file():
+            return
+        for line in Path(path).read_text(errors="replace").splitlines():
+            sep = "=" if "=" in line else "," if "," in line else None
+            if sep:
+                name, val = line.split(sep, 1)
+                try:
+                    into[name.strip().lower()] = bytes.fromhex(val.strip())
+                except ValueError:
+                    pass
 
     def get(self, name: str) -> bytes | None:
         return self.k.get(name)
@@ -230,9 +243,13 @@ class _Nca:
         rights = hd[0x230:0x240]
         if any(rights):
             tik = f"{rights.hex()}.tik"
-            if tik not in cont.files:
-                raise PackageError("title key ticket missing")
-            enc = cont.read(tik, 0x180, 16)
+            if tik in cont.files:
+                enc = cont.read(tik, 0x180, 16)
+            elif rights.hex() in keys.titles:
+                enc = keys.titles[rights.hex()]
+            else:
+                raise PackageError(f"needs the title key for rights ID {rights.hex()} (no ticket in the package) - "
+                                   f"set your title.keys")
             kek = keys.get(f"titlekek_{idx:02x}")
             if not kek:
                 raise PackageError(f"prod.keys has no titlekek_{idx:02x}")
@@ -456,6 +473,32 @@ def switch_layout(path: Path, keys_path: Path | None) -> list[TitleLayout]:
         c.close()
 
 
+def nca_rights_id(container_path: Path, nca: str, keys_path: Path | None) -> str:
+    """The NCA's rights ID (hex) if its content is title-key encrypted, else ""."""
+    keys = _Keys(keys_path, title_path=None)
+    hk = keys.get("header_key")
+    if not hk:
+        raise PackageError("needs your prod.keys")
+    Cipher, algorithms, modes = _aes()
+    c = _Container(container_path)
+    try:
+        raw = c.read(nca, 0, 0x400)
+    finally:
+        c.close()
+    hd = b""
+    for i in range(2):
+        d = Cipher(algorithms.AES(hk), modes.XTS(i.to_bytes(16, "big"))).decryptor()
+        hd += d.update(raw[i * 0x200:(i + 1) * 0x200]) + d.finalize()
+    r = hd[0x230:0x240]
+    return r.hex() if any(r) else ""
+
+
+def title_key_known(rights_id: str, tickets_in_package: list[str]) -> bool:
+    if not rights_id or f"{rights_id}.tik" in tickets_in_package:
+        return True
+    return rights_id in _Keys(None).titles
+
+
 def nca_sections(container_path: Path, nca: str, keys_path: Path | None) -> list[tuple[int, int, int]]:
     """(index, fs type 0=RomFS 1=PartitionFS, encryption type) for each section of an NCA inside a package."""
     keys = _Keys(keys_path)
@@ -506,6 +549,13 @@ def read(path: Path, keys_path: Path | None = None) -> PackageInfo:
     except (OSError, struct.error, ValueError, IndexError, KeyError) as exc:
         raise PackageError(f"couldn't read the package: {exc}") from exc
     raise PackageError("not a console package")
+
+
+def title_keys(cfg=None) -> Path | None:
+    """Your title.keys (title keys for content whose package has no ticket), if set."""
+    from .config import get_config
+    p = (cfg or get_config())["title_keys"]
+    return Path(p) if p and Path(p).is_file() else None
 
 
 def switch_keys(cfg=None) -> Path | None:

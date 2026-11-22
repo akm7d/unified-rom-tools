@@ -510,7 +510,7 @@ _PKG_LOCK = threading.Lock()
 def _package_info(path: Path, keys: Path | None) -> "packages.PackageInfo":
     """Read (and remember, per size + mtime) one package's metadata. Errors are remembered too."""
     st = path.stat()
-    key = (str(path), st.st_size, st.st_mtime, str(keys or ""))
+    key = (str(path), st.st_size, st.st_mtime, str(keys or ""), str(packages.title_keys() or ""))
     with _PKG_LOCK:
         hit = _PKG_CACHE.get(key)
     if hit is None:

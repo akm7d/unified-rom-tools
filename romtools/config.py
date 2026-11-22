@@ -74,6 +74,7 @@ DEFAULTS = {
     "systems": {},
     "rename_use_dat_ext": False,
     "switch_keys": "",               # your prod.keys: reads Switch packages (all apps) and NSZ conversion
+    "title_keys": "",                # your title.keys: title keys for Switch content whose package has no ticket
     "theme": "",                     # "" = platform default (dark on Windows, follow system on Linux)
     "window_state": {},
 }

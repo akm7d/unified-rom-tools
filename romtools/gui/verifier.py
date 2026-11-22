@@ -236,6 +236,17 @@ class SettingsDialog(QDialog):
         keyrow = QHBoxLayout()
         keyrow.addWidget(self.keys, 1)
         keyrow.addWidget(kbrowse)
+        self.tkeys = QLineEdit(str(_pk.title_keys(cfg) or ""))
+        self.tkeys.setPlaceholderText("your title.keys (optional: for packages without a ticket)")
+        self.tkeys.setToolTip("Title keys (rights ID = key, hactool/nstool format). Only needed for Switch content "
+                              "whose package has no ticket. Shared with ROM Optimizer.")
+        tbrowse = QPushButton("Browse…")
+        tbrowse.clicked.connect(lambda: (f := QFileDialog.getOpenFileName(
+            self, "Title keys", self.tkeys.text(), "Title keys (title.keys);;All files (*)")[0])
+            and self.tkeys.setText(f))
+        tkeyrow = QHBoxLayout()
+        tkeyrow.addWidget(self.tkeys, 1)
+        tkeyrow.addWidget(tbrowse)
         clear = QPushButton(QIcon.fromTheme("edit-clear-history"), "Forget all remembered scans")
         clear.setToolTip("Deletes the stored hashes. The next Quick scan will re-hash everything.")
         clear.clicked.connect(self._forget)
@@ -248,7 +259,8 @@ class SettingsDialog(QDialog):
         form.addRow("", QLabel("<small>" + ("Only used in SSD mode (RAM mode streams through /dev/shm). "
                                              if ram_mode_supported() else "Used for unpacking CHDs. ") +
                                "PS2 DVDs need up to ~9 GB each here.</small>"))
-        form.addRow("Switch keys:", keyrow)
+        form.addRow("Switch prod.keys:", keyrow)
+        form.addRow("Switch title.keys:", tkeyrow)
         form.addRow("Remembered scans:", clear)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
@@ -268,11 +280,12 @@ class SettingsDialog(QDialog):
         cfg["workers"], cfg["chd_workers"] = self.workers.value(), self.chd.value()
         from ..compat import default_tmp_dir
         cfg["tmp_dir"] = self.tmp.text().strip() or default_tmp_dir()
-        k = self.keys.text().strip()
-        if k and not Path(k).is_file():
-            QMessageBox.warning(self, "Switch keys", f"{k} doesn't exist.")
-            return
-        cfg["switch_keys"] = k
+        k, t = self.keys.text().strip(), self.tkeys.text().strip()
+        for path, what in ((k, "prod.keys"), (t, "title.keys")):
+            if path and not Path(path).is_file():
+                QMessageBox.warning(self, "Switch keys", f"{what}: {path} doesn't exist.")
+                return
+        cfg["switch_keys"], cfg["title_keys"] = k, t
         cfg.save()
         super().accept()
 
@@ -536,6 +549,9 @@ class VerifierWindow(QMainWindow):
             box.setDefaultButton(QMessageBox.StandardButton.Cancel)
             if box.exec() != QMessageBox.StandardButton.Yes:
                 return
+        if targets is None and items is None and mode in (sc.QUICK, sc.FULL) \
+                and self._offer_missing_dats(systems, mode):
+            return                      # downloading first; the scan starts when that's done
         if targets is None:
             self.systems.remember()
         if items is None:
@@ -579,6 +595,83 @@ class VerifierWindow(QMainWindow):
         self.started = time.monotonic()
         self._set_running(True)
         self.worker.start()
+
+    def _offer_missing_dats(self, systems: list[str], mode: str) -> bool:
+        """Ticked systems whose DAT isn't downloaded yet: offer to get them before scanning.
+        Returns True when downloads were started (the scan restarts after them)."""
+        from .. import library
+        from ..datmanager import system_for
+        from ..systems import UNVERIFIABLE_HINT
+        cfg = self.cfg
+        declined = set(cfg["window_state"].get("dat_prompt_declined", []))
+        missing = []
+        for f in systems:
+            if f == library.OTHER or f in UNVERIFIABLE_HINT or f in declined:
+                continue
+            if any(Path(d).is_file() for d in cfg.system(f)["dats"]):
+                continue
+            sysdef = system_for(cfg, f)
+            if sysdef and sysdef.url:
+                missing.append((f, sysdef))
+        if not missing:
+            return False
+        box = QMessageBox(QMessageBox.Icon.Question, "Missing DATs",
+                          f"{len(missing)} ticked system(s) have no DAT yet, so their ROMs can't be verified:",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        box.setInformativeText("\n".join(f"• {f}  ({d.name})" for f, d in missing) +
+                               "\n\nDownload them now? (No-Intro / Redump, a few seconds each)")
+        box.button(QMessageBox.StandardButton.Yes).setText("Download and scan")
+        box.button(QMessageBox.StandardButton.No).setText("Scan without them")
+        dont = QCheckBox("Don't ask again for these systems")
+        box.setCheckBox(dont)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            if dont.isChecked():
+                cfg["window_state"]["dat_prompt_declined"] = sorted(declined | {f for f, _ in missing})
+                cfg.save()
+            return False
+        from ..datmanager import download
+        from ..config import DAT_DIR
+        self.statusBar().showMessage(f"Downloading {len(missing)} DAT(s)…")
+        self.act_scan.setEnabled(False)
+        self.act_full.setEnabled(False)
+
+        def job(w):
+            out = {}
+            for i, (f, sysdef) in enumerate(missing):
+                w.progress.emit(i, len(missing), f"Downloading {sysdef.name}…", 0)
+                try:
+                    out[f] = (str(download(sysdef)), None)
+                except Exception as exc:  # noqa: BLE001
+                    out[f] = (None, str(exc))
+            return out
+
+        def finished(results):
+            self.act_scan.setEnabled(True)
+            self.act_full.setEnabled(True)
+            errs = []
+            for f, (path, err) in results.items():
+                if err:
+                    errs.append(f"{f}: {err}")
+                    continue
+                st = cfg.system(f)
+                st["dats"] = [path] + [d for d in st["dats"] if d != path and Path(d).parent != DAT_DIR]
+            cfg.save()
+            self.systems.load(self.picker.path())
+            if errs:
+                QMessageBox.warning(self, "Some DAT downloads failed", "\n".join(errs) +
+                                    "\n\nThose systems are scanned without a DAT (Manage DATs to retry).")
+            # remember the declined ones too, so the restarted scan doesn't ask again for a failed download
+            cfg["window_state"]["dat_prompt_declined"] = sorted(declined | {f for f in results if results[f][1]})
+            self.start_scan(None, mode)
+
+        w = Worker(job, parent=self)
+        w.progress.connect(lambda d, t, msg, _f: self.statusBar().showMessage(msg))
+        w.done.connect(finished)
+        w.failed.connect(lambda e: (self.act_scan.setEnabled(True), self.act_full.setEnabled(True),
+                                    QMessageBox.critical(self, "Download DATs", e)))
+        self._dat_worker = w
+        w.start()
+        return True
 
     def stop_scan(self):
         if self.worker:

@@ -158,8 +158,9 @@ class Process:
 
     def __init__(self, argv: list[str], on_line: Callable[[str], None] | None = None,
                  on_progress: Callable[[float], None] | None = None,
-                 on_status: Callable[[str], None] | None = None) -> None:
+                 on_status: Callable[[str], None] | None = None, env: dict | None = None) -> None:
         self.argv = argv
+        self.env = env
         self.on_line = on_line or (lambda s: None)
         self.on_progress = on_progress or (lambda f: None)
         self.on_status = on_status or (lambda s: None)   # live progress text, e.g. "Compressing, 45% (ratio=40%)"
@@ -172,7 +173,7 @@ class Process:
         with self._lock:
             if self.cancelled:
                 return -1
-            self.proc = subprocess.Popen(self.argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            self.proc = subprocess.Popen(self.argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=self.env,
                                          **popen_session_kwargs())
         buf = b""
         last_pct_line = ""

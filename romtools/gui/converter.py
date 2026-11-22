@@ -286,10 +286,17 @@ class BatchTab(QWidget):
         from .. import tasks as _tasks
         self.keys = QLineEdit(get_config()["switch_keys"] or saved.get("switch_keys") or str(
             _tasks.find_switch_keys([Path(get_config()["library_root"])]) or ""))
-        self.keys.setPlaceholderText("your prod.keys (needed for NSZ)")
-        self.keys.setToolTip("NSZ needs your own console keys (prod.keys). They're only passed to nsz, never copied.")
+        self.keys.setPlaceholderText("your prod.keys (needed for NSZ and RomFS / ExeFS)")
+        self.keys.setToolTip("Your own console keys (prod.keys). Only passed to nsz / nstool, never copied. "
+                             "Shared with ROM Verifier and Renamer.")
         self.keys_row = file_row(self.keys, False, self, "Keys (prod.keys keys.txt);;All files (*)")
         g.addRow("Switch keys:", self.keys_row)
+        self.tkeys = QLineEdit(get_config()["title_keys"] or "")
+        self.tkeys.setPlaceholderText("your title.keys (only for games whose package has no ticket)")
+        self.tkeys.setToolTip("Title keys (rights ID = key, the hactool/nstool title.keys format). Most NSPs carry "
+                              "their own ticket and don't need this. Shared with ROM Verifier and Renamer.")
+        self.tkeys_row = file_row(self.tkeys, False, self, "Title keys (title.keys);;All files (*)")
+        g.addRow("Title keys:", self.tkeys_row)
         par = QHBoxLayout()
         par.addWidget(QLabel("Jobs at once"))
         par.addWidget(self.parallel)
@@ -300,7 +307,7 @@ class BatchTab(QWidget):
         g.addRow("Performance:", par)
         self.opts_rows = {"codec": [self.cd_codec, self.dvd_codec, self.custom_codec, self.hunk],
                           "iso": [self.iso_as], "split": [self.split_bin], "verify": [self.verify_after],
-                          "trash": [self.trash], "keys": [self.keys_row]}
+                          "trash": [self.trash], "keys": [self.keys_row], "tkeys": [self.tkeys_row]}
         self.opts_form = g
 
         top = QHBoxLayout()
@@ -400,7 +407,7 @@ class BatchTab(QWidget):
         conversions = (cv.TO_CHD, cv.RECOMPRESS, cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ, cv.TRIM, cv.UNTRIM)
         show = {"codec": p in (cv.TO_CHD, cv.RECOMPRESS), "iso": p == cv.TO_CHD, "split": p == cv.FROM_CHD,
                 "verify": p in (cv.TO_CHD, cv.RECOMPRESS), "trash": p in conversions,
-                "keys": p in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS)}
+                "keys": p in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS), "tkeys": p == cv.SWITCH_FS}
         self.trash.setText("Move source files to the trash after a verified success"
                            if p in (cv.TO_CHD, cv.RECOMPRESS) else
                            "Move the originals to the trash once the result is verified")
@@ -423,7 +430,8 @@ class BatchTab(QWidget):
             iso_as=self.iso_as.currentData(), split_bin=self.split_bin.isChecked(),
             processors=self.procs.value(), verify_after=self.verify_after.isChecked(),
             trash_sources=self.trash.isChecked(), dat_lookup=self._dat_for, all_dats=self._all_dats,
-            switch_keys=self.keys.text().strip(), tmp_dir=get_config()["tmp_dir"],
+            switch_keys=self.keys.text().strip(), title_keys=self.tkeys.text().strip(),
+            tmp_dir=get_config()["tmp_dir"],
             ram=get_config()["temp_mode"] == "ram")
 
     def _all_dats(self):
@@ -461,6 +469,8 @@ class BatchTab(QWidget):
             "procs": o.processors, "switch_keys": o.switch_keys}
         if o.switch_keys and Path(o.switch_keys).is_file():
             cfg["switch_keys"] = o.switch_keys      # shared with ROM Verifier / Renamer (reading Switch packages)
+        if o.title_keys and Path(o.title_keys).is_file():
+            cfg["title_keys"] = o.title_keys
         cfg.save()
 
     # -------------------------------------------------------------- queue
@@ -495,19 +505,46 @@ class BatchTab(QWidget):
             self.add_jobs(jobs)
             return
         if preset in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS) and not Path(self.keys.text().strip()).is_file():
-            QMessageBox.warning(self, "Switch keys needed", "This task needs your own prod.keys file. Set it under "
-                                "Options → Switch keys.")
-            return
+            if not self.ask_for_keys("prod"):
+                return
         files = cv.collect(paths, preset)
         if not files:
             QMessageBox.information(self, "Nothing to add",
                                     f"No matching files ({', '.join(cv.PRESETS[preset][1])}) were found.")
             return
         queued = {(j.source, j.steps[0][1] if j.steps else "") for j in self.jobs if j.status == "Queued"}
-        jobs = [j for j in cv.plan(preset, files, self.options())
-                if (j.source, j.steps[0][1] if j.steps else "") not in queued]
+        jobs = cv.plan(preset, files, self.options())
+        if preset == cv.SWITCH_FS and any(cv.NEEDS_TITLE_KEY in j.message for j in jobs) \
+                and self.ask_for_keys("title", sum(cv.NEEDS_TITLE_KEY in j.message for j in jobs)):
+            jobs = cv.plan(preset, files, self.options())          # again, with the title.keys just set
+        jobs = [j for j in jobs if (j.source, j.steps[0][1] if j.steps else "") not in queued]
         self.add_jobs(jobs)
         self.save_state()
+
+    def ask_for_keys(self, which: str, count: int = 0) -> bool:
+        """Missing keys: offer to pick the file now (saved for all three apps). True if one was set."""
+        if which == "prod":
+            text = ("This task needs your Switch <b>prod.keys</b> (your console's keys - romtools never includes "
+                    "any). Locate the file now?")
+            title, flt, edit, key = "Switch keys needed", "Keys (prod.keys keys.txt);;All files (*)", self.keys, \
+                "switch_keys"
+        else:
+            text = (f"{count} game(s) have no ticket in their package, so their <b>title key</b> must come from "
+                    f"your <b>title.keys</b> file. Locate it now?<br><small>Without it those games are skipped; "
+                    f"the others are added either way.</small>")
+            title, flt, edit, key = "Title keys needed", "Title keys (title.keys);;All files (*)", self.tkeys, \
+                "title_keys"
+        if QMessageBox.question(self, title, text) != QMessageBox.StandardButton.Yes:
+            return False
+        f, _ = QFileDialog.getOpenFileName(self, title, str(Path(edit.text()).parent) if edit.text() else
+                                           str(Path.home()), flt)
+        if not f:
+            return False
+        edit.setText(f)
+        cfg = get_config()
+        cfg[key] = f
+        cfg.save()
+        return True
 
     def enqueue_preset(self, preset: str, files: list[Path], **overrides) -> int:
         """Queue files for a task chosen elsewhere (Save space), using the current options plus overrides."""
@@ -1425,9 +1462,8 @@ class SpaceTab(QWidget):
             files = [f for f in files if str(f) not in busy]
             if not files:
                 continue
-            if s.preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(b.keys.text().strip()).is_file():
-                QMessageBox.warning(self, "Switch keys needed", "Set your prod.keys under Tasks → Options → Switch "
-                                    "keys first; the Switch files were not added.")
+            if s.preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(b.keys.text().strip()).is_file() \
+                    and not b.ask_for_keys("prod"):
                 continue
             over = {"cd_codec": "zstd", "dvd_codec": "zstd"} if s.kind == "speed" else {}
             if self.trash.isChecked():

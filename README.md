@@ -44,14 +44,21 @@ Title ID, Game / Update / DLC (and what a Switch bundle contains), version and d
 content ID, required firmware, backport. Looking at the whole folder together, packages are marked **Check**
 when an update or DLC has no base game, DLC is for another region's version of your game, a file is a
 duplicate, or an update is older than another one you have. Switch packages need your own `prod.keys`
-(*Settings → Switch keys*; shared with ROM Optimizer). **Check game updates** compares your Switch updates with
+(*Settings → Switch prod.keys*, and *Switch title.keys* for packages without a ticket; shared with ROM Optimizer). **Check game updates** compares your Switch updates with
 the newest official version from the public, key-free title database (github.com/blawar/titledb, fetched at
 most once a day); for PS4, right-click a package → *Look up updates online* opens its patch page.
 
 1. **Manage DATs…** → *Download all missing*. Disc systems get official **Redump** DATs; cartridge systems
    get **No-Intro** DATs (libretro mirror). *Add DAT file…* imports any Logiqx / ClrMamePro DAT
    (Dat-o-Matic packs, translation DATs, …); several DATs per folder are merged.
-2. Tick systems → **Verify** (F5).
+2. Tick systems → **Verify** (F5). If a ticked system has no DAT yet, the Verifier offers to download it first
+   (*Download and scan* / *Scan without them*, with *Don't ask again for these systems*).
+
+**Switch keys** (your own; romtools never includes any) are set in one place and used by all three apps:
+ROM Verifier → *Settings* → *Switch prod.keys* / *Switch title.keys*, or ROM Optimizer → *Tasks* → *Options* →
+*Switch keys* / *Title keys*. `prod.keys` is needed to read Switch packages and for NSZ / RomFS extraction;
+`title.keys` (hactool format, `rights ID = key`) only for content whose package carries no ticket. If a task
+needs one that isn't set, ROM Optimizer asks you to locate it.
 
 | Status | Meaning |
 |---|---|

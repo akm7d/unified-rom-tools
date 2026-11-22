@@ -282,7 +282,7 @@ def untrim(path: Path, out: Path, dat_index=None) -> Callable[[TaskContext], str
 
 # ====================================================================== external tools (RVZ via nodtool, NSZ via nsz)
 
-def _run_tool(argv: list[str], ctx: TaskContext, phase: str) -> list[str]:
+def _run_tool(argv: list[str], ctx: TaskContext, phase: str, env: dict | None = None) -> list[str]:
     from .chdman_tool import Process
     lines: list[str] = []
 
@@ -290,7 +290,7 @@ def _run_tool(argv: list[str], ctx: TaskContext, phase: str) -> list[str]:
         lines.append(s)
         ctx.log(s)
 
-    p = Process(argv, line, lambda f: ctx.progress(f, phase))
+    p = Process(argv, line, lambda f: ctx.progress(f, phase), env=env)
     watcher = threading.Thread(target=lambda: (ctx.cancel.wait(), p.cancel()), daemon=True)
     watcher.start()
     ctx.progress(0.0, phase)
@@ -387,7 +387,8 @@ def convert_nsz(src: Path, out: Path, keys: Path | None) -> Callable[[TaskContex
 # ====================================================================== Switch RomFS / ExeFS (nstool)
 
 def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base: tuple[Path, str] | None,
-                      tickets: list[tuple[Path, str]], parts: dict[str, int]) -> Callable[[TaskContext], str]:
+                      tickets: list[tuple[Path, str]], parts: dict[str, int],
+                      title_keys: Path | None = None) -> Callable[[TaskContext], str]:
     """Extract sections of a Switch NCA into folders (``exefs/``, ``romfs/``) with nstool.
 
     ``main`` is (package, NCA name) of the program (or DLC data) NCA; with ``base`` (the base game's program NCA)
@@ -406,6 +407,18 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
             raise TaskSkipped(f"{out.name} already exists")
         work = out.parent / f".romtools-switch-{uuid.uuid4().hex[:8]}"
         dest = work / "out"
+        env = None
+        home = None
+        if title_keys and Path(title_keys).is_file():
+            # nstool only reads title.keys from ~/.switch: give it a private home that links to yours
+            import tempfile
+            home = Path(tempfile.mkdtemp(prefix="romtools-nstool-"))
+            (home / ".switch").mkdir()
+            try:
+                (home / ".switch" / "title.keys").symlink_to(Path(title_keys).resolve())
+            except OSError:
+                shutil.copyfile(title_keys, home / ".switch" / "title.keys")
+            env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
         try:
             (work / "nca").mkdir(parents=True)
             todo = [main] + ([base] if base else [])
@@ -450,14 +463,14 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
                         ctx.progress(lo + (hi - lo) * min(0.99, got / expect), f"Extracting {part}")
                 threading.Thread(target=watch, daemon=True).start()
                 try:
-                    _run_tool(argv, ctx, f"Extracting {part}")
+                    _run_tool(argv, ctx, f"Extracting {part}", env)
                 finally:
                     stop.set()
                 if not (dest / part).is_dir() or not any((dest / part).rglob("*")):
                     # show what nstool sees inside the NCA, so the log says why
                     try:
                         _run_tool([exe, "-k", str(keys), *tiks, *base_args, "--fstree", str(local[0])], ctx,
-                                  "Listing the NCA")
+                                  "Listing the NCA", env)
                     except Exception as exc:  # noqa: BLE001
                         ctx.log(f"(listing failed: {exc})")
                     raise RuntimeError(f"nstool produced no {part} - see the NCA listing above in the log")
@@ -466,6 +479,8 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
             os.rename(dest, out)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+            if home:
+                shutil.rmtree(home, ignore_errors=True)
         files = sum(1 for f in out.rglob("*") if f.is_file())
         size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
         return f"{', '.join(parts)}: {files} files, {size / 2**30:.2f} GiB" + (" (update applied)" if base else "")

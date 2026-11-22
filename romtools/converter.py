@@ -75,6 +75,7 @@ class Options:
     dat_lookup: Callable[[Path], object] | None = None  # Path -> DatIndex of its system (PS2 CD/DVD check)
     all_dats: Callable[[], object] | None = None        # -> DatIndex of every DAT (CHD type check, untrim)
     switch_keys: str = ""                               # prod.keys for NSZ
+    title_keys: str = ""                                # title.keys (Switch content whose package has no ticket)
     ram: bool = False                                   # CHD type fix: unpack in RAM
     tmp_dir: str = ""
 
@@ -247,8 +248,19 @@ def plan_switch_fs(files: list[Path], opts: Options) -> list[Job]:
     from . import tasks
     keys = Path(opts.switch_keys) if opts.switch_keys else None
     if not keys or not keys.is_file():
-        return [_skipped(f"extract: {f.name}", f, "set your Switch prod.keys under Options → Switch keys first")
-                for f in files]
+        return [_skipped(f"extract: {f.name}", f, NEEDS_PROD_KEYS) for f in files]
+    tkeys = Path(opts.title_keys) if opts.title_keys and Path(opts.title_keys).is_file() else None
+
+    def missing_title_key(cont: Path, nca: str, tickets: list[str]) -> str:
+        """The rights ID whose title key we don't have (no ticket in the package, not in title.keys), or ""."""
+        try:
+            rid = pk.nca_rights_id(cont, nca, keys)
+        except Exception:  # noqa: BLE001
+            return ""
+        if not rid or f"{rid}.tik" in tickets:
+            return ""
+        known = pk._Keys(None, tkeys).titles if tkeys else {}
+        return "" if rid in known else rid
     pool: set[Path] = set()
     for f in files:
         for d in {f.parent, f.parent.parent}:
@@ -293,8 +305,12 @@ def plan_switch_fs(files: list[Path], opts: Options) -> list[Job]:
                     title = f.stem
                 out = _out_dir(f, opts) / CIFS_SAFE(f"{title} [{t.title_id}] (DLC)")
                 tik = [(f, n) for n in t.tickets]
+                rid = missing_title_key(f, t.ncas[2][0], t.tickets)
+                if rid:
+                    jobs.append(_skipped(f"extract DLC: {f.name}", f, f"{NEEDS_TITLE_KEY} ({rid})"))
+                    continue
                 jobs.append(_task_job(f"extract DLC: {f.name}", f, tasks.extract_switch_fs(
-                    out, keys, (f, t.ncas[2][0]), None, tik, {"romfs": 0}), "Extracting", [out], [],
+                    out, keys, (f, t.ncas[2][0]), None, tik, {"romfs": 0}, tkeys), "Extracting", [out], [],
                     detail=f"DLC {t.title_id} v{t.version} → {out.name}/romfs"))
                 continue
             base_id = t.title_id if t.kind == pk.GAME else f"{int(t.title_id, 16) & ~0x800:016X}"
@@ -321,9 +337,19 @@ def plan_switch_fs(files: list[Path], opts: Options) -> list[Job]:
             else:
                 main, base = (gp, gt.ncas[1][0]), None
                 detail = f"base game (no update found) → {out.name}/exefs, romfs"
+            rid = missing_title_key(gp, gt.ncas[1][0], gt.tickets) or \
+                (missing_title_key(up[0], up[1].ncas[1][0], up[1].tickets) if up else "")
+            if rid:
+                jobs.append(_skipped(f"extract: {gp.name}", gp, f"{NEEDS_TITLE_KEY} ({rid})"))
+                continue
             jobs.append(_task_job(f"extract: {gp.name}", gp, tasks.extract_switch_fs(
-                out, keys, main, base, tik, {"exefs": 0, "romfs": 1}), "Extracting", [out], [], detail=detail))
+                out, keys, main, base, tik, {"exefs": 0, "romfs": 1}, tkeys), "Extracting", [out], [],
+                detail=detail))
     return jobs
+
+
+NEEDS_PROD_KEYS = "needs your Switch prod.keys - set it under Options → Switch keys"
+NEEDS_TITLE_KEY = "needs a title key: the package has no ticket and it isn't in your title.keys"
 
 
 def CIFS_SAFE(name: str) -> str:   # noqa: N802 - folder names that also work on Samba / Windows
