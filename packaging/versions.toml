@@ -44,6 +44,22 @@ linux_sha256 = "a8ce7d2c943ae2b3d308942643cb36d4805a1f16775abe1be64fee292d7c2506
 windows_url = "https://github.com/jmacd/xdelta/releases/download/v3.2.2/xdelta3-3.2.2-windows-x86_64.zip"
 windows_sha256 = "d48f7651d86b78fdca397057b46601f89131f37219675df736db70af44ec3379"
 
+[nodtool]
+# RVZ (GameCube / Wii): official nodtool binaries from github.com/encounter/nod (static on Linux).
+version = "2.0.0-alpha.12"
+linux_url = "https://github.com/encounter/nod/releases/download/v2.0.0-alpha.12/nodtool-linux-x86_64"
+linux_sha256 = "ee8345c004248eb82a86dd0c6068e0fcf3dc75baf68d18fe949bf4589822f5a5"
+windows_url = "https://github.com/encounter/nod/releases/download/v2.0.0-alpha.12/nodtool-windows-x86_64.exe"
+windows_sha256 = "f65de62c44f0ad5d179eff85bd1e92099713ffacbf717f651fb761129a25c7bc"
+
+[nsz]
+# NSZ / XCZ (Switch): official nsz command-line binaries from github.com/nicoboss/nsz. Users supply their own keys.
+version = "5.0.0"
+linux_url = "https://github.com/nicoboss/nsz/releases/download/5.0.0/nsz-cli-linux-x64"
+linux_sha256 = "112b39019ebe284b9a6f8c1d4e28205d79f5cc8ae935508ad1b5049b7d5ffb28"
+windows_url = "https://github.com/nicoboss/nsz/releases/download/5.0.0/nsz-cli-windows-x64.exe"
+windows_sha256 = "341b395c18679bf4c01f0bf2fb0e22e315a64b34fad51064781f5155a978883d"
+
 [sevenzip_windows]
 # 7z.exe / 7z.dll bundled in the Windows build (archive hashing, chdman updates).
 # Same file on github.com/ip7z/7zip and 7-zip.org (checked 2026-11-22).

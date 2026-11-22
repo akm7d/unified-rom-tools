@@ -9,11 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QGuiApplication
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
-                               QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-                               QScrollArea, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleOptionProgressBar,
-                               QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleOptionProgressBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QToolBar, QVBoxLayout, QWidget, QDialog)
 
 from .. import __version__
 from .. import chdman_tool as ct
@@ -205,8 +201,14 @@ class BatchTab(QWidget):
 
         # ---- what to do
         self.preset = QComboBox()
-        for key, (label, _exts) in cv.PRESETS.items():
-            self.preset.addItem(label, key)
+        groups = [[cv.TO_CHD, cv.FROM_CHD, cv.RECOMPRESS, cv.FIX_CHD, cv.VERIFY, cv.INFO],
+                  [cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ],
+                  [cv.M3U, cv.TRIM, cv.UNTRIM]]
+        for gi, group in enumerate(groups):
+            if gi:
+                self.preset.insertSeparator(self.preset.count())
+            for key in group:
+                self.preset.addItem(cv.PRESETS[key][0], key)
         self.preset.setCurrentIndex(max(0, self.preset.findData(saved.get("preset", cv.TO_CHD))))
         self.preset.currentIndexChanged.connect(self._preset_changed)
 
@@ -277,6 +279,13 @@ class BatchTab(QWidget):
         for w in (self.verify_after, self.trash, self.overwrite):
             flags.addWidget(w)
         g.addRow("Safety:", flags)
+        from .. import tasks as _tasks
+        self.keys = QLineEdit(saved.get("switch_keys") or str(
+            _tasks.find_switch_keys([Path(get_config()["library_root"])]) or ""))
+        self.keys.setPlaceholderText("your prod.keys (needed for NSZ)")
+        self.keys.setToolTip("NSZ needs your own console keys (prod.keys). They're only passed to nsz, never copied.")
+        self.keys_row = file_row(self.keys, False, self, "Keys (prod.keys keys.txt);;All files (*)")
+        g.addRow("Switch keys:", self.keys_row)
         par = QHBoxLayout()
         par.addWidget(QLabel("Jobs at once"))
         par.addWidget(self.parallel)
@@ -286,7 +295,8 @@ class BatchTab(QWidget):
         par.addStretch(1)
         g.addRow("Performance:", par)
         self.opts_rows = {"codec": [self.cd_codec, self.dvd_codec, self.custom_codec, self.hunk],
-                          "iso": [self.iso_as], "split": [self.split_bin], "verify": [self.verify_after, self.trash]}
+                          "iso": [self.iso_as], "split": [self.split_bin], "verify": [self.verify_after],
+                          "trash": [self.trash], "keys": [self.keys_row]}
         self.opts_form = g
 
         top = QHBoxLayout()
@@ -383,8 +393,16 @@ class BatchTab(QWidget):
     # -------------------------------------------------------------- options
     def _preset_changed(self):
         p = self.preset.currentData()
+        conversions = (cv.TO_CHD, cv.RECOMPRESS, cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ, cv.TRIM, cv.UNTRIM)
         show = {"codec": p in (cv.TO_CHD, cv.RECOMPRESS), "iso": p == cv.TO_CHD, "split": p == cv.FROM_CHD,
-                "verify": p in (cv.TO_CHD, cv.RECOMPRESS)}
+                "verify": p in (cv.TO_CHD, cv.RECOMPRESS), "trash": p in conversions,
+                "keys": p in (cv.TO_NSZ, cv.FROM_NSZ)}
+        self.trash.setText("Move source files to the trash after a verified success"
+                           if p in (cv.TO_CHD, cv.RECOMPRESS) else
+                           "Move the originals to the trash once the result is verified")
+        self.trash.setToolTip("Trim / untrim with output next to the source always replace the file (the original "
+                              "goes to the trash after the check)." if p in (cv.TRIM, cv.UNTRIM) else
+                              "Only after the result was checked against the original.")
         for key, widgets in self.opts_rows.items():
             for w in widgets:
                 self.opts_form.setRowVisible(w, show[key]) if self.opts_form.indexOf(w) >= 0 else w.setVisible(
@@ -400,7 +418,17 @@ class BatchTab(QWidget):
                        else self.hunk.currentText()) or "",
             iso_as=self.iso_as.currentData(), split_bin=self.split_bin.isChecked(),
             processors=self.procs.value(), verify_after=self.verify_after.isChecked(),
-            trash_sources=self.trash.isChecked(), dat_lookup=self._dat_for)
+            trash_sources=self.trash.isChecked(), dat_lookup=self._dat_for, all_dats=self._all_dats,
+            switch_keys=self.keys.text().strip(), tmp_dir=get_config()["tmp_dir"],
+            ram=get_config()["temp_mode"] == "ram")
+
+    def _all_dats(self):
+        from ..datmanager import IndexCache
+        from ..library import all_dats
+        if not hasattr(self, "_indexes"):
+            self._indexes = IndexCache()
+        dats = all_dats(get_config())
+        return self._indexes.get(dats) if dats else None
 
     def _dat_for(self, path: Path):
         """DAT index of the library system a file belongs to (by folder name), for PS2 CD/DVD checks."""
@@ -426,7 +454,7 @@ class BatchTab(QWidget):
             "preset": self.preset.currentData(), "output_dir": o.output_dir, "cd_codec": o.cd_codec,
             "dvd_codec": o.dvd_codec, "custom_codec": o.custom_codec, "hunk": o.hunk_size, "iso_mode": o.iso_as,
             "split_bin": o.split_bin, "verify_after": o.verify_after, "parallel": self.parallel.value(),
-            "procs": o.processors}
+            "procs": o.processors, "switch_keys": o.switch_keys}
         cfg.save()
 
     # -------------------------------------------------------------- queue
@@ -452,6 +480,18 @@ class BatchTab(QWidget):
 
     def enqueue(self, paths: list[Path]):
         preset = self.preset.currentData()
+        if preset == cv.M3U:
+            jobs = cv.plan_playlists(paths, self.options())
+            if not jobs:
+                QMessageBox.information(self, "Playlists", "No multi-disc games (files with “(Disc N)” in the name) "
+                                                           "were found there.")
+                return
+            self.add_jobs(jobs)
+            return
+        if preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(self.keys.text().strip()).is_file():
+            QMessageBox.warning(self, "Switch keys needed", "NSZ needs your own prod.keys file. Set it under "
+                                "Options → Switch keys.")
+            return
         files = cv.collect(paths, preset)
         if not files:
             QMessageBox.information(self, "Nothing to add",
@@ -462,6 +502,14 @@ class BatchTab(QWidget):
                 if (j.source, j.steps[0][1] if j.steps else "") not in queued]
         self.add_jobs(jobs)
         self.save_state()
+
+    def enqueue_preset(self, preset: str, files: list[Path], **overrides) -> int:
+        """Queue files for a task chosen elsewhere (Space saver), using the current options plus overrides."""
+        import dataclasses
+        opts = dataclasses.replace(self.options(), **overrides)
+        jobs = cv.plan(preset, files, opts)
+        self.add_jobs(jobs)
+        return len(jobs)
 
     def add_jobs(self, jobs: list[cv.Job]):
         for j in jobs:
@@ -674,6 +722,201 @@ class BatchTab(QWidget):
 
 # ====================================================================== Patch tab
 
+class AutoMatchDialog(QDialog):
+    """Pick a folder of patches; each one is matched to a ROM (checksum / name the patch records / name) and all
+    ticked rows are patched in one go."""
+
+    COLS = ["", "Patch", "Original ROM", "Matched by", "Save as"]
+
+    def __init__(self, tab: "PatchTab"):
+        super().__init__(tab)
+        self.tab, self.pt = tab, tab.pt
+        self.setWindowTitle("Auto-match patches")
+        self.resize(1250, 640)
+        self.matches = []
+        self.worker: Worker | None = None
+        cfg = get_config()
+        self.patch_dir = QLineEdit(cfg["window_state"].get("last_patch_dir", ""))
+        self.search_dir = QLineEdit(cfg["window_state"].get("patch_search_dir") or cfg["library_root"])
+        self.search_dir.setToolTip("Where your original ROMs are (searched 3 levels deep). Remembered scans from ROM "
+                                   "Verifier make checksum matching instant.")
+        find = QPushButton(QIcon.fromTheme("edit-find"), "Find matches")
+        find.clicked.connect(self.find)
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().hide()
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(True)
+        for c, wdt in ((0, 28), (1, 280), (2, 380), (3, 170)):
+            self.table.setColumnWidth(c, wdt)
+        self.status = QLabel("Pick the folder with your patches, then Find matches.")
+        self.status.setWordWrap(True)
+        self.go = QPushButton(QIcon.fromTheme("document-save"), "Patch ticked")
+        self.go.clicked.connect(self.run)
+        self.go.setEnabled(False)
+        self.bar = QProgressBar()
+        self.bar.setVisible(False)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        form = QFormLayout()
+        form.addRow("Patches folder:", file_row(self.patch_dir, False, self, directory=True))
+        form.addRow("Search for originals in:", file_row(self.search_dir, False, self, directory=True))
+        top = QHBoxLayout()
+        top.addLayout(form, 1)
+        top.addWidget(find)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.status, 1)
+        bottom.addWidget(self.bar)
+        bottom.addWidget(self.go)
+        bottom.addWidget(close)
+        lay = QVBoxLayout(self)
+        lay.addLayout(top)
+        lay.addWidget(self.table, 1)
+        lay.addWidget(QLabel("<small>Ticked automatically: checksum matches, and patches that check the original "
+                             "themselves (BPS, UPS, xdelta, PPF2/3). Name-only matches for IPS/PPF1 can't be "
+                             "checked — confirm them before ticking. Output goes next to each original, tagged as "
+                             "chosen on the Patch tab. Originals are never changed.</small>"))
+        lay.addLayout(bottom)
+
+    def find(self):
+        pdir, sdir = Path(self.patch_dir.text().strip()), Path(self.search_dir.text().strip())
+        if not pdir.is_dir():
+            QMessageBox.information(self, "Auto-match", "Choose the folder that holds your patches.")
+            return
+        cfg = get_config()
+        cfg["window_state"]["last_patch_dir"], cfg["window_state"]["patch_search_dir"] = str(pdir), str(sdir)
+        cfg.save()
+        patches = sorted(p for p in pdir.rglob("*") if p.is_file() and p.suffix.lower() in self.pt.PATCH_EXTS)
+        if not patches:
+            QMessageBox.information(self, "Auto-match", "No patch files (IPS, BPS, UPS, PPF, xdelta) in that folder.")
+            return
+        self.status.setText(f"Matching {len(patches)} patch(es) against the ROMs in {sdir}…")
+        pt = self.pt
+
+        def job(_w):
+            import copy as _copy
+            c = _copy.copy(cfg)
+            c.data = dict(cfg.data)
+            c.data["library_root"] = str(sdir)
+            return pt.match_patches(patches, pt.library_candidates(c))
+
+        self.worker = Worker(job, parent=self)
+        self.worker.done.connect(self._show)
+        self.worker.failed.connect(lambda e: self.status.setText(f"Failed: {e}"))
+        self.worker.start()
+
+    def _show(self, matches):
+        self.matches = matches
+        self.table.setRowCount(len(matches))
+        checks = ("BPS", "UPS", "xdelta", "PPF2", "PPF3")
+        for r, m in enumerate(matches):
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            auto = bool(m.rom) and (m.sure or (m.info and m.info.format in checks))
+            chk.setCheckState(Qt.CheckState.Checked if auto else Qt.CheckState.Unchecked)
+            self.table.setItem(r, 0, chk)
+            pi = QTableWidgetItem(m.patch.name + (f"  ({m.info.format})" if m.info else ""))
+            pi.setToolTip(str(m.patch))
+            self.table.setItem(r, 1, pi)
+            combo = QComboBox()
+            if m.rom:
+                for p in [m.rom] + m.alternatives:
+                    combo.addItem(p.name, str(p))
+            else:
+                combo.addItem("— no match —", "")
+            combo.addItem("Choose file…", "__pick__")
+            combo.activated.connect(lambda _i, row=r, cb=combo: self._pick(row, cb))
+            self.table.setCellWidget(r, 2, combo)
+            how = QTableWidgetItem(m.how or m.error)
+            how.setForeground(QColor("#2e9d53" if m.sure else "#d49a1b" if m.rom else "#d1452f"))
+            how.setToolTip(m.error or m.how)
+            self.table.setItem(r, 3, how)
+            self.table.setItem(r, 4, QTableWidgetItem(self._out_name(m.rom, m.patch) if m.rom else ""))
+        sure = sum(1 for m in matches if m.sure)
+        found = sum(1 for m in matches if m.rom)
+        self.status.setText(f"{found} of {len(matches)} patch(es) matched ({sure} by checksum). Check the orange "
+                            f"ones, then Patch ticked.")
+        self.go.setEnabled(found > 0)
+
+    def _out_name(self, rom: Path, patch: Path) -> str:
+        return self.pt.default_output_name(rom, [patch]) + self.pt.output_suffix(rom)
+
+    def _pick(self, row: int, combo: QComboBox):
+        if combo.currentData() != "__pick__":
+            self.table.item(row, 4).setText(self._out_name(Path(combo.currentData()), self.matches[row].patch)
+                                            if combo.currentData() else "")
+            return
+        f, _ = QFileDialog.getOpenFileName(self, "Original ROM", self.search_dir.text(), PatchTab.ROM_FILTER)
+        if f:
+            combo.insertItem(0, Path(f).name, f)
+            combo.setCurrentIndex(0)
+            self.table.item(row, 4).setText(self._out_name(Path(f), self.matches[row].patch))
+            self.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+        else:
+            combo.setCurrentIndex(0)
+
+    def run(self):
+        todo = []
+        for r, m in enumerate(self.matches):
+            rom = self.table.cellWidget(r, 2).currentData()
+            name = self.table.item(r, 4).text().strip()
+            if self.table.item(r, 0).checkState() == Qt.CheckState.Checked and rom and rom != "__pick__" and name:
+                todo.append((r, m.patch, Path(rom), Path(rom).parent / name))
+        if not todo:
+            return
+        cfg = get_config()
+        tmp_root = Path(cfg["tmp_dir"]) / "patch"
+        tag, header, pt = self.tab.tag.currentData(), self.tab.header.currentData(), self.pt
+        self.go.setEnabled(False)
+        self.bar.setVisible(True)
+        self.bar.setRange(0, len(todo))
+        self.bar.setValue(0)
+
+        def job(w):
+            results = []
+            for i, (r, patch, rom, out) in enumerate(todo):
+                if w.cancel.is_set():
+                    break
+                w.progress.emit(i, len(todo), f"{rom.name} + {patch.name}", 0)
+                try:
+                    if out.exists():
+                        raise pt.PatchError(f"{out.name} already exists")
+                    pt.patch_rom(rom, [patch], out, tmp_root, header, tag)
+                    results.append((r, True, f"✔ saved {out.name}"))
+                except Exception as exc:  # noqa: BLE001
+                    results.append((r, False, f"✘ {str(exc).split(': ', 1)[-1]}"))
+                w.message.emit(f"{r}	{results[-1][1]}	{results[-1][2]}")
+            return results
+
+        self.worker = Worker(job, parent=self)
+        self.worker.progress.connect(lambda d, t, msg, f: (self.bar.setValue(d), self.status.setText(msg)))
+        self.worker.message.connect(self._row_result)
+        self.worker.done.connect(self._finished)
+        self.worker.start()
+
+    def _row_result(self, s: str):
+        r, ok, msg = s.split("\t", 2)
+        it = self.table.item(int(r), 3)
+        it.setText(msg)
+        it.setToolTip(msg)
+        it.setForeground(QColor("#2e9d53" if ok == "True" else "#d1452f"))
+        self.table.item(int(r), 0).setCheckState(Qt.CheckState.Unchecked)
+
+    def _finished(self, results):
+        ok = sum(1 for _r, good, _m in results if good)
+        self.bar.setVisible(False)
+        self.go.setEnabled(True)
+        self.status.setText(f"Done: {ok} of {len(results)} patched. Originals unchanged.")
+        QApplication.alert(self)
+
+    def closeEvent(self, ev):
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel.set()
+            self.worker.wait(30000)
+        super().closeEvent(ev)
+
+
 class PatchTab(QWidget):
     """Apply IPS / BPS / UPS / PPF / xdelta patches to a ROM, archive, .cue set or CHD. Writes a new file."""
 
@@ -737,6 +980,9 @@ class PatchTab(QWidget):
         self.details.setPlaceholderText("Pick a ROM and a patch to see whether they belong together.")
         self.apply_btn = QPushButton(QIcon.fromTheme("document-save"), "Create patched copy")
         self.apply_btn.clicked.connect(self.apply)
+        self.auto_btn = QPushButton(QIcon.fromTheme("edit-find"), "Auto-match a folder of patches…")
+        self.auto_btn.setToolTip("Finds the right ROM for every patch in a folder and patches them in one go")
+        self.auto_btn.clicked.connect(lambda: AutoMatchDialog(self).exec())
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setVisible(False)
@@ -765,6 +1011,7 @@ class PatchTab(QWidget):
         form.addRow("Tag the result as:", self.tag)
         brow = QHBoxLayout()
         brow.addWidget(self.apply_btn)
+        brow.addWidget(self.auto_btn)
         brow.addWidget(self.bar, 1)
         lay = QVBoxLayout(self)
         intro = QLabel("Apply <b>IPS, BPS, UPS, PPF</b> or <b>xdelta</b> patches (translations, hacks, fixes). "
@@ -947,6 +1194,125 @@ class PatchTab(QWidget):
         self.log.appendPlainText(f"Failed: {msg}")
         self.details.setHtml(f"<h3 style='margin:0;color:#d1452f'>Not patched</h3>{msg}<br>The original was not "
                              f"changed and no output was left behind.")
+
+
+# ====================================================================== Space saver tab
+
+class SpaceTab(QWidget):
+    COLS = ["", "Folder", "Suggestion", "Files", "Now", "After (est.)", "Saves", "Readable by", "Note"]
+
+    def __init__(self, win: "ConverterWindow"):
+        super().__init__()
+        self.win = win
+        self.worker: Worker | None = None
+        self.suggestions = []
+        cfg = get_config()
+        self.root = QLineEdit(cfg["window_state"].get("advisor_dir") or cfg["library_root"])
+        self.go = QPushButton(QIcon.fromTheme("edit-find"), "Analyse")
+        self.go.clicked.connect(self.analyse)
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().hide()
+        self.table.setAlternatingRowColors(True)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(True)
+        for c, wdt in ((0, 28), (1, 90), (2, 330), (3, 55), (4, 85), (5, 95), (6, 85), (7, 300)):
+            self.table.setColumnWidth(c, wdt)
+        self.total = QLabel("Analyse a folder to see where space can be saved without losing anything.")
+        self.queue = QPushButton(QIcon.fromTheme("list-add"), "Queue ticked in Batch")
+        self.queue.setEnabled(False)
+        self.queue.clicked.connect(self.to_batch)
+        top = QHBoxLayout()
+        top.addWidget(QLabel("<b>Folder:</b>"))
+        top.addWidget(file_row(self.root, False, self, directory=True), 1)
+        top.addWidget(self.go)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.total, 1)
+        bottom.addWidget(self.queue)
+        lay = QVBoxLayout(self)
+        intro = QLabel("Every suggestion is lossless and verified before anything is replaced. Estimates come from "
+                       "compressing samples of your actual files. Orange notes matter: e.g. Xenia can't play CHDs, "
+                       "and NSZ needs your keys. To actually free the space, tick <i>Move the originals to the "
+                       "trash once the result is verified</i> in the Batch options.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        lay.addLayout(top)
+        lay.addWidget(self.table, 1)
+        lay.addLayout(bottom)
+
+    @staticmethod
+    def _size(n: int) -> str:
+        return f"{n / 2**30:.1f} GB" if n >= 2**30 else f"{n / 2**20:.0f} MB"
+
+    def analyse(self):
+        if self.worker and self.worker.isRunning():
+            return
+        root = Path(self.root.text().strip()).expanduser()
+        if not root.is_dir():
+            QMessageBox.information(self, "Space saver", "Choose a folder to analyse.")
+            return
+        cfg = get_config()
+        cfg["window_state"]["advisor_dir"] = str(root)
+        cfg.save()
+        self.go.setEnabled(False)
+        self.total.setText("Analysing (reads ~12 MB from each large file)…")
+        from .. import advisor
+
+        def job(w):
+            return advisor.analyse(cfg, root, lambda s: w.message.emit(s), w.cancel)
+
+        self.worker = Worker(job, parent=self)
+        self.worker.message.connect(self.total.setText)
+        self.worker.done.connect(self._show)
+        self.worker.failed.connect(lambda e: (self.go.setEnabled(True), self.total.setText(f"Failed: {e}")))
+        self.worker.start()
+
+    def _show(self, suggestions):
+        self.go.setEnabled(True)
+        self.suggestions = suggestions
+        self.table.setRowCount(len(suggestions))
+        warn = QColor("#d49a1b")
+        for r, s in enumerate(suggestions):
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            tick = s.kind == "space" and s.saving > 50 * 2**20 and not s.warning
+            chk.setCheckState(Qt.CheckState.Checked if tick else Qt.CheckState.Unchecked)
+            self.table.setItem(r, 0, chk)
+            cells = [s.folder, s.title + ("  (speed)" if s.kind == "speed" else ""), str(len(s.files)),
+                     self._size(s.size_now), self._size(s.size_after),
+                     self._size(s.saving) if s.kind == "space" else "—", s.compat, s.warning]
+            for c, text in enumerate(cells, 1):
+                it = QTableWidgetItem(text)
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c == 2:
+                    it.setToolTip("\n".join(f.name for f in s.files[:40]) + ("\n…" if len(s.files) > 40 else ""))
+                if c == 8 and text:
+                    it.setForeground(warn)
+                    it.setToolTip(text)
+                self.table.setItem(r, c, it)
+        total = sum(s.saving for s in suggestions if s.kind == "space")
+        self.total.setText(f"{len(suggestions)} suggestion(s), up to {self._size(total)} could be saved. Tick what "
+                           f"you want and queue it." if suggestions else "Nothing to suggest — already compact.")
+        self.queue.setEnabled(bool(suggestions))
+
+    def to_batch(self):
+        from .. import converter as cv
+        b = self.win.batch
+        queued = 0
+        for r, s in enumerate(self.suggestions):
+            if self.table.item(r, 0).checkState() != Qt.CheckState.Checked:
+                continue
+            if s.preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(b.keys.text().strip()).is_file():
+                QMessageBox.warning(self, "Switch keys needed", "Set your prod.keys under Batch → Options → Switch "
+                                    "keys first; the Switch row was not queued.")
+                continue
+            over = {"cd_codec": "zstd", "dvd_codec": "zstd"} if s.kind == "speed" else {}
+            queued += b.enqueue_preset(s.preset, s.files, **over)
+        if queued:
+            self.win.tabs.setCurrentWidget(b)
+            self.win.statusBar().showMessage(f"{queued} job(s) queued in Batch - check the options, then Start "
+                                             f"queue.", 10000)
 
 
 # ====================================================================== Commands tab
@@ -1411,10 +1777,12 @@ class ConverterWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.batch = BatchTab(self)
         self.patch = PatchTab(self)
+        self.space = SpaceTab(self)
         self.commands = CommandsTab(self)
         self.chdman = ChdmanTab(self)
         self.tabs.addTab(self.batch, QIcon.fromTheme("view-list-details"), "Batch")
         self.tabs.addTab(self.patch, QIcon.fromTheme("document-edit"), "Patch")
+        self.tabs.addTab(self.space, QIcon.fromTheme("drive-harddisk"), "Space saver")
         self.tabs.addTab(self.commands, QIcon.fromTheme("utilities-terminal"), "chdman commands")
         self.tabs.addTab(self.chdman, QIcon.fromTheme("system-software-update"), "chdman version && updates")
         self.setCentralWidget(self.tabs)
@@ -1478,7 +1846,8 @@ class ConverterWindow(QMainWindow):
             for p in (self.commands.proc, self.chdman.proc):
                 if p:
                     p.cancel()
-            for w in (self.batch.worker, self.commands.worker, self.chdman.worker, self.patch.worker):
+            for w in (self.batch.worker, self.commands.worker, self.chdman.worker, self.patch.worker,
+                      self.space.worker):
                 if w:
                     w.wait(10000)
         self.batch.save_state()

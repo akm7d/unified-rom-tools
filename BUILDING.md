@@ -78,6 +78,8 @@ Edit `packaging/versions.toml`, then `make all`:
   SHA-256 from that release's `SHA256SUMS`.
 - **7-Zip**: change `version`, `url` and `sha256` (compare the GitHub and 7-zip.org copies).
 - **xdelta3**: `[xdelta3]`, official release binaries from github.com/jmacd/xdelta (pin both SHA-256s).
+- **nodtool** (RVZ) and **nsz** (NSZ): `[nodtool]` / `[nsz]`, official single-file release binaries (pin both
+  SHA-256s). nsz never ships keys; users point it at their own `prod.keys`.
 
 Downloads whose SHA-256 doesn't match are refused.
 

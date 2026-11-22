@@ -53,7 +53,8 @@ def selftest(report: str | None) -> int:
     def imports():
         import romtools
         from romtools import (cache, chd, chdfix, chdman_tool, compat, config, converter, dat, datmanager,  # noqa
-                              discdetect, hashing, library, patching, renamer, scanner, systems, tags, updater)
+                              advisor, discdetect, hashing, library, patching, renamer, scanner, systems, tags,
+                              tasks, updater)
         from romtools.gui import common, converter as c2, datdialog, renamer as r2, verifier  # noqa
         return f"romtools {romtools.__version__}, Python {sys.version.split()[0]}, {sys.platform}"
 
@@ -147,6 +148,15 @@ def selftest(report: str | None) -> int:
             assert (d / "x.bin").read_bytes() == mod, "xdelta"
         return f"IPS, BPS, PPF, xdelta ({exe})"
 
+    def disc_tools():
+        from romtools.compat import FROZEN, find_tool
+        found = {t: find_tool(t) for t in ("nodtool", "nsz")}
+        missing = [t for t, p in found.items() if not p]
+        if missing and FROZEN:
+            raise RuntimeError("bundled tool(s) missing: " + ", ".join(missing))
+        return ", ".join(f"{t}: {'bundled' if p and 'tools' in p else (p or 'not installed (bundled in builds)')}"
+                         for t, p in found.items())
+
     def theme():
         from romtools.gui.common import _captured_palette, current_theme, default_theme
         cap = _captured_palette()
@@ -174,7 +184,7 @@ def selftest(report: str | None) -> int:
         os.environ["ROMTOOLS_HOME"] = str(Path(home) / "portable")   # never touch the build's own data folder
         for label, fn in (("imports", imports), ("paths", paths), ("chdman", chdman), ("7-Zip", sevenzip),
                           ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui), ("theme", theme),
-                          ("patching", patching)):
+                          ("patching", patching), ("RVZ / NSZ tools", disc_tools)):
             check(label, fn)
     lines.append("RESULT " + ("OK" if ok else "FAILED"))
     if report:

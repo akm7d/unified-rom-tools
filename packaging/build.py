@@ -188,6 +188,26 @@ def linux_chdman() -> Path:
     return out
 
 
+TOOL_LICENSES = {
+    "nodtool": "nodtool {v} (https://github.com/encounter/nod), official release binary, unmodified. "
+               "Licensed under the Apache License 2.0 or MIT license.",
+    "nsz": "nsz {v} (https://github.com/nicoboss/nsz), official release binary, unmodified. Licensed under the MIT "
+           "license. No keys are included; you supply your own prod.keys.",
+}
+
+
+def _single_binaries(dest: Path, platform: str) -> None:
+    """Tools shipped by their authors as one ready-made binary per platform (nodtool, nsz)."""
+    for name in ("nodtool", "nsz"):
+        pin = PINS[name]
+        src = download(pin[f"{platform}_url"], pin[f"{platform}_sha256"])
+        target = dest / (name + (".exe" if platform == "windows" else ""))
+        shutil.copyfile(src, target)
+        target.chmod(0o755)
+        nl = "\r\n" if platform == "windows" else "\n"
+        (dest / f"{name}-LICENSE.txt").write_text(TOOL_LICENSES[name].format(v=pin["version"]) + nl)
+
+
 def linux_tools(dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     built = linux_chdman()
@@ -209,6 +229,7 @@ def linux_tools(dest: Path) -> None:
     (dest / "xdelta3").chmod(0o755)
     (dest / "xdelta3-LICENSE.txt").write_text(f"xdelta3 {xd['version']} (https://github.com/jmacd/xdelta), official "
                                               f"release binary, unmodified. Licensed under the Apache License 2.0.\n")
+    _single_binaries(dest, "linux")
     sz = PINS["sevenzip_linux"]
     tarball = download(sz["url"], sz["sha256"])
     with tarfile.open(tarball) as tf:
@@ -309,6 +330,7 @@ def windows_tools(dest: Path) -> None:
         stdout=subprocess.DEVNULL)
     (dest / "xdelta3-LICENSE.txt").write_text(f"xdelta3 {xd['version']} (https://github.com/jmacd/xdelta), official "
                                               f"release binary, unmodified. Licensed under the Apache License 2.0.\r\n")
+    _single_binaries(dest, "windows")
     sz = PINS["sevenzip_windows"]
     inst = download(sz["url"], sz["sha256"])
     run([seven, "e", "-y", f"-o{dest}", inst, "7z.exe", "7z.dll", "License.txt"], stdout=subprocess.DEVNULL)

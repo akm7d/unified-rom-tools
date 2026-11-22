@@ -7,6 +7,7 @@ xdelta the original is identified against your DATs instead (patches are made fo
 
 from __future__ import annotations
 
+import re
 import shutil
 import struct
 import subprocess
@@ -410,6 +411,12 @@ def output_suffix(src: Path) -> str:
 def default_output_name(src: Path, patches: list[Path]) -> str:
     tag = patches[0].stem if patches else "patched"
     stem = src.stem
+    for prefix in (stem, stem.split(" (")[0]):          # "Game (USA) - Fix" / "Game [T-En]" -> "Fix" / "T-En"
+        if prefix and tag.lower().startswith(prefix.lower()):
+            tag = tag[len(prefix):].strip(" -_.") or tag
+            break
+    if tag.startswith("[") and tag.endswith("]") and tag.count("[") == 1:
+        tag = tag[1:-1]
     return f"{stem} [{tag}]"
 
 
@@ -622,3 +629,172 @@ def patch_rom(src: Path, patches: list[Path], out: Path, tmp_root: Path, header:
         raise
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- auto-matching a folder of patches to library ROMs
+
+@dataclass
+class Candidate:
+    path: Path
+    name: str
+    hashes: list[tuple[int, str]]          # (size, crc32) of each data part (ROM, CHD track, archive member)
+
+
+@dataclass
+class PatchMatch:
+    patch: Path
+    info: PatchInfo | None
+    rom: Path | None = None
+    how: str = ""                          # "checksum" | "patch names the original" | "name (check)" | ""
+    sure: bool = False
+    alternatives: list[Path] = field(default_factory=list)
+    error: str = ""
+
+
+def library_candidates(cfg, extra_folders: list[Path] = ()) -> list[Candidate]:
+    """Every ROM in the library (and extra folders), with hashes from remembered scans where available."""
+    from .cache import HashCache
+    from .library import OTHER, split
+    from .scanner import _items_in, enumerate_system
+    root = Path(cfg["library_root"])
+    items = []
+    if root.is_dir():
+        systems, _o, _l = split(cfg, root)
+        for s in systems:
+            items += enumerate_system(s, root / s)
+        items += _items_in(OTHER, root, skip_dirs=set(systems))
+    for f in extra_folders:
+        items += _items_in(OTHER, f)
+    cache = HashCache()
+    out, seen = [], set()
+    for it in items:
+        if it.kind == "folder" or it.path in seen:
+            continue
+        seen.add(it.path)
+        hashes = []
+        try:
+            st = it.path.stat()
+            mtime = st.st_mtime + sum(x.stat().st_mtime for x in it.parts)
+            size = st.st_size + sum(x.stat().st_size for x in it.parts)
+            hit = cache.get(it.path, size, mtime)
+            if hit:
+                for e in hit[2]:
+                    hashes.append((e.full.size, e.full.crc))
+                    if e.headerless:
+                        hashes.append((e.headerless.size, e.headerless.crc))
+        except OSError:
+            continue
+        out.append(Candidate(it.path, it.path.stem, hashes))
+    return out
+
+
+_NOISE = re.compile(r"\[[^\]]*\]|\b(v|rev|ver)\s?\d+(\.\d+)*\b|\b(english|translation|translated|patch|patched|"
+                    r"hack|fan|eng|undub|t-?en|redux|fix(ed)?|final|beta|by)\b", re.I)
+
+
+def _tokens(name: str) -> set[str]:
+    name = _NOISE.sub(" ", name.lower())
+    name = re.sub(r"[^a-z0-9]+", " ", name)
+    return {t for t in name.split() if len(t) > 1 or t.isdigit()}
+
+
+def _xdelta_source_name(path: Path) -> str:
+    """xdelta3 usually stores the original's file name in the VCDIFF application header."""
+    data = path.read_bytes()[:4096]
+    if data[:3] != b"\xd6\xc3\xc4":
+        return ""
+    ind, pos = data[4], 5
+
+    def varint(p):
+        v = 0
+        while True:
+            b = data[p]
+            p += 1
+            v = (v << 7) | (b & 0x7F)
+            if not b & 0x80:
+                return v, p
+
+    if ind & 0x01:
+        pos += 1
+    if ind & 0x02:
+        n, pos = varint(pos)
+        pos += n
+    if not ind & 0x04:
+        return ""
+    n, pos = varint(pos)
+    app = data[pos:pos + n].decode("utf-8", "replace").strip("\x00")
+    parts = app.split("/")
+    # xdelta3's application header is "<target name>/<kind>/<source name>/<kind>"
+    if len(parts) >= 3 and parts[2].strip():
+        return Path(parts[2].replace("\\", "/")).name
+    return ""
+
+
+def match_patches(patches: list[Path], candidates: list[Candidate]) -> list[PatchMatch]:
+    by_hash: dict[tuple[int, str], list[Candidate]] = {}
+    for c in candidates:
+        for h in c.hashes:
+            by_hash.setdefault(h, []).append(c)
+    by_name = {c.path.name.lower(): c for c in candidates}
+    by_stem = {c.path.stem.lower(): c for c in candidates}
+    tok = [(c, _tokens(c.name)) for c in candidates]
+    results = []
+    for p in patches:
+        m = PatchMatch(p, None)
+        try:
+            m.info = inspect(p)
+        except PatchError as exc:
+            m.error = str(exc)
+            results.append(m)
+            continue
+        i = m.info
+        if i.source_crc and i.source_size is not None:
+            hits = by_hash.get((i.source_size, i.source_crc), [])
+            if not hits:   # not scanned yet: hash just the files of the right size (with or without a header)
+                from .hashing import hash_file
+                sizes = {i.source_size, i.source_size + 16, i.source_size + 512}
+                for c in candidates:
+                    if c.hashes or c.path.suffix.lower() in (".chd", ".zip", ".7z", ".rar", ".cue"):
+                        continue
+                    try:
+                        if c.path.stat().st_size not in sizes:
+                            continue
+                        e = hash_file(c.path)
+                    except OSError:
+                        continue
+                    if (e.full.size, e.full.crc) == (i.source_size, i.source_crc) or (
+                            e.headerless and (e.headerless.size, e.headerless.crc) == (i.source_size, i.source_crc)):
+                        hits.append(c)
+            if hits:
+                m.rom, m.how, m.sure = hits[0].path, "checksum", True
+                m.alternatives = [h.path for h in hits[1:]]
+                results.append(m)
+                continue
+        if i.format == "xdelta":
+            src_name = _xdelta_source_name(p)
+            c = by_name.get(src_name.lower()) or by_stem.get(Path(src_name).stem.lower()) if src_name else None
+            if c:
+                m.rom, m.how = c.path, "patch names the original"
+                results.append(m)
+                continue
+        want = _tokens(p.stem)
+        scored = []
+        for c, t in tok:
+            if not t or not want:
+                continue
+            inter = len(want & t)
+            score = inter / len(want | t) + 0.5 * inter / len(want)
+            if i.source_size and any(s == i.source_size for s, _c in c.hashes):
+                score += 0.3
+            scored.append((score, c))
+        scored.sort(key=lambda x: -x[0])
+        if scored and scored[0][0] >= 0.6:
+            m.rom, m.how = scored[0][1].path, "name (check)"
+            m.alternatives = [c.path for s, c in scored[1:6] if s >= 0.4]
+        elif i.source_crc:
+            m.error = (f"no ROM in your library has the checksum this patch expects ({i.source_crc}); "
+                       "scan the library first if you haven't")
+        else:
+            m.error = "no ROM with a similar name"
+        results.append(m)
+    return results

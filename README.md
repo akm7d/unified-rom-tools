@@ -116,7 +116,15 @@ and can be reverted from **History / Undo**.
     *Always DVD* / *Always CD* override it.
   - *Extract CHD (auto)*: CD → `.cue` + `.bin` (one per track for multi-track discs), GD-ROM → `.gdi`,
     DVD → `.iso`, HD → `.img`.
-  - *Verify*, *Recompress (copy with new codecs)*, *Info*.
+  - *Verify*, *Recompress (copy with new codecs)*, *Info*, and **Fix CHD types** (CD ↔ DVD, as in ROM Verifier).
+  - **GameCube / Wii ↔ RVZ** (Dolphin's format, via the bundled `nodtool`; checked against the disc's SHA-1, and
+    nodtool confirms Redump matches), **Switch NSP/XCI ↔ NSZ/XCZ** (bundled `nsz`, with your own `prod.keys`;
+    verified by nsz, and decompressing gives back the identical NSP).
+  - **Multi-disc playlists**: writes `Game (Region).m3u` for every set of `(Disc N)` files that lacks one.
+  - **Trim / untrim NDS & 3DS** (reversible: only trims when the cut-off part is plain padding, checks that untrim
+    gives back the exact file first; untrim picks the padding that matches No-Intro).
+  - Every task writes a new file under a temporary name, checks it, and only then moves it into place; the
+    original only goes to the trash when you ask for it (or for trim/untrim in place, after the check).
   - Options: output next to source or into a folder, CD/DVD codec presets (default / Zstandard / LZMA) or
     custom codecs, hunk size, jobs at once, CPU threads per job, overwrite, verify-after-create, and
     *move sources to the trash after a verified success* (off by default; only after `chdman verify` passes).
@@ -133,6 +141,13 @@ and can be reverted from **History / Undo**.
   identified against your DATs first; BPS/UPS checksums are enforced (wrong ROM or already-patched ROM is
   refused) and copier headers are handled automatically. The original is never modified, an existing file is
   never overwritten, and the result can be tagged (Translation, Hack…) so ROM Verifier lists it as *Modified*.
+- **Patch → Auto-match a folder of patches…** — each patch is matched to a ROM in your library: by the
+  checksum BPS/UPS record (certain; unscanned files of the right size are hashed on the spot), by the original's
+  name that xdelta patches store, or by name similarity (marked "check"). Tick and patch them all at once.
+- **Space saver** tab — analyses a folder and lists what can be stored smaller without losing anything (disc
+  images → CHD, GameCube/Wii → RVZ, Switch → NSZ, NDS/3DS trimming, Xbox ISOs → CHD for archiving) or load
+  faster (LZMA CHDs → Zstandard), with estimates from compressing samples of your files and a warning where the
+  emulator can't read the result. *Queue ticked in Batch* sets it all up.
 - **chdman commands** tab — every chdman command with a form generated from `chdman help` (so new options
   appear automatically after an update), live command-line preview, *Run now* or *Add to batch queue*.
 - **chdman version & updates** tab — shows the selected chdman, the latest official MAME release and your

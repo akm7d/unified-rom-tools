@@ -24,6 +24,9 @@ from .scanner import _cue_parts, _gdi_parts
 # ------------------------------------------------------------------ presets
 
 TO_CHD, FROM_CHD, VERIFY, INFO, RECOMPRESS, CUSTOM = "to_chd", "from_chd", "verify", "info", "recompress", "custom"
+FIX_CHD, M3U, TRIM, UNTRIM = "fix_chd", "m3u", "trim", "untrim"
+TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ = "to_rvz", "from_rvz", "to_nsz", "from_nsz"
+DISC_EXTS = (".chd", ".cue", ".gdi", ".iso", ".pbp", ".rvz", ".ccd", ".mds")
 
 PRESETS = {
     TO_CHD: ("Create CHD (auto CD / GD-ROM / DVD)", (".cue", ".gdi", ".toc", ".iso", ".nrg")),
@@ -31,6 +34,14 @@ PRESETS = {
     VERIFY: ("Verify CHD integrity", (".chd",)),
     RECOMPRESS: ("Recompress CHD (copy with new settings)", (".chd",)),
     INFO: ("Show CHD info", (".chd",)),
+    FIX_CHD: ("Fix CHD types (CD ↔ DVD, lossless)", (".chd",)),
+    M3U: ("Create .m3u playlists for multi-disc games", DISC_EXTS),
+    TO_RVZ: ("GameCube / Wii → RVZ (Dolphin)", (".iso", ".gcm", ".gcz", ".wia", ".ciso", ".wbfs")),
+    FROM_RVZ: ("RVZ → ISO", (".rvz",)),
+    TO_NSZ: ("Switch NSP / XCI → NSZ / XCZ", (".nsp", ".xci")),
+    FROM_NSZ: ("Switch NSZ / XCZ → NSP / XCI", (".nsz", ".xcz")),
+    TRIM: ("Trim NDS / 3DS ROMs (reversible)", (".nds", ".dsi", ".3ds", ".cci")),
+    UNTRIM: ("Untrim NDS / 3DS ROMs back to the full dump", (".nds", ".dsi", ".3ds", ".cci")),
 }
 
 CD_CODECS = {
@@ -60,6 +71,10 @@ class Options:
     verify_after: bool = True       # chdman verify on new CHDs
     trash_sources: bool = False     # move inputs (and their tracks) to the trash after a verified success
     dat_lookup: Callable[[Path], object] | None = None  # Path -> DatIndex of its system (PS2 CD/DVD check)
+    all_dats: Callable[[], object] | None = None        # -> DatIndex of every DAT (CHD type check, untrim)
+    switch_keys: str = ""                               # prod.keys for NSZ
+    ram: bool = False                                   # CHD type fix: unpack in RAM
+    tmp_dir: str = ""
 
 
 @dataclass
@@ -84,9 +99,13 @@ class Job:
     step_progress: float = 0.0
     step_started: float = 0.0
     weight: int = 0                         # bytes of input, for an overall size-weighted progress
+    func: Callable | None = None            # Python task instead of chdman steps: func(ctx) -> message
+    func_label: str = ""                    # e.g. "Trimming", "Converting to RVZ"
 
     @property
     def step_name(self) -> str:
+        if self.func is not None:
+            return self.func_label or "Working"
         if not self.steps:
             return ""
         return STEP_NAMES.get(self.steps[min(self.step_index, len(self.steps) - 1)][1], "Running chdman")
@@ -142,6 +161,83 @@ def _common(opts: Options, kind: str) -> dict:
     return v
 
 
+def _task_job(title: str, src: Path, func, label: str, outputs=(), sources=(), opts: Options | None = None,
+              detail: str = "") -> Job:
+    j = Job(next(_ids), title, src, [], list(outputs), list(sources))
+    j.func, j.func_label, j.detail = func, label, detail
+    j.trash = bool(opts and opts.trash_sources)
+    return j
+
+
+def _skipped(title: str, src: Path, why: str) -> Job:
+    j = Job(next(_ids), title, src, [])
+    j.status, j.message = "Skipped", why
+    return j
+
+
+def _plan_task(preset: str, src: Path, opts: Options) -> Job | None:
+    from . import tasks
+    out_dir = _out_dir(src, opts)
+    if preset == FIX_CHD:
+        from .discdetect import check_chd
+        from .systems import guess_system
+        try:
+            ci = chd.info(src)
+        except Exception as exc:  # noqa: BLE001
+            return _skipped(f"fix type: {src.name}", src, str(exc))
+        idx = opts.all_dats() if opts.all_dats else None
+        sysdef = guess_system(src.parent.name)
+        game = idx.game_named(src.stem) if idx else None
+        mc = check_chd(ci.as_dict(), sysdef.id if sysdef else "", game)
+        if mc is None:
+            return _skipped(f"fix type: {src.name}", src, "can't tell the right type (unknown system, not in a DAT)")
+        if mc.ok:
+            return _skipped(f"fix type: {src.name}", src, f"already the right type ({mc.actual.upper()})")
+        if not mc.fixable:
+            return _skipped(f"fix type: {src.name}", src, f"{mc.label}: {mc.fix_note}")
+        return _task_job(f"fix type: {src.name}", src,
+                         tasks.fix_chd(src, mc.expected, opts.ram, Path(opts.tmp_dir or "/var/tmp/romtools")),
+                         f"Converting {mc.actual.upper()} → {mc.expected.upper()}", detail=f"{mc.label} ({mc.reason})")
+    if preset in (TRIM, UNTRIM):
+        out = out_dir / src.name
+        try:
+            size, used, full = tasks.trim_info(src)
+            detail = f"{size / 2**20:.1f} MiB now, {used / 2**20:.1f} MiB used, cartridge {full / 2**20:.0f} MiB"
+        except Exception as exc:  # noqa: BLE001
+            return _skipped(f"{preset}: {src.name}", src, str(exc))
+        if preset == TRIM:
+            return _task_job(f"trim: {src.name}", src, tasks.trim(src, out), "Trimming", [], [src], opts, detail)
+        idx = opts.all_dats() if opts.all_dats else None
+        return _task_job(f"untrim: {src.name}", src, tasks.untrim(src, out, idx), "Untrimming", [], [src], opts,
+                         detail)
+    if preset in (TO_RVZ, FROM_RVZ):
+        out = out_dir / (src.stem + (".rvz" if preset == TO_RVZ else ".iso"))
+        return _task_job(f"to {out.suffix[1:].upper()}: {src.name}", src, tasks.convert_disc_nod(src, out),
+                         f"Converting to {out.suffix[1:].upper()}", [out], [src], opts)
+    if preset in (TO_NSZ, FROM_NSZ):
+        ext = {".nsp": ".nsz", ".xci": ".xcz", ".nsz": ".nsp", ".xcz": ".xci"}[src.suffix.lower()]
+        out = out_dir / (src.stem + ext)
+        keys = Path(opts.switch_keys) if opts.switch_keys else None
+        return _task_job(f"to {ext[1:].upper()}: {src.name}", src, tasks.convert_nsz(src, out, keys),
+                         "Compressing" if preset == TO_NSZ else "Decompressing", [out], [src], opts)
+    return None
+
+
+def plan_playlists(paths: list[Path], opts: Options) -> list[Job]:
+    from . import tasks
+    folders = sorted({p if p.is_dir() else p.parent for p in paths})
+    jobs, seen = [], set()
+    for f in folders:
+        for m3u, discs in tasks.find_playlists(f):
+            if m3u in seen:
+                continue
+            seen.add(m3u)
+            jobs.append(_task_job(f"playlist: {m3u.name}", discs[0], tasks.write_playlist(m3u, discs),
+                                  "Writing playlist", detail=f"{len(discs)} discs: " +
+                                  ", ".join(d.name for d in discs)))
+    return jobs
+
+
 def plan(preset: str, files: list[Path], opts: Options) -> list[Job]:
     jobs = []
     for src in files:
@@ -152,6 +248,8 @@ def plan(preset: str, files: list[Path], opts: Options) -> list[Job]:
 
 
 def _plan_one(preset: str, src: Path, opts: Options) -> Job | None:
+    if preset in (FIX_CHD, TRIM, UNTRIM, TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ):
+        return _plan_task(preset, src, opts)
     ext = src.suffix.lower()
     out_dir = _out_dir(src, opts)
     exe = chdman_bin()
@@ -277,6 +375,8 @@ class Runner:
             job.status = "Cancelled"
             self.on_update(job)
             return
+        if job.func is not None:
+            return self._run_func(job)
         existing = [o for o in job.outputs if o.exists()]
         main_has_force = bool(job.steps) and "--force" in job.steps[0]
         if existing and not main_has_force and job.steps and job.steps[0][1] not in ("verify", "info"):
@@ -340,6 +440,40 @@ class Runner:
                 bad = [s for s in job.sources if s.exists() and not self.trash(s)]
                 job.message += ("; sources moved to trash" if not bad else
                                 f"; could not trash {len(bad)} source file(s)")
+        job.finished = time.time()
+        job.phase = ""
+        self.on_update(job)
+
+    def _run_func(self, job: Job) -> None:
+        """Run a Python task (see romtools/tasks.py) with the same progress / log / stop handling."""
+        from .tasks import TaskContext, TaskSkipped
+        job.status, job.started = "Running", time.time()
+        job.step_label = f"Step 1/1 · {job.step_name}"
+        job.step_started, job.phase = time.time(), ""
+        job.log.append(f"── {job.step_name}: {job.source} ──")
+        self.on_update(job)
+
+        def progress(f: float, phase: str = ""):
+            job.step_progress = job.progress = max(0.0, min(1.0, f))
+            if phase:
+                job.phase = phase
+            self.on_update(job)
+
+        def log(s: str):
+            job.log.append(s)
+            self.on_update(job)
+
+        ctx = TaskContext(log, progress, self.cancel, self.trash, job.trash)
+        try:
+            job.message = job.func(ctx) or "done"
+            job.status, job.progress = "Done", 1.0
+        except TaskSkipped as s:
+            job.status, job.message = "Skipped", str(s)
+        except Exception as exc:  # noqa: BLE001
+            cancelled = self.cancel.is_set()
+            job.status = "Cancelled" if cancelled else "Failed"
+            job.message = "stopped by user" if cancelled else str(exc)
+            log(f"{'Cancelled' if cancelled else 'Failed'}: {exc}")
         job.finished = time.time()
         job.phase = ""
         self.on_update(job)
