@@ -475,7 +475,19 @@ def main() -> int:
     step("Done")
     for m in made:
         print(f"   {m}")
+    for platform in [p for p, t in (("linux", "linux"), ("windows", "windows")) if args.target in (t, "all")]:
+        prune_old_builds(platform)
     return 0
+
+
+def prune_old_builds(platform: str) -> None:
+    """After a successful build, remove builds of OTHER versions for the same platform from dist/
+    (folder and archive), so dist/ only holds the current version."""
+    old = [p for p in DIST.glob(f"romtools-*-{platform}-x64*")
+           if not p.name.startswith(f"romtools-{VERSION}-{platform}-x64")]
+    for p in old:
+        shutil.rmtree(p) if p.is_dir() else p.unlink()
+        print(f"   removed old build: {p.name}")
 
 
 if __name__ == "__main__":

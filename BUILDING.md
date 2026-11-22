@@ -30,6 +30,9 @@ Makefile               shortcuts (below)
 | `make test-portable` | self-test the Linux build on a clean Ubuntu 24.04 in Docker (no chdman/7-Zip installed) |
 | `make clean` / `make distclean` | remove `build/` + `dist/` / also the download, venv and Wine cache |
 
+After a build succeeds, older versions' builds for that platform are removed from `dist/`, so it only holds the
+current version (a failed build leaves everything as it was). The version comes from `romtools/__init__.py`.
+
 Requirements on the build machine (Arch / CachyOS): `python`, `pyside6` (renders the icons), `7zip`, `wine`
 (Windows build only), and internet access the first time. Downloads, the Linux venv and the Wine prefix are
 cached in `~/.cache/romtools-build` (set `ROMTOOLS_BUILD_CACHE` to move it), so later builds take a few
