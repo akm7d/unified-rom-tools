@@ -7,6 +7,13 @@
 "PySide6-Essentials" = "6.12.0"
 "pyinstaller" = "6.22.3"
 
+[python_linux]
+# Portable CPython for the Linux build (python-build-standalone: built against an old glibc, so the build runs
+# on most distros; the distro's own Python is built for its own, newer glibc). sha256 from the release's SHA256SUMS.
+version = "3.14.10"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.14.10+20261110-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "c2ff2e97422f5d3896a16e0317fd212ba977bbf2688d93a6f7a03d817506bd30"
+
 [python_windows]
 # Official Windows installer from python.org (sha256 from python.org's release listing).
 version = "3.14.10"
@@ -17,6 +24,17 @@ sha256 = "92480239264744fe0386a1bd8275786fefa126e3129e56a68e22b52c73329965"
 # chdman.exe bundled in the Windows build, taken from MAME's official release.
 # Its SHA-256 is checked against the SHA256SUMS file MAME publishes with each release.
 mame_tag = "mame0289"
+
+[chdman_linux]
+# chdman bundled in the Linux build: built from the same MAME release's official source package by build.py
+# (C++ runtime linked in, a stub for the 4 unused SDL clipboard calls), so it only needs glibc.
+mame_tag = "mame0289"
+
+[sevenzip_linux]
+# 7zzs (fully static 7-Zip) bundled in the Linux build, from 7-Zip's official GitHub releases.
+version = "26.06"
+url = "https://github.com/ip7z/7zip/releases/download/26.06/7z2606-linux-x64.tar.xz"
+sha256 = "2b539cf067b2ad48e1baa5093dbaa8818b73542d1222a0ffde9dc5f2922ea62e"
 
 [sevenzip_windows]
 # 7z.exe / 7z.dll bundled in the Windows build (archive hashing, chdman updates).

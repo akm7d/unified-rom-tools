@@ -117,13 +117,22 @@ def selftest(report: str | None) -> int:
 
     def paths():
         from romtools import compat, config
-        return f"config {config.CONFIG_DIR}, temp {config.DEFAULTS['tmp_dir']}, RAM mode {compat.ram_mode_supported()}"
+        mode = (f"portable build (data folder: {compat.app_dir() / 'data'})" if portable_build
+                else "per-user settings")
+        # round-trip a path inside the data folder through the relative-path storage
+        sample = str(config.DATA_DIR / "dats" / "x.dat")
+        assert config.unpack_path(config.pack_path(sample)) == sample, "relative path round-trip failed"
+        return (f"{mode}; config {config.CONFIG_DIR}, temp {config.DEFAULTS['tmp_dir']}, "
+                f"RAM mode {compat.ram_mode_supported()}")
 
     # Windows keeps open files (e.g. the hash-cache database) locked, so leftovers may outlive the test.
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home:
         # isolate settings, data and cache for the self-test
+        from romtools import compat
+        portable_build = compat.portable_marker()   # checked before isolating
         for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "APPDATA", "LOCALAPPDATA"):
             os.environ[var] = home
+        os.environ["ROMTOOLS_HOME"] = str(Path(home) / "portable")   # never touch the build's own data folder
         for label, fn in (("imports", imports), ("paths", paths), ("chdman", chdman), ("7-Zip", sevenzip),
                           ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui)):
             check(label, fn)

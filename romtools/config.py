@@ -7,12 +7,47 @@ import os
 import threading
 from pathlib import Path
 
-from .compat import IS_WIN, default_tmp_dir, ram_mode_supported, user_dirs
+from .compat import IS_WIN, app_dir, default_tmp_dir, portable_root, ram_mode_supported, romtools_dirs
 
-_cfg, _data, _cache = user_dirs()
-CONFIG_DIR = _cfg / "romtools"
-DATA_DIR = _data / "romtools"
-CACHE_DIR = _cache / "romtools"
+CONFIG_DIR, DATA_DIR, CACHE_DIR = romtools_dirs()
+PORTABLE = portable_root() is not None
+
+# In portable mode, paths inside the portable folder are saved relative to it ({data}/..., {app}/...),
+# so DATs, a downloaded chdman or a library next to the programs keep working after the folder moves.
+_TOKENS = (("{data}", DATA_DIR), ("{app}", app_dir()))
+
+
+def pack_path(p: str) -> str:
+    if not PORTABLE or not p or p.startswith("{"):
+        return p
+    try:
+        path = Path(p).resolve()
+    except OSError:
+        return p
+    for token, base in _TOKENS:
+        try:
+            return token + "/" + path.relative_to(base.resolve()).as_posix()
+        except ValueError:
+            continue
+    return p
+
+
+def unpack_path(p: str) -> str:
+    for token, base in _TOKENS:
+        if p.startswith(token + "/"):
+            return str(base / p[len(token) + 1:])
+    return p
+
+
+def _map_paths(data: dict, fn) -> dict:
+    out = json.loads(json.dumps(data))
+    for key in ("library_root", "tmp_dir", "chdman_path"):
+        if isinstance(out.get(key), str) and out[key] not in ("system",):
+            out[key] = fn(out[key])
+    for s in (out.get("systems") or {}).values():
+        if isinstance(s, dict) and isinstance(s.get("dats"), list):
+            s["dats"] = [fn(d) for d in s["dats"]]
+    return out
 DAT_DIR = DATA_DIR / "dats"
 JOURNAL_DIR = DATA_DIR / "rename-journal"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -49,7 +84,7 @@ class Config:
         self.data = dict(DEFAULTS)
         try:
             with open(CONFIG_FILE, encoding="utf-8") as fh:
-                self.data.update(json.load(fh))
+                self.data.update(_map_paths(json.load(fh), unpack_path))
         except (OSError, ValueError):
             pass
         if not self.data.get("library_root"):
@@ -74,7 +109,7 @@ class Config:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             tmp = CONFIG_FILE.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(self.data, fh, indent=2)
+                json.dump(_map_paths(self.data, pack_path), fh, indent=2)
             os.replace(tmp, CONFIG_FILE)
 
 

@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Adds the packaged ROM Verifier / Renamer / Converter to your app menu and ~/.local/bin.
-# Run from inside the extracted romtools-<version>-linux-x64 folder. Re-run after moving the folder.
-# Needs chdman (mame-tools) and 7z (7zip) from your distribution.
+# Optional: adds the portable ROM Verifier / Renamer / Converter to your app menu and ~/.local/bin.
+# The programs also run straight from this folder without it. Re-run after moving the folder.
+# chdman and 7-Zip are bundled in tools/, nothing else needs installing.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HOME/.local/bin"; APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 mkdir -p "$BIN" "$APPS" "$ICONS"
-for t in chdman 7z; do
-  command -v "$t" >/dev/null || echo "Note: '$t' not found - install mame-tools / 7zip for CHD and archive support."
-done
 declare -A NAME=([verifier]="ROM Verifier" [renamer]="ROM Renamer" [converter]="ROM Converter")
 declare -A DESC=([verifier]="Verify ROMs and CHDs against No-Intro and Redump DATs"
                  [renamer]="Rename ROMs to their No-Intro / Redump names, with preview and undo"

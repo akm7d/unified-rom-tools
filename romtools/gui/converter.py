@@ -20,7 +20,7 @@ from .. import chdman_tool as ct
 from .. import converter as cv
 from .. import updater as up
 from ..config import get_config
-from ..compat import IS_WIN, find_tool, launch_app, resource_dir
+from ..compat import FROZEN, IS_WIN, find_tool, launch_app, resource_dir
 from .common import Worker, human, is_dark, make_app, restore_geometry, save_geometry
 
 STATUS_COLOR = {"Queued": "#7f8790", "Running": "#2f7fd1", "Done": "#2e9d53", "Failed": "#d1452f",
@@ -941,7 +941,7 @@ class ChdmanTab(QWidget):
         self.choice.clear()
         sysbin = find_tool("chdman")
         sv = ct.version(sysbin) if sysbin else None
-        label = "Bundled" if IS_WIN else "System"
+        label = "Bundled" if (IS_WIN or FROZEN) else "System"
         self.choice.addItem(f"{label}: {sysbin or 'not installed'}" + (f"  (v{sv.number})" if sv else ""), "system")
         for tag, exe in up.built_versions():
             v = ct.version(str(exe))

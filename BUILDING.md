@@ -26,6 +26,7 @@ Makefile               shortcuts (below)
 | `make linux` | `dist/romtools-<version>-linux-x64.tar.gz` |
 | `make windows` | `dist/romtools-<version>-windows-x64.zip` (built with Wine on Linux) |
 | `make all` | both |
+| `make test-portable` | self-test the Linux build on a clean Ubuntu 24.04 in Docker (no chdman/7-Zip installed) |
 | `make clean` / `make distclean` | remove `build/` + `dist/` / also the download, venv and Wine cache |
 
 Requirements on the build machine (Arch / CachyOS): `python`, `pyside6` (renders the icons), `7zip`, `wine`
@@ -38,11 +39,26 @@ Every build runs the **packaged** program with `--selftest` (under Wine for Wind
 7-Zip, hashing, DAT parsing and all three windows. A failing self-test stops the build, so a broken
 archive never lands in `dist/`.
 
+## Portable builds
+
+Both builds ship a `portable.txt` marker. While it's present, `compat.portable_root()` puts config, data and
+cache in `<program folder>/data`, and `config.py` stores paths inside that folder relative to it (`{data}/…`,
+`{app}/…`), so the folder can move. The self-test forces its own throwaway `ROMTOOLS_HOME` and never touches a
+build's `data` folder.
+
+- **Windows** bundles `chdman.exe` (official MAME release) and `7z.exe`. CHD temp files go to `%TEMP%`.
+- **Linux** bundles `tools/chdman`, built by `build.py` from MAME's official source (cached per MAME
+  release). The C++ runtime is linked in, and a tiny stub stands in for the 4 SDL clipboard calls chdman never
+  makes, so it needs only glibc. It also bundles `tools/7zz`, the fully static 7-Zip. Python comes from
+  python-build-standalone, and the spec leaves the build machine's system libraries out. The result needs
+  glibc 2.38+ (the bundled chdman and libxcb-cursor set that floor; Qt and Python only need 2.34).
+  `make test-portable` proves it on Ubuntu 24.04.
+
 ## Releasing a new version
 
 1. Make and test your changes from source (`make run`, `make selftest`).
 2. Bump `__version__` in `romtools/__init__.py`.
-3. `make all` and check both self-tests print `RESULT OK`.
+3. `make all`, then `make test-portable`. All three must print `RESULT OK`.
 4. Commit, then tag: `git tag v<version>`.
 5. Ship `dist/romtools-<version>-linux-x64.tar.gz` and `dist/romtools-<version>-windows-x64.zip`.
 
@@ -53,8 +69,12 @@ Edit `packaging/versions.toml`, then `make all`:
 - **PySide6 / PyInstaller**: change the version under `[pip]`. Both builds use the same pins.
 - **Windows Python**: take the `-amd64.exe` URL and its SHA-256 from python.org's release page.
   Use a release that still ships Windows installers (security-only releases don't).
-- **Bundled chdman.exe**: change `mame_tag` (e.g. `mame0290`). Its checksum is taken from MAME's
-  `SHA256SUMS` automatically. Users can also update chdman from inside ROM Converter.
+- **Bundled chdman**: change `mame_tag` under both `[chdman_windows]` and `[chdman_linux]` (e.g. `mame0290`).
+  Windows takes `chdman.exe` from the release (checksum from MAME's `SHA256SUMS`); Linux builds it from
+  that release's source package the first time (a few minutes, then cached). Users can also update chdman
+  from inside ROM Converter.
+- **Linux Python**: `[python_linux]`, a python-build-standalone `install_only_stripped` x86_64 build, with its
+  SHA-256 from that release's `SHA256SUMS`.
 - **7-Zip**: change `version`, `url` and `sha256` (compare the GitHub and 7-zip.org copies).
 
 Downloads whose SHA-256 doesn't match are refused.

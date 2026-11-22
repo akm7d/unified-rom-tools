@@ -7,6 +7,11 @@ Linux is the primary platform. On Windows:
   * bundled tools (chdman.exe, 7z.exe) are taken from the "tools" folder next to the program
   * child processes never pop up console windows
   * the trash is the Recycle Bin
+
+Portable mode (packaged builds): when a "portable.txt" file sits next to the programs, settings, DATs, tags,
+rename history and remembered scans are kept in a "data" folder beside them instead of the user profile,
+so the whole folder can be copied or moved (USB stick, another PC). Delete portable.txt to switch back.
+ROMTOOLS_HOME=<folder> forces that layout anywhere (used by the self-test).
 """
 
 from __future__ import annotations
@@ -35,6 +40,45 @@ def resource_dir() -> Path:
     return app_dir()
 
 
+PORTABLE_MARKER = "portable.txt"
+
+
+def portable_marker() -> bool:
+    return FROZEN and (app_dir() / PORTABLE_MARKER).is_file()
+
+
+def _writable(d: Path) -> bool:
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".write-test"
+        probe.write_text("x")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def portable_root() -> Path | None:
+    """Folder holding everything in portable mode, or None for the normal per-user locations."""
+    forced = os.environ.get("ROMTOOLS_HOME")
+    if forced:
+        return Path(forced)
+    if portable_marker():
+        d = app_dir() / "data"
+        if _writable(d):          # e.g. extracted into a read-only location: fall back to the user profile
+            return d
+    return None
+
+
+def romtools_dirs() -> tuple[Path, Path, Path]:
+    """(config, data, cache) folders for romtools itself."""
+    root = portable_root()
+    if root is not None:
+        return root / "config", root, root / "cache"
+    c, d, k = user_dirs()
+    return c / "romtools", d / "romtools", k / "romtools"
+
+
 def user_dirs() -> tuple[Path, Path, Path]:
     """(config, data, cache) base folders; romtools/ is appended by the caller."""
     if IS_WIN:
@@ -49,8 +93,9 @@ def user_dirs() -> tuple[Path, Path, Path]:
 
 
 def default_tmp_dir() -> str:
-    if IS_WIN:
-        return str(user_dirs()[1] / "romtools" / "tmp")
+    if IS_WIN:   # the system temp folder: nothing left in the user profile (matters for portable copies)
+        import tempfile
+        return str(Path(tempfile.gettempdir()) / "romtools")
     return "/var/tmp/romtools"   # local disk, not tmpfs: DVD CHDs extract to ~4-8 GB
 
 

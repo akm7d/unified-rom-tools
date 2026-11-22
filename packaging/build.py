@@ -4,6 +4,7 @@
     python3 packaging/build.py linux      # dist/romtools-<version>-linux-x64.tar.gz
     python3 packaging/build.py windows    # dist/romtools-<version>-windows-x64.zip  (Wine on Linux, or native)
     python3 packaging/build.py all
+    python3 packaging/build.py test-portable  # self-test the Linux build on a clean Ubuntu 24.04 (Docker)
     python3 packaging/build.py clean      # remove build/ and dist/
     python3 packaging/build.py distclean  # also remove the download / venv / Wine cache
 
@@ -133,14 +134,104 @@ def check_selftest(report: Path, label: str) -> None:
         raise SystemExit(f"{label} self-test FAILED - not packaging a broken build")
 
 
+# ---------------------------------------------------------------- portable marker
+
+PORTABLE_TXT = """This copy of romtools is PORTABLE.
+
+While this file is here, ROM Verifier, ROM Renamer and ROM Converter keep their settings, DATs, hack/translation
+tags, rename history and remembered scans in the "data" folder next to the programs. Copy or move the whole
+folder (USB stick, another PC) and everything comes along.
+
+Delete this file to use the normal per-user locations instead
+(Linux: ~/.config, ~/.local/share and ~/.cache; Windows: %APPDATA% and %LOCALAPPDATA%).
+"""
+
+
+# ---------------------------------------------------------------- Linux tools
+
+SDL_STUB = r"""
+/* chdman links SDL2 only for clipboard helpers it never calls. This stub stands in for libSDL2 so the
+   bundled chdman runs on systems without SDL. */
+#include <stdlib.h>
+void SDL_free(void *p) { free(p); }
+char *SDL_GetClipboardText(void) { char *s = malloc(1); if (s) s[0] = 0; return s; }
+int SDL_HasClipboardText(void) { return 0; }
+int SDL_SetClipboardText(const char *text) { (void)text; return -1; }
+"""
+
+CHDMAN_WRAPPER = """#!/bin/sh
+# Runs the bundled chdman with its bundled libraries (see tools/lib).
+d="$(dirname "$(readlink -f "$0")")"
+LD_LIBRARY_PATH="$d/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$d/bin/chdman" "$@"
+"""
+
+
+def linux_chdman() -> Path:
+    """chdman built from MAME's official source with the C++ runtime linked in (cached per MAME release)."""
+    tag = PINS["chdman_linux"]["mame_tag"]
+    out = CACHE / "chdman-linux" / tag
+    exe = out / "bin" / "chdman"
+    if not exe.exists():
+        step(f"Building chdman {tag} from MAME's official source (one time per MAME release, ~2-5 min)")
+        sys.path.insert(0, str(ROOT))
+        from romtools.updater import build_script
+        work = Path("/dev/shm/romtools-build") if Path("/dev/shm").is_dir() else CACHE / "work"
+        script = build_script(tag, work, max(1, (os.cpu_count() or 4) - 2), dest_dir=out / "bin",
+                              ldopts="-Wl,--as-needed -static-libstdc++ -static-libgcc")
+        run(["nice", "-n", "10", "bash", "-c", script])
+    lib = out / "lib" / "libSDL2-2.0.so.0"
+    if not lib.exists():
+        lib.parent.mkdir(parents=True, exist_ok=True)
+        src = out / "sdlstub.c"
+        src.write_text(SDL_STUB)
+        run(["cc", "-O2", "-shared", "-fPIC", "-Wl,-soname,libSDL2-2.0.so.0", "-o", lib, src])
+    return out
+
+
+def linux_tools(dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    built = linux_chdman()
+    shutil.copytree(built / "bin", dest / "bin", dirs_exist_ok=True)
+    shutil.copytree(built / "lib", dest / "lib", dirs_exist_ok=True)
+    (dest / "chdman").write_text(CHDMAN_WRAPPER)
+    (dest / "chdman").chmod(0o755)
+    tag = PINS["chdman_linux"]["mame_tag"]
+    (dest / "chdman-LICENSE.txt").write_text(
+        f"chdman is part of MAME {tag} (https://www.mamedev.org), built unmodified from the official source\n"
+        f"package of that release. MAME is licensed under the GPL-2.0-or-later; source code:\n"
+        f"https://github.com/mamedev/mame/tree/{tag}\n"
+        f"lib/libSDL2-2.0.so.0 is a small stub (public domain) for 4 clipboard functions chdman never uses.\n",
+        encoding="utf-8")
+    sz = PINS["sevenzip_linux"]
+    tarball = download(sz["url"], sz["sha256"])
+    with tarfile.open(tarball) as tf:
+        for member, target in (("7zzs", "7zz"), ("License.txt", "7-Zip-License.txt")):
+            data = tf.extractfile(member).read()
+            (dest / target).write_bytes(data)
+    (dest / "7zz").chmod(0o755)
+
+
 # ---------------------------------------------------------------- Linux
 
 def build_linux(skip_selftest: bool) -> Path:
     step(f"Linux build {VERSION}")
-    venv = CACHE / "venv-linux"
+    pyl = PINS["python_linux"]
+    base = CACHE / "python-linux" / pyl["version"]
+    if not (base / "bin" / "python3").exists():
+        step(f"Unpacking portable Python {pyl['version']} (python-build-standalone)")
+        tarball = download(pyl["url"], pyl["sha256"])
+        shutil.rmtree(base, ignore_errors=True)
+        base.mkdir(parents=True)
+        with tarfile.open(tarball) as tf:
+            tf.extractall(base, filter="data")
+        inner = base / "python"           # archives contain a top-level "python/" folder
+        for item in inner.iterdir():
+            item.rename(base / item.name)
+        inner.rmdir()
+    venv = CACHE / f"venv-linux-{pyl['version']}"
     py = venv / "bin" / "python"
     if not py.exists():
-        run([sys.executable, "-m", "venv", venv])
+        run([base / "bin" / "python3", "-m", "venv", venv])
     run([py, "-m", "pip", "install", "-q", "--upgrade", "pip"])
     run([py, "-m", "pip", "install", "-q", *pip_requirements()])
 
@@ -157,6 +248,9 @@ def build_linux(skip_selftest: bool) -> Path:
     shutil.copy2(PKG / "linux" / "install.sh", out / "install.sh")
     shutil.copy2(ROOT / "README.md", out / "README.md")
     (out / "install.sh").chmod(0o755)
+    step("Bundling chdman and 7-Zip")
+    linux_tools(out / "tools")
+    (out / "portable.txt").write_text(PORTABLE_TXT)
 
     if not skip_selftest:
         step("Linux self-test")
@@ -255,6 +349,7 @@ def build_windows(skip_selftest: bool) -> Path:
     shutil.copytree(tools, out / "tools")
     shutil.copy2(PKG / "windows" / "README-Windows.txt", out / "README-Windows.txt")
     shutil.copy2(ROOT / "README.md", out / "README.md")
+    (out / "portable.txt").write_text(PORTABLE_TXT.replace("\n", "\r\n"))
 
     if not skip_selftest:
         step("Windows self-test" + ("" if NATIVE_WIN else " (under Wine)"))
@@ -272,6 +367,32 @@ def build_windows(skip_selftest: bool) -> Path:
             zf.write(f, Path(name) / f.relative_to(out))
     print(f"   {archive}  ({archive.stat().st_size >> 20} MB)")
     return archive
+
+
+# ---------------------------------------------------------------- portability test
+
+TEST_IMAGE = "ubuntu:24.04"   # oldest mainstream distro the Linux build targets (glibc 2.39)
+
+
+def test_portable() -> None:
+    """Run the Linux build's self-test in a clean container without chdman/7-Zip, folder mounted read-only."""
+    builds = sorted(DIST.glob("romtools-*-linux-x64"))
+    if not builds:
+        raise SystemExit("no Linux build in dist/ - run `make linux` first")
+    if not shutil.which("docker"):
+        raise SystemExit("Docker is needed for this test")
+    step(f"Self-testing {builds[-1].name} on {TEST_IMAGE}")
+    script = ("export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq "
+              "--no-install-recommends libglib2.0-0t64 libfontconfig1 libfreetype6 libx11-6 libx11-xcb1 "
+              "libxkbcommon0 libegl1 libgl1 libdbus-1-3 libxcb1 fonts-dejavu-core >/dev/null 2>&1; "
+              'echo "   $(. /etc/os-release; echo $PRETTY_NAME), $(ldd --version | head -1)"; '
+              "QT_QPA_PLATFORM=offscreen /app/rom-verifier --selftest /tmp/r.txt >/dev/null 2>&1; cat /tmp/r.txt")
+    r = subprocess.run(["docker", "run", "--rm", "-v", f"{builds[-1]}:/app:ro", TEST_IMAGE, "bash", "-c", script],
+                       capture_output=True, text=True)
+    print("\n".join("   " + ln for ln in r.stdout.splitlines()))
+    if "RESULT OK" not in r.stdout:
+        print(r.stderr[-2000:])
+        raise SystemExit("portable Linux build FAILED on " + TEST_IMAGE)
 
 
 # ---------------------------------------------------------------- cleaning
@@ -302,11 +423,14 @@ def clean(cache_too: bool) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("target", choices=["linux", "windows", "all", "clean", "distclean"])
+    ap.add_argument("target", choices=["linux", "windows", "all", "test-portable", "clean", "distclean"])
     ap.add_argument("--skip-selftest", action="store_true", help="don't run the packaged program's self-test")
     args = ap.parse_args()
     if args.target in ("clean", "distclean"):
         clean(args.target == "distclean")
+        return 0
+    if args.target == "test-portable":
+        test_portable()
         return 0
     DIST.mkdir(exist_ok=True)
     made = []

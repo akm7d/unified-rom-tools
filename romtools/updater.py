@@ -116,17 +116,19 @@ def build_dir_default() -> Path:
     return Path.home() / ".cache/romtools/build"
 
 
-def build_script(tag: str, work_root: Path, jobs: int) -> str:
+def build_script(tag: str, work_root: Path, jobs: int, dest_dir: Path | None = None, ldopts: str = "") -> str:
     """Bash script: fetch the release's official source package, check its SHA-256 against MAME's
     published SHA256SUMS, unpack, build tools only (no emulator), install chdman per-user."""
     w = shlex.quote(str(work_root / tag))
-    dest = shlex.quote(str(BUILD_DIR / tag))
+    dest = shlex.quote(str(dest_dir or BUILD_DIR / tag))
     base = REL_URL.format(tag=tag)
     asset = SRC_ASSET.format(tag=tag)
     digits = tag.removeprefix("mame")
     tag_num = f"{digits[0]}.{digits[1:]}" if digits.isdigit() else digits
     flags = ("TOOLS=1 EMULATOR=0 NOWERROR=1 IGNORE_GIT=1 NO_USE_MIDI=1 NO_USE_PORTAUDIO=1 "
              "NO_USE_PULSEAUDIO=1 NO_USE_PIPEWIRE=1 OPTIMIZE=2")
+    if ldopts:
+        flags += " LDOPTS=" + shlex.quote(ldopts)
     return f"""set -euo pipefail
 trap 'echo; echo "== Cleaning up build folder"; rm -rf {w}; rmdir {shlex.quote(str(work_root))} 2>/dev/null || true' EXIT
 for t in gcc g++ make python3 curl 7z sha256sum; do
