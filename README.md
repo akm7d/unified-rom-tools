@@ -151,7 +151,8 @@ and can be reverted from **History / Undo**.
 - **Space saver** tab — analyses a folder and lists what can be stored smaller without losing anything (disc
   images → CHD, GameCube/Wii → RVZ, Switch → NSZ, NDS/3DS trimming, Xbox ISOs → CHD for archiving) or load
   faster (LZMA CHDs → Zstandard), with estimates from compressing samples of your files and a warning where the
-  emulator can't read the result. *Queue ticked in Batch* sets it all up.
+  emulator can't read the result. Every file gets its own row with its own estimate and tick box (tick a
+  suggestion to tick all its files); *Queue ticked in Batch* sets the ticked files up.
 - **chdman commands** tab — every chdman command with a form generated from `chdman help` (so new options
   appear automatically after an update), live command-line preview, *Run now* or *Add to batch queue*.
 - **chdman version & updates** tab — shows the selected chdman, the latest official MAME release and your

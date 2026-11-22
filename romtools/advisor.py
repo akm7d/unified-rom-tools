@@ -30,6 +30,13 @@ class Suggestion:
     compat: str = ""             # who can read the result
     warning: str = ""            # shown in orange (e.g. "Xenia can't read CHD")
     kind: str = "space"          # space | speed
+    per_file: dict[Path, tuple[int, int]] = field(default_factory=dict)   # file -> (size now, size after)
+
+    def note(self, f: Path, now: int, after: int) -> None:
+        a, b = self.per_file.get(f, (0, 0))
+        self.per_file[f] = (a + now, b + after)
+        self.size_now += now
+        self.size_after += after
 
     @property
     def saving(self) -> int:
@@ -92,8 +99,7 @@ def analyse(cfg, root: Path, progress: Callable[[str], None] = lambda s: None,
                 sz = f.stat().st_size
             except OSError:
                 continue
-            s.size_now += sz
-            s.size_after += int(sz * (ratio_of(f) if ratio_of else 1.0))
+            s.note(f, sz, int(sz * (ratio_of(f) if ratio_of else 1.0)))
         if s.files:
             out.append(s)
 
@@ -125,8 +131,7 @@ def analyse(cfg, root: Path, progress: Callable[[str], None] = lambda s: None,
                     for p in (_cue_parts(f) if f.suffix.lower() == ".cue" else _gdi_parts(f)):
                         if p.exists():
                             sz = p.stat().st_size
-                            s.size_now += sz
-                            s.size_after += int(sz * disc_ratio(f))
+                            s.note(f, sz, int(sz * disc_ratio(f)))
             add(s, lambda f: disc_ratio(f) if f.suffix.lower() == ".iso" else 1.0)
 
         # 2. GameCube / Wii -> RVZ

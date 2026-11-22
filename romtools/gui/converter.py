@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QGuiApplication
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleOptionProgressBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QToolBar, QVBoxLayout, QWidget, QDialog)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleOptionProgressBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QDialog)
 
 from .. import __version__
 from .. import chdman_tool as ct
@@ -1199,7 +1199,8 @@ class PatchTab(QWidget):
 # ====================================================================== Space saver tab
 
 class SpaceTab(QWidget):
-    COLS = ["", "Folder", "Suggestion", "Files", "Now", "After (est.)", "Saves", "Readable by", "Note"]
+    COLS = ["Suggestion / file", "Folder", "Files", "Now", "After (est.)", "Saves", "Readable by", "Note"]
+    PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, win: "ConverterWindow"):
         super().__init__()
@@ -1210,15 +1211,23 @@ class SpaceTab(QWidget):
         self.root = QLineEdit(cfg["window_state"].get("advisor_dir") or cfg["library_root"])
         self.go = QPushButton(QIcon.fromTheme("edit-find"), "Analyse")
         self.go.clicked.connect(self.analyse)
-        self.table = QTableWidget(0, len(self.COLS))
-        self.table.setHorizontalHeaderLabels(self.COLS)
-        self.table.verticalHeader().hide()
+        self.table = QTreeWidget()
+        self.table.setColumnCount(len(self.COLS))
+        self.table.setHeaderLabels(self.COLS)
         self.table.setAlternatingRowColors(True)
-        hh = self.table.horizontalHeader()
+        self.table.setUniformRowHeights(True)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSortingEnabled(False)
+        hh = self.table.header()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setStretchLastSection(True)
-        for c, wdt in ((0, 28), (1, 90), (2, 330), (3, 55), (4, 85), (5, 95), (6, 85), (7, 300)):
+        for c, wdt in ((0, 460), (1, 90), (2, 50), (3, 85), (4, 95), (5, 85), (6, 280)):
             self.table.setColumnWidth(c, wdt)
+        self.table.itemChanged.connect(lambda *_: self._count_ticked())
+        expand = QPushButton("Expand all")
+        expand.clicked.connect(self.table.expandAll)
+        collapse = QPushButton("Collapse all")
+        collapse.clicked.connect(self.table.collapseAll)
         self.total = QLabel("Analyse a folder to see where space can be saved without losing anything.")
         self.queue = QPushButton(QIcon.fromTheme("list-add"), "Queue ticked in Batch")
         self.queue.setEnabled(False)
@@ -1229,6 +1238,8 @@ class SpaceTab(QWidget):
         top.addWidget(self.go)
         bottom = QHBoxLayout()
         bottom.addWidget(self.total, 1)
+        bottom.addWidget(expand)
+        bottom.addWidget(collapse)
         bottom.addWidget(self.queue)
         lay = QVBoxLayout(self)
         intro = QLabel("Every suggestion is lossless and verified before anything is replaced. Estimates come from "
@@ -1243,7 +1254,9 @@ class SpaceTab(QWidget):
 
     @staticmethod
     def _size(n: int) -> str:
-        return f"{n / 2**30:.1f} GB" if n >= 2**30 else f"{n / 2**20:.0f} MB"
+        if n >= 2**30:
+            return f"{n / 2**30:.1f} GB"
+        return f"{n / 2**20:.0f} MB" if n >= 2**20 else f"{n / 2**10:.0f} KB"
 
     def analyse(self):
         if self.worker and self.worker.isRunning():
@@ -1271,44 +1284,86 @@ class SpaceTab(QWidget):
     def _show(self, suggestions):
         self.go.setEnabled(True)
         self.suggestions = suggestions
-        self.table.setRowCount(len(suggestions))
+        self.table.blockSignals(True)
+        self.table.clear()
         warn = QColor("#d49a1b")
-        for r, s in enumerate(suggestions):
-            chk = QTableWidgetItem()
-            chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            tick = s.kind == "space" and s.saving > 50 * 2**20 and not s.warning
-            chk.setCheckState(Qt.CheckState.Checked if tick else Qt.CheckState.Unchecked)
-            self.table.setItem(r, 0, chk)
-            cells = [s.folder, s.title + ("  (speed)" if s.kind == "speed" else ""), str(len(s.files)),
-                     self._size(s.size_now), self._size(s.size_after),
-                     self._size(s.saving) if s.kind == "space" else "—", s.compat, s.warning]
-            for c, text in enumerate(cells, 1):
-                it = QTableWidgetItem(text)
-                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if c == 2:
-                    it.setToolTip("\n".join(f.name for f in s.files[:40]) + ("\n…" if len(s.files) > 40 else ""))
-                if c == 8 and text:
-                    it.setForeground(warn)
-                    it.setToolTip(text)
-                self.table.setItem(r, c, it)
-        total = sum(s.saving for s in suggestions if s.kind == "space")
-        self.total.setText(f"{len(suggestions)} suggestion(s), up to {self._size(total)} could be saved. Tick what "
-                           f"you want and queue it." if suggestions else "Nothing to suggest — already compact.")
+        root = Path(self.root.text().strip()).expanduser()
+        right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        for s in suggestions:
+            space = s.kind == "space"
+            tick = space and s.saving > 50 * 2**20 and not s.warning
+            parent = QTreeWidgetItem([s.title + ("  (speed)" if not space else ""), s.folder, str(len(s.files)),
+                                      self._size(s.size_now), self._size(s.size_after),
+                                      self._size(s.saving) if space else "—", s.compat, s.warning])
+            parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            f0 = parent.font(0)
+            f0.setBold(True)
+            parent.setFont(0, f0)
+            if s.warning:
+                parent.setForeground(7, warn)
+                parent.setToolTip(7, s.warning)
+            per = s.per_file or {f: (0, 0) for f in s.files}
+            # biggest saving first, so the files worth converting are at the top
+            for f, (now, after) in sorted(per.items(), key=lambda kv: kv[1][1] - kv[1][0]):
+                try:
+                    shown = str(f.relative_to(root / s.folder)) if (root / s.folder) in f.parents else \
+                        str(f.relative_to(root))
+                except ValueError:
+                    shown = f.name
+                child = QTreeWidgetItem(["", "", "", self._size(now), self._size(after),
+                                         self._size(max(0, now - after)) if space else "—", "", ""])
+                child.setText(0, shown)
+                child.setToolTip(0, str(f))
+                child.setData(0, self.PATH_ROLE, str(f))
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.CheckState.Checked if tick else Qt.CheckState.Unchecked)
+                for c in (3, 4, 5):
+                    child.setTextAlignment(c, right)
+                parent.addChild(child)
+            for c in (2, 3, 4, 5):
+                parent.setTextAlignment(c, right)
+            self.table.addTopLevelItem(parent)
+            parent.setExpanded(True)
+        self.table.blockSignals(False)
         self.queue.setEnabled(bool(suggestions))
+        self._count_ticked()
+
+    def _ticked(self) -> list[tuple[object, list[Path]]]:
+        out = []
+        for i, s in enumerate(self.suggestions):
+            parent = self.table.topLevelItem(i)
+            files = [Path(parent.child(k).data(0, self.PATH_ROLE)) for k in range(parent.childCount())
+                     if parent.child(k).checkState(0) == Qt.CheckState.Checked]
+            if files:
+                out.append((s, files))
+        return out
+
+    def _count_ticked(self):
+        if not self.suggestions:
+            self.total.setText("Nothing to suggest — already compact.")
+            self.queue.setEnabled(False)
+            return
+        total = sum(s.saving for s in self.suggestions if s.kind == "space")
+        ticked = self._ticked()
+        n = sum(len(f) for _s, f in ticked)
+        saves = sum(max(0, s.per_file.get(f, (0, 0))[0] - s.per_file.get(f, (0, 0))[1])
+                    for s, files in ticked if s.kind == "space" for f in files)
+        nfiles = sum(len(s.files) for s in self.suggestions)
+        self.total.setText(f"{len(self.suggestions)} suggestion(s) for {nfiles} file(s), up to {self._size(total)} "
+                           f"could be saved. Ticked: {n} file(s), about {self._size(saves)}.")
+        self.queue.setEnabled(n > 0)
 
     def to_batch(self):
         from .. import converter as cv
         b = self.win.batch
         queued = 0
-        for r, s in enumerate(self.suggestions):
-            if self.table.item(r, 0).checkState() != Qt.CheckState.Checked:
-                continue
+        for s, files in self._ticked():
             if s.preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(b.keys.text().strip()).is_file():
                 QMessageBox.warning(self, "Switch keys needed", "Set your prod.keys under Batch → Options → Switch "
-                                    "keys first; the Switch row was not queued.")
+                                    "keys first; the Switch files were not queued.")
                 continue
             over = {"cd_codec": "zstd", "dvd_codec": "zstd"} if s.kind == "speed" else {}
-            queued += b.enqueue_preset(s.preset, s.files, **over)
+            queued += b.enqueue_preset(s.preset, files, **over)
         if queued:
             self.win.tabs.setCurrentWidget(b)
             self.win.statusBar().showMessage(f"{queued} job(s) queued in Batch - check the options, then Start "
