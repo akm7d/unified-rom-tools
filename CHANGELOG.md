@@ -3,6 +3,13 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.4.0
+- ROM Optimizer → Save space: **Run ticked now** converts the ticked files right there, without going to Tasks.
+  A new *Status* column shows each file's progress (Queued, ▶ 45% · Compressing, ✔ Done, ✖ Failed with the
+  reason), finished files are un-ticked so they aren't redone, and *Stop* stops the run. A *Move the originals to
+  the trash once verified* box on the tab frees the space. *Add ticked to Tasks* is still there for checking
+  options first. Files added while a run is going start as soon as it ends.
+
 ## 1.3.0
 - ROM Converter is now **ROM Optimizer** (`rom-optimizer`, `ROM Optimizer.exe`); `rom-converter` still starts it and
   its settings carry over.

@@ -190,6 +190,9 @@ class QueueStatusBar(QFrame):
 # ====================================================================== Batch tab
 
 class BatchTab(QWidget):
+    job_updated = Signal(object)     # a job's status/progress changed (Save space mirrors it per file)
+    queue_finished = Signal()
+
     def __init__(self, win: "ConverterWindow"):
         super().__init__()
         self.win = win
@@ -534,7 +537,18 @@ class BatchTab(QWidget):
             self.update_job(j)
         self._summary()
 
+    def is_running(self) -> bool:
+        return bool(self.worker and self.worker.isRunning())
+
+    def start_when_free(self):
+        """Start the queue now, or right after the current run if one is going."""
+        if self.is_running():
+            self._start_again = True
+            return False
+        return self.start()
+
     def update_job(self, j: cv.Job):
+        self.job_updated.emit(j)
         r = self.rows.get(j.id)
         if r is None:
             return
@@ -612,14 +626,14 @@ class BatchTab(QWidget):
             self.qbar.bar.setFormat(f"{done} / {len(self.jobs)} jobs finished" if self.jobs else "idle")
 
     # -------------------------------------------------------------- run
-    def start(self):
+    def start(self) -> bool:
         todo = [j for j in self.jobs if j.status == "Queued"]
         if not todo:
             QMessageBox.information(self, "Start", "Nothing queued.")
-            return
+            return False
         if not ct.chdman_bin():
-            QMessageBox.critical(self, "chdman missing", "chdman was not found. See the chdman tab.")
-            return
+            QMessageBox.critical(self, "chdman missing", "chdman was not found. See the chdman (advanced) tab.")
+            return False
         # free-space check per output folder
         need: dict[str, int] = {}
         for j in todo:
@@ -632,13 +646,13 @@ class BatchTab(QWidget):
             if QMessageBox.warning(self, "Low disk space", f"Outputs may not fit:\n\n{msg}\n\nStart anyway?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != \
                     QMessageBox.StandardButton.Yes:
-                return
+                return False
         if any(j.trash for j in todo):
             if QMessageBox.question(self, "Move sources to trash?",
                                     f"After each CHD is created and verified, its source files will be moved to "
                                     f"the trash ({sum(1 for j in todo if j.trash)} job(s)). Continue?") != \
                     QMessageBox.StandardButton.Yes:
-                return
+                return False
         self.save_state()
         runner = cv.Runner(self.jobs, self.parallel.value(), lambda j: self.worker.job_changed.emit(j))
         self.runner = runner
@@ -653,6 +667,7 @@ class BatchTab(QWidget):
         self._followed = -1
         self._running(True)
         self.worker.start()
+        return True
 
     def _tick(self):
         """Twice a second while running: overall bar, ETA, counts, live cards, window title."""
@@ -719,6 +734,11 @@ class BatchTab(QWidget):
         self.win.show_queue_progress(None, 0, 0, "", [])
         self.win.statusBar().showMessage(f"Queue finished in {fmt_dur(el)} — {what}")
         QApplication.alert(self.win)
+        self.queue_finished.emit()
+        if getattr(self, "_start_again", False):   # jobs were added (from Save space) while this run was going
+            self._start_again = False
+            if any(j.status == "Queued" for j in self.jobs):
+                QTimer.singleShot(0, self.start)
 
 
 # ====================================================================== Patch tab
@@ -1200,7 +1220,8 @@ class PatchTab(QWidget):
 # ====================================================================== Save space tab
 
 class SpaceTab(QWidget):
-    COLS = ["Suggestion / file", "Folder", "Files", "Now", "After (est.)", "Saves", "Readable by", "Note"]
+    COLS = ["Suggestion / file", "Status", "Folder", "Files", "Now", "After (est.)", "Saves", "Readable by", "Note"]
+    C_NAME, C_STATUS, C_FOLDER, C_FILES, C_NOW, C_AFTER, C_SAVES, C_COMPAT, C_NOTE = range(9)
     PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, win: "ConverterWindow"):
@@ -1208,6 +1229,8 @@ class SpaceTab(QWidget):
         self.win = win
         self.worker: Worker | None = None
         self.suggestions = []
+        self.row_of: dict[str, QTreeWidgetItem] = {}     # file path -> its row
+        self.job_of: dict[str, cv.Job] = {}              # file path -> latest job started from here
         cfg = get_config()
         self.root = QLineEdit(cfg["window_state"].get("advisor_dir") or cfg["library_root"])
         self.go = QPushButton(QIcon.fromTheme("edit-find"), "Analyse")
@@ -1222,7 +1245,7 @@ class SpaceTab(QWidget):
         hh = self.table.header()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setStretchLastSection(True)
-        for c, wdt in ((0, 460), (1, 90), (2, 50), (3, 85), (4, 95), (5, 85), (6, 280)):
+        for c, wdt in ((0, 420), (1, 190), (2, 80), (3, 45), (4, 80), (5, 90), (6, 80), (7, 260)):
             self.table.setColumnWidth(c, wdt)
         self.table.itemChanged.connect(lambda *_: self._count_ticked())
         expand = QPushButton("Expand all")
@@ -1230,34 +1253,62 @@ class SpaceTab(QWidget):
         collapse = QPushButton("Collapse all")
         collapse.clicked.connect(self.table.collapseAll)
         self.total = QLabel("Analyse a folder to see where space can be saved without losing anything.")
+        self.total.setWordWrap(True)
+        self.trash = QCheckBox("Move the originals to the trash once the new file is verified (this is what frees "
+                               "the space)")
+        self.trash.setToolTip("Only after the new file has been checked (chdman verify / same disc SHA-1 / nsz "
+                              "verify). Off: the new files are written next to the originals and both are kept.\n"
+                              "Trimming in place always replaces the file, after checking it can be untrimmed back.")
+        self.trash.setChecked(bool(cfg["window_state"].get("advisor_trash", False)))
+        self.trash.toggled.connect(self._save_trash)
+        self.run = QPushButton(QIcon.fromTheme("media-playback-start"), "Run ticked now")
+        self.run.setToolTip("Convert the ticked files right here; each row shows its progress. Uses the Tasks "
+                            "options (codecs, jobs at once, output folder).")
+        self.run.clicked.connect(self.run_now)
+        self.stop_btn = QPushButton(QIcon.fromTheme("media-playback-stop"), "Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(lambda: self.win.batch.stop())
         self.queue = QPushButton(QIcon.fromTheme("list-add"), "Add ticked to Tasks")
-        self.queue.setEnabled(False)
+        self.queue.setToolTip("Only add them to the Tasks queue (to check options or run later)")
+        for b in (self.run, self.queue):
+            b.setEnabled(False)
         self.queue.clicked.connect(self.to_batch)
         top = QHBoxLayout()
         top.addWidget(QLabel("<b>Folder:</b>"))
         top.addWidget(file_row(self.root, False, self, directory=True), 1)
         top.addWidget(self.go)
+        opts = QHBoxLayout()
+        opts.addWidget(self.trash, 1)
+        opts.addWidget(expand)
+        opts.addWidget(collapse)
         bottom = QHBoxLayout()
         bottom.addWidget(self.total, 1)
-        bottom.addWidget(expand)
-        bottom.addWidget(collapse)
         bottom.addWidget(self.queue)
+        bottom.addWidget(self.stop_btn)
+        bottom.addWidget(self.run)
         lay = QVBoxLayout(self)
         intro = QLabel("Every suggestion is lossless and verified before anything is replaced. Estimates come from "
                        "compressing samples of your actual files. Orange notes matter: e.g. Xenia can't play CHDs, "
-                       "and NSZ needs your keys. To actually free the space, tick <i>Move the originals to the "
-                       "trash once the result is verified</i> in the Tasks options.")
+                       "and NSZ needs your keys. Tick what you want and press <b>Run ticked now</b>.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         lay.addLayout(top)
         lay.addWidget(self.table, 1)
+        lay.addLayout(opts)
         lay.addLayout(bottom)
+        win.batch.job_updated.connect(self._job_updated)
+        win.batch.queue_finished.connect(self._queue_finished)
 
     @staticmethod
     def _size(n: int) -> str:
         if n >= 2**30:
             return f"{n / 2**30:.1f} GB"
         return f"{n / 2**20:.0f} MB" if n >= 2**20 else f"{n / 2**10:.0f} KB"
+
+    def _save_trash(self, on: bool):
+        cfg = get_config()
+        cfg["window_state"]["advisor_trash"] = on
+        cfg.save()
 
     def analyse(self):
         if self.worker and self.worker.isRunning():
@@ -1285,6 +1336,7 @@ class SpaceTab(QWidget):
     def _show(self, suggestions):
         self.go.setEnabled(True)
         self.suggestions = suggestions
+        self.row_of = {}
         self.table.blockSignals(True)
         self.table.clear()
         warn = QColor("#d49a1b")
@@ -1293,7 +1345,7 @@ class SpaceTab(QWidget):
         for s in suggestions:
             space = s.kind == "space"
             tick = space and s.saving > 50 * 2**20 and not s.warning
-            parent = QTreeWidgetItem([s.title + ("  (speed)" if not space else ""), s.folder, str(len(s.files)),
+            parent = QTreeWidgetItem([s.title + ("  (speed)" if not space else ""), "", s.folder, str(len(s.files)),
                                       self._size(s.size_now), self._size(s.size_after),
                                       self._size(s.saving) if space else "—", s.compat, s.warning])
             parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
@@ -1301,8 +1353,8 @@ class SpaceTab(QWidget):
             f0.setBold(True)
             parent.setFont(0, f0)
             if s.warning:
-                parent.setForeground(7, warn)
-                parent.setToolTip(7, s.warning)
+                parent.setForeground(self.C_NOTE, warn)
+                parent.setToolTip(self.C_NOTE, s.warning)
             per = s.per_file or {f: (0, 0) for f in s.files}
             # biggest saving first, so the files worth converting are at the top
             for f, (now, after) in sorted(per.items(), key=lambda kv: kv[1][1] - kv[1][0]):
@@ -1311,22 +1363,26 @@ class SpaceTab(QWidget):
                         str(f.relative_to(root))
                 except ValueError:
                     shown = f.name
-                child = QTreeWidgetItem(["", "", "", self._size(now), self._size(after),
-                                         self._size(max(0, now - after)) if space else "—", "", ""])
-                child.setText(0, shown)
-                child.setToolTip(0, str(f))
+                child = QTreeWidgetItem([""] * len(self.COLS))
+                child.setText(self.C_NAME, shown)
+                child.setText(self.C_NOW, self._size(now))
+                child.setText(self.C_AFTER, self._size(after))
+                child.setText(self.C_SAVES, self._size(max(0, now - after)) if space else "—")
+                child.setToolTip(self.C_NAME, str(f))
                 child.setData(0, self.PATH_ROLE, str(f))
                 child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 child.setCheckState(0, Qt.CheckState.Checked if tick else Qt.CheckState.Unchecked)
-                for c in (3, 4, 5):
+                for c in (self.C_NOW, self.C_AFTER, self.C_SAVES):
                     child.setTextAlignment(c, right)
                 parent.addChild(child)
-            for c in (2, 3, 4, 5):
+                self.row_of[str(f)] = child
+                if str(f) in self.job_of:            # re-analysed while a job from before is known
+                    self._paint(child, self.job_of[str(f)])
+            for c in (self.C_FILES, self.C_NOW, self.C_AFTER, self.C_SAVES):
                 parent.setTextAlignment(c, right)
             self.table.addTopLevelItem(parent)
             parent.setExpanded(True)
         self.table.blockSignals(False)
-        self.queue.setEnabled(bool(suggestions))
         self._count_ticked()
 
     def _ticked(self) -> list[tuple[object, list[Path]]]:
@@ -1340,9 +1396,12 @@ class SpaceTab(QWidget):
         return out
 
     def _count_ticked(self):
+        running = self.win.batch.is_running()
+        self.stop_btn.setEnabled(running)
         if not self.suggestions:
             self.total.setText("Nothing to suggest — already compact.")
             self.queue.setEnabled(False)
+            self.run.setEnabled(False)
             return
         total = sum(s.saving for s in self.suggestions if s.kind == "space")
         ticked = self._ticked()
@@ -1353,22 +1412,93 @@ class SpaceTab(QWidget):
         self.total.setText(f"{len(self.suggestions)} suggestion(s) for {nfiles} file(s), up to {self._size(total)} "
                            f"could be saved. Ticked: {n} file(s), about {self._size(saves)}.")
         self.queue.setEnabled(n > 0)
+        self.run.setEnabled(n > 0)
 
-    def to_batch(self):
-        from .. import converter as cv
+    # -- queueing / running ------------------------------------------------
+    def _enqueue(self) -> list[cv.Job]:
         b = self.win.batch
-        queued = 0
+        added: list[cv.Job] = []
+        busy = {p for p, j in self.job_of.items() if j.status in ("Queued", "Running")}
         for s, files in self._ticked():
+            files = [f for f in files if str(f) not in busy]
+            if not files:
+                continue
             if s.preset in (cv.TO_NSZ, cv.FROM_NSZ) and not Path(b.keys.text().strip()).is_file():
                 QMessageBox.warning(self, "Switch keys needed", "Set your prod.keys under Tasks → Options → Switch "
-                                    "keys first; the Switch files were not queued.")
+                                    "keys first; the Switch files were not added.")
                 continue
             over = {"cd_codec": "zstd", "dvd_codec": "zstd"} if s.kind == "speed" else {}
-            queued += b.enqueue_preset(s.preset, files, **over)
-        if queued:
-            self.win.tabs.setCurrentWidget(b)
-            self.win.statusBar().showMessage(f"{queued} job(s) added to Tasks - check the options, then Start "
+            if self.trash.isChecked():
+                over.update(trash_sources=True, verify_after=True)
+            before = len(b.jobs)
+            b.enqueue_preset(s.preset, files, **over)
+            added += b.jobs[before:]
+        for j in added:
+            key = str(j.source)
+            self.job_of[key] = j
+            if key in self.row_of:
+                self._paint(self.row_of[key], j)
+        return added
+
+    def run_now(self):
+        jobs = self._enqueue()
+        if not jobs:
+            QMessageBox.information(self, "Run", "The ticked files are already queued or running.")
+            return
+        if self.win.batch.start_when_free() is False and self.win.batch.is_running():
+            self.win.statusBar().showMessage(f"{len(jobs)} file(s) will start as soon as the current queue "
+                                             f"finishes.", 10000)
+        self._count_ticked()
+
+    def to_batch(self):
+        jobs = self._enqueue()
+        if jobs:
+            self.win.tabs.setCurrentWidget(self.win.batch)
+            self.win.statusBar().showMessage(f"{len(jobs)} job(s) added to Tasks - check the options, then Start "
                                              f"queue.", 10000)
+
+    # -- live status per file ------------------------------------------------
+    def _paint(self, row: QTreeWidgetItem, j: cv.Job):
+        st = j.status
+        if st == "Running":
+            text = f"▶ {j.progress * 100:.0f}% · {j.step_name or 'working'}"
+        elif st == "Done":
+            text = "✔ Done"
+        elif st == "Failed":
+            text = "✖ Failed"
+        else:
+            text = st
+        row.setText(self.C_STATUS, text)
+        row.setToolTip(self.C_STATUS, (j.message or j.step_label or st))
+        row.setForeground(self.C_STATUS, QColor(STATUS_COLOR.get(st, "#888")))
+        if st in ("Failed", "Skipped") and j.message:
+            row.setText(self.C_NOTE, j.message)
+            row.setToolTip(self.C_NOTE, j.message)
+        if st == "Done":                      # don't redo it by accident
+            self.table.blockSignals(True)
+            row.setCheckState(0, Qt.CheckState.Unchecked)
+            row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            self.table.blockSignals(False)
+            if j.message:
+                row.setText(self.C_NOTE, j.message)
+                row.setToolTip(self.C_NOTE, j.message)
+
+    def _job_updated(self, j: cv.Job):
+        key = str(j.source)
+        if self.job_of.get(key) is j and key in self.row_of:
+            self._paint(self.row_of[key], j)
+        self.stop_btn.setEnabled(self.win.batch.is_running())
+
+    def _queue_finished(self):
+        mine = [j for j in self.job_of.values() if j.finished or j.status not in ("Queued", "Running")]
+        done = sum(1 for j in mine if j.status == "Done")
+        failed = sum(1 for j in mine if j.status == "Failed")
+        self._count_ticked()
+        self.stop_btn.setEnabled(False)
+        if mine:
+            self.win.statusBar().showMessage(f"Save space: {done} done" + (f", {failed} failed (hover the status "
+                                             f"for why)" if failed else "") + ". Analyse again to see what's left.",
+                                             15000)
 
 
 # ====================================================================== Commands tab

@@ -156,7 +156,9 @@ to Tasks), **Patch**, and **chdman (advanced)** (run any chdman command; choose 
   images → CHD, GameCube/Wii → RVZ, Switch → NSZ, NDS/3DS trimming, Xbox ISOs → CHD for archiving) or load
   faster (LZMA CHDs → Zstandard), with estimates from compressing samples of your files and a warning where the
   emulator can't read the result. Every file gets its own row with its own estimate and tick box (tick a
-  suggestion to tick all its files); *Add ticked to Tasks* queues the ticked files.
+  suggestion to tick all its files). **Run ticked now** converts them right there: a *Status* column shows each
+  file's progress and result, and *Move the originals to the trash once the new file is verified* (on the tab)
+  frees the space. *Add ticked to Tasks* only queues them, to check the options first.
 - **chdman (advanced) → Run a chdman command** — every chdman command with a form generated from `chdman help` (so new options
   appear automatically after an update), live command-line preview, *Run now* or *Add to task queue*.
 - **chdman (advanced) → chdman version & updates** — shows the selected chdman, the latest official MAME release and your
