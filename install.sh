@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Installs launchers and menu entries for ROM Verifier and ROM Renamer (per-user, no root).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$HOME/.local/bin"; APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
+mkdir -p "$BIN" "$APPS" "$ICONS"
+
+missing=()
+python3 -c 'import PySide6' 2>/dev/null || missing+=(pyside6)
+command -v chdman >/dev/null || missing+=(mame-tools)
+command -v 7z >/dev/null || missing+=(7zip)
+if ((${#missing[@]})); then
+  echo "Missing packages: ${missing[*]}"
+  echo "Install with:  sudo pacman -S ${missing[*]}"
+fi
+
+for app in verifier renamer; do
+  name="rom-$app"
+  cat > "$BIN/$name" <<SH
+#!/bin/sh
+export PYTHONPATH="$HERE\${PYTHONPATH:+:\$PYTHONPATH}"
+exec python3 -m romtools.gui.$app "\$@"
+SH
+  chmod +x "$BIN/$name"
+  cp "$HERE/icons/$name.svg" "$ICONS/$name.svg"
+done
+
+cat > "$APPS/rom-verifier.desktop" <<D
+[Desktop Entry]
+Type=Application
+Name=ROM Verifier
+GenericName=ROM hash checker
+Comment=Verify ROMs and CHDs against No-Intro and Redump DATs
+Exec=$BIN/rom-verifier
+Icon=rom-verifier
+Terminal=false
+Categories=Game;Utility;Emulator;
+Keywords=rom;chd;redump;nointro;dat;hash;verify;
+StartupWMClass=rom-verifier
+D
+cat > "$APPS/rom-renamer.desktop" <<D
+[Desktop Entry]
+Type=Application
+Name=ROM Renamer
+GenericName=ROM renaming tool
+Comment=Rename ROMs to their No-Intro / Redump names, with preview and undo
+Exec=$BIN/rom-renamer
+Icon=rom-renamer
+Terminal=false
+Categories=Game;Utility;Emulator;
+Keywords=rom;rename;redump;nointro;dat;m3u;
+StartupWMClass=rom-renamer
+D
+command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" >/dev/null 2>&1 || true
+command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
+echo "Installed: rom-verifier, rom-renamer (menu: Games / Utilities)"

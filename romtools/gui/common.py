@@ -1,0 +1,227 @@
+"""Shared Qt pieces: app bootstrap, status colours, background workers, system list."""
+
+from __future__ import annotations
+
+import sys
+import threading
+import traceback
+from pathlib import Path
+
+from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPalette
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QMessageBox, QPushButton,
+                               QStyleFactory, QTreeWidget, QTreeWidgetItem, QWidget)
+
+from .. import scanner as sc
+from ..config import get_config
+from ..datmanager import ensure_mapping, library_folders, system_for
+from ..systems import UNVERIFIABLE_HINT
+
+STATUS_COLORS = {
+    sc.VERIFIED: "#2e9d53",
+    sc.MISNAMED: "#2f7fd1",
+    sc.PARTIAL: "#d49a1b",
+    sc.BAD: "#d1452f",
+    sc.UNKNOWN: "#8a6fc9",
+    sc.NODAT: "#7f8790",
+    sc.ERROR: "#c2185b",
+    sc.SKIPPED: "#7f8790",
+}
+STATUS_HELP = {
+    sc.VERIFIED: "Hashes match the DAT and the name is correct",
+    sc.MISNAMED: "Good dump, but the name differs from the DAT (fix it in ROM Renamer)",
+    sc.PARTIAL: "Some tracks/files match, others don't",
+    sc.BAD: "The name is in the DAT but the data differs: bad dump, hack, trimmed or modified",
+    sc.UNKNOWN: "Not in the DAT at all (hacks, translations, homebrew, or wrong system)",
+    sc.NODAT: "No DAT loaded for this system - open Manage DATs",
+    sc.ERROR: "Could not read the file",
+    sc.SKIPPED: "Folders and non-game files are not checked",
+}
+
+
+def make_app(name: str, icon: str) -> QApplication:
+    QGuiApplication.setDesktopFileName(name.lower().replace(" ", "-"))
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName(name)
+    app.setOrganizationName("romtools")
+    ic = QIcon.fromTheme(icon)
+    if ic.isNull():
+        ic = QIcon(str(Path(__file__).resolve().parents[2] / "icons" / f"{icon}.svg"))
+    app.setWindowIcon(ic)
+    # Use the desktop's native style (Breeze on KDE, Adwaita-like on GNOME); fall back to Fusion.
+    if app.style().objectName().lower() in ("windows", ""):
+        app.setStyle(QStyleFactory.create("Fusion"))
+    return app
+
+
+def is_dark() -> bool:
+    pal = QApplication.palette()
+    return pal.color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def human(n: int) -> str:
+    f = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if f < 1024 or unit == "TiB":
+            return f"{f:.0f} {unit}" if unit == "B" else f"{f:.1f} {unit}"
+        f /= 1024
+    return str(n)
+
+
+def error_box(parent, title: str, exc: BaseException | str) -> None:
+    QMessageBox.critical(parent, title, str(exc))
+
+
+class Worker(QThread):
+    """Run a callable off the GUI thread. The callable receives this worker (for cancel/progress)."""
+    progress = Signal(int, int, str, float)
+    message = Signal(str)
+    failed = Signal(str)
+    done = Signal(object)
+
+    def __init__(self, fn, *args, parent=None):
+        super().__init__(parent)
+        self.fn, self.args = fn, args
+        self.cancel = threading.Event()
+
+    def run(self):
+        try:
+            self.done.emit(self.fn(self, *self.args))
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(f"{exc.__class__.__name__}: {exc}")
+
+
+class TempModeCombo(QComboBox):
+    """CHD temp-storage switch. A scan already running keeps its mode; the new one applies to the next run."""
+
+    def __init__(self, is_running=lambda: False, notify=lambda msg: None, parent=None):
+        super().__init__(parent)
+        self.is_running, self.notify = is_running, notify
+        self.addItem(QIcon.fromTheme("media-flash"), "CHD temp: RAM (no SSD writes)", "ram")
+        self.addItem(QIcon.fromTheme("drive-harddisk-solidstate"), "CHD temp: SSD (temp files on disk)", "ssd")
+        self.setToolTip("RAM: CHDs are unpacked into /dev/shm and hashed as they stream; each chunk is freed as "
+                        "soon as it is hashed (~35 MB RAM per CHD). Nothing is written to your SSD.\n"
+                        "SSD: CHDs are unpacked to the temp folder in Settings, hashed, then deleted. "
+                        "Writes up to a full disc image to disk per CHD.\n\n"
+                        "Changing this during a run takes effect when the current run finishes.")
+        self.setCurrentIndex(max(0, self.findData(get_config()["temp_mode"])))
+        self.currentIndexChanged.connect(self._changed)
+
+    def _changed(self, _i):
+        cfg = get_config()
+        cfg["temp_mode"] = self.currentData()
+        cfg.save()
+        label = "RAM" if self.currentData() == "ram" else "SSD"
+        if self.is_running():
+            self.notify(f"{label} mode will be used from the next run (the current run keeps its mode).")
+        else:
+            self.notify(f"{label} mode selected.")
+
+    def sync(self):
+        self.blockSignals(True)
+        self.setCurrentIndex(max(0, self.findData(get_config()["temp_mode"])))
+        self.blockSignals(False)
+
+
+class LibraryPicker(QWidget):
+    changed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.edit = QLineEdit(get_config()["library_root"])
+        self.edit.setPlaceholderText("Library folder containing one sub-folder per system")
+        self.edit.setClearButtonEnabled(True)
+        btn = QPushButton(QIcon.fromTheme("folder-open"), "Browse…")
+        btn.clicked.connect(self._browse)
+        self.edit.editingFinished.connect(lambda: self.changed.emit(self.path_str()))
+        lay.addWidget(self.edit, 1)
+        lay.addWidget(btn)
+
+    def path_str(self) -> str:
+        return self.edit.text().strip()
+
+    def path(self) -> Path:
+        return Path(self.path_str()).expanduser()
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, "Choose ROM library folder", self.path_str())
+        if d:
+            self.edit.setText(d)
+            self.changed.emit(d)
+
+
+class SystemList(QTreeWidget):
+    """Checkable list of the library's system folders, with their DAT status."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHeaderLabels(["System folder", "DAT"])
+        self.setRootIsDecorated(False)
+        self.setUniformRowHeights(True)
+        self.setAlternatingRowColors(True)
+        self.header().setStretchLastSection(True)
+        self.root = Path()
+
+    def load(self, root: Path) -> None:
+        self.root = root
+        cfg = get_config()
+        folders = library_folders(root)
+        ensure_mapping(cfg, folders)
+        checked = set(cfg["window_state"].get("checked_systems", folders))
+        self.clear()
+        for f in folders:
+            s = cfg.system(f)
+            sysdef = system_for(cfg, f)
+            dats = [d for d in s["dats"] if Path(d).is_file()]
+            if dats:
+                label, icon = ", ".join(Path(d).stem for d in dats), "emblem-ok-symbolic"
+            elif f in UNVERIFIABLE_HINT:
+                label, icon = "no public DAT", "dialog-information"
+            elif sysdef:
+                label, icon = f"not downloaded ({sysdef.name})", "dialog-warning"
+            else:
+                label, icon = "no system mapped", "dialog-warning"
+            it = QTreeWidgetItem([f, label])
+            it.setIcon(1, QIcon.fromTheme(icon))
+            tip = UNVERIFIABLE_HINT.get(f, "")
+            it.setToolTip(1, tip or label)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(0, Qt.CheckState.Checked if f in checked else Qt.CheckState.Unchecked)
+            if not dats:
+                it.setForeground(1, QColor("#9a7b2f" if not is_dark() else "#e0b050"))
+            self.addTopLevelItem(it)
+        self.resizeColumnToContents(0)
+
+    def checked(self) -> list[str]:
+        return [self.topLevelItem(i).text(0) for i in range(self.topLevelItemCount())
+                if self.topLevelItem(i).checkState(0) == Qt.CheckState.Checked]
+
+    def set_all(self, on: bool) -> None:
+        for i in range(self.topLevelItemCount()):
+            self.topLevelItem(i).setCheckState(0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+
+    def remember(self) -> None:
+        cfg = get_config()
+        cfg["window_state"]["checked_systems"] = self.checked()
+        cfg.save()
+
+
+def restore_geometry(win, key: str) -> None:
+    s = QSettings("romtools", key)
+    g = s.value("geometry")
+    if g is not None:
+        win.restoreGeometry(g)
+    st = s.value("state")
+    if st is not None and hasattr(win, "restoreState"):
+        win.restoreState(st)
+
+
+def save_geometry(win, key: str) -> None:
+    s = QSettings("romtools", key)
+    s.setValue("geometry", win.saveGeometry())
+    if hasattr(win, "saveState"):
+        s.setValue("state", win.saveState())
+
