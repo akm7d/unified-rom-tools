@@ -40,10 +40,18 @@ class Item:
     path: Path                 # main file (or folder)
     kind: str                  # file | archive | chd | cueset | folder
     parts: list[Path] = field(default_factory=list)  # extra files for cue/gdi sets
+    member: str = ""           # one game inside a multi-game archive (its file name inside the archive)
 
     @property
     def stem(self) -> str:
+        if self.member:
+            return Path(self.member).stem
         return self.path.name if self.kind == "folder" else self.path.stem
+
+    @property
+    def label(self) -> str:
+        """What the user sees: "file.zip" or "file.zip › Game (USA).gb" for one game inside an archive."""
+        return f"{self.path.name} › {Path(self.member).name}" if self.member else self.path.name
 
 
 @dataclass
@@ -75,6 +83,8 @@ class Result:
 
     @property
     def size(self) -> int:
+        if self.item.member:   # one game inside an archive: its own (uncompressed) size
+            return sum(er.entry.full.size for er in self.entries)
         try:
             if self.item.kind == "folder":
                 return 0
@@ -238,6 +248,40 @@ def match(item: Item, entries: list[Entry], index: DatIndex) -> Result:
 
 # ------------------------------------------------------------ scanning
 
+def split_archive(item: Item, entries: list[Entry], index: DatIndex) -> list[tuple[Item, list[Entry]]] | None:
+    """For an archive holding several different games: one (sub-item, entries) per game, so each gets its own row.
+    Files of the same game (e.g. a zipped .cue/.bin set) stay together; files no DAT knows get their own row.
+    Returns None when the archive holds a single game."""
+    data = [e for e in entries if not e.name.lower().endswith((".cue", ".gdi"))]
+    if item.kind != "archive" or len(data) < 2:
+        return None
+    games_of: list[set[str]] = []
+    for e in data:
+        gs = set()
+        for v in (e.full, e.headerless):
+            if v is not None:
+                gs.update(g.name for g, _r in index.lookup(v.size, v.crc, v.md5, v.sha1))
+        games_of.append(gs)
+    groups: list[tuple[set[str], list[int]]] = []   # union of entries sharing a game
+    for i, gs in enumerate(games_of):
+        target = next((g for g in groups if gs and g[0] & gs), None) if gs else None
+        if target:
+            target[0].update(gs)
+            target[1].append(i)
+        else:
+            groups.append((set(gs), [i]))
+    if len(groups) < 2:
+        return None
+    out = []
+    for _gs, idxs in groups:
+        members = [data[i] for i in idxs]
+        names = {Path(m.name).stem for m in members}
+        cues = [e for e in entries if e.name.lower().endswith((".cue", ".gdi")) and Path(e.name).stem in names]
+        sub = Item(item.system, item.path, item.kind, member=members[0].name)
+        out.append((sub, members + cues))
+    return out
+
+
 ProgressCb = Callable[[str, float], None]
 
 # Scan modes
@@ -321,7 +365,8 @@ class Scanner:
         self._count("hashed")
         return entries, extra, False
 
-    def check(self, item: Item, index: DatIndex | None, progress: ProgressCb | None = None) -> Result | None:
+    def check(self, item: Item, index: DatIndex | None,
+              progress: ProgressCb | None = None) -> Result | list[Result] | None:
         if item.kind == "folder":
             return Result(item, SKIPPED, note="Folder (extracted game / installed title) - not checked")
         if index is None:
@@ -336,6 +381,12 @@ class Scanner:
             return None
         except Exception as exc:  # noqa: BLE001 - report every failure as a row
             return Result(item, ERROR, note=str(exc) or exc.__class__.__name__)
+        parts = split_archive(item, entries, index)
+        if parts:
+            return [self._finish(sub, ents, index, extra, cached) for sub, ents in parts]
+        return self._finish(item, entries, index, extra, cached)
+
+    def _finish(self, item: Item, entries: list[Entry], index: DatIndex, extra: dict, cached: bool) -> Result:
         r = match(item, entries, index)
         r.chd_info = extra
         r.cached = cached
@@ -374,8 +425,8 @@ class Scanner:
                 return
             with lock:
                 done += 1
-            if res is not None:
-                on_result(res)
+            for one in (res if isinstance(res, list) else [res] if res is not None else []):
+                on_result(one)
             if on_progress:
                 on_progress(done, total, it.path.name, 1.0)
 

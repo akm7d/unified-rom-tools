@@ -101,7 +101,7 @@ def apply(result, store: MarkStore | None, modified_status: str, taggable: set[s
     if mark:
         result.tag, result.tag_source = mark, "marked by you"
     elif mark is None and status in taggable:
-        hit = tag_from_name(result.item.path.name)
+        hit = tag_from_name(getattr(result.item, "member", "") or result.item.path.name)
         if hit:
             result.tag, result.tag_source = hit[0], f"from name: “{hit[1]}”"
     if result.tag:

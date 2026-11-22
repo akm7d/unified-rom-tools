@@ -64,7 +64,9 @@ How formats are checked:
   - **SSD**: full temp files in the Settings temp folder (default `/var/tmp/romtools`), deleted after
     hashing. Writes up to a whole disc image per CHD to disk.
   - Switching during a run only affects the next run.
-- **zip / 7z / rar**: every member is hashed by streaming (no extraction to disk).
+- **zip / 7z / rar**: every member is hashed by streaming (no extraction to disk). An archive holding several
+  games shows one row per game (`collection.zip › Game (USA).gb`), each with its own status; files of one game
+  (e.g. a zipped .cue/.bin) stay together. The Renamer never renames an archive after one game inside it.
 - **cue/bin, gdi** sets: every track hashed.
 - **Dreamcast GD-ROM CHDs** are rebuilt as split .cue/.bin (not .gdi), and a 2-second pregap that chdman
   leaves out of the track file is hashed back in as silence, the way Redump's track files contain it.

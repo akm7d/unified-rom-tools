@@ -62,12 +62,19 @@ class ResultsModel(QAbstractTableModel):
 
     def replace(self, r: sc.Result):
         for i, old in enumerate(self.rows):
-            if old.item.path == r.item.path:
+            if old.item.path == r.item.path and old.item.member == r.item.member:
                 self.rows[i] = r
                 self._sizes[i] = r.size
                 self.dataChanged.emit(self.index(i, 0), self.index(i, len(COLS) - 1))
                 return
         self.add(r)
+
+    def remove_paths(self, paths: set):
+        keep = [(r, s) for r, s in zip(self.rows, self._sizes) if r.item.path not in paths]
+        self.beginResetModel()
+        self.rows[:] = [r for r, _s in keep]
+        self._sizes[:] = [s for _r, s in keep]
+        self.endResetModel()
 
     def clear(self):
         self.beginResetModel()
@@ -92,7 +99,7 @@ class ResultsModel(QAbstractTableModel):
             if c == C_SYSTEM:
                 return "?" if r.item.system == "(other)" else r.item.system
             if c == C_FILE:
-                return r.item.path.name
+                return r.item.label
             if c == C_GAME:
                 return r.game
             if c == C_SIZE:
@@ -125,7 +132,7 @@ class ResultsModel(QAbstractTableModel):
                 return f"{r.tag}: {tg.TAGS.get(r.tag, 'custom tag')}\n{r.tag_source}" + (
                     f"\nWithout the tag this would be: {r.orig_status}" if r.orig_status else "")
             if c == C_FILE:
-                return str(r.item.path)
+                return str(r.item.path) + (f"\ninside the archive: {r.item.member}" if r.item.member else "")
             if c == C_NOTE:
                 return r.note
             if c == C_MEDIA and r.media is not None:
@@ -139,6 +146,10 @@ class ResultsModel(QAbstractTableModel):
                 return sc.STATUS_ORDER.index(r.status) if r.status in sc.STATUS_ORDER else 99
             return self.data(idx)
         return None
+
+
+def _csv_path(r: sc.Result) -> str:
+    return f"{r.item.path} › {r.item.member}" if r.item.member else str(r.item.path)
 
 
 _dots: dict[str, QIcon] = {}
@@ -183,7 +194,7 @@ class FilterProxy(QSortFilterProxyModel):
         if r.status not in self.statuses:
             return False
         if self.text:
-            hay = f"{r.item.path.name} {r.game} {r.item.system} {r.note} {r.tag}".lower()
+            hay = f"{r.item.label} {r.game} {r.item.system} {r.note} {r.tag}".lower()
             return all(t in hay for t in self.text.split())
         return True
 
@@ -501,6 +512,8 @@ class VerifierWindow(QMainWindow):
             self.systems.remember()
         if items is None:
             self.model.clear()
+        else:
+            self.model.remove_paths({it.path for it in items})
         self.targets = targets
         cfg = self.cfg
         scanner = sc.make_scanner(cfg, self.cache, mode)
@@ -590,7 +603,10 @@ class VerifierWindow(QMainWindow):
             if getattr(self, "targets", None):
                 names = ", ".join(p.name for p in self.targets[:3]) + (" …" if len(self.targets) > 3 else "")
                 kind = f"Check of {names}"
-            msg = (f"{kind} {'stopped' if cancelled else 'finished'} in {took}: {n} items "
+            games = sum(1 for r in self.model.rows if r.item.member)
+            count = (f"{n} files, {len(self.model.rows)} games" if games and self.scan_mode != sc.FULL
+                     else f"{n} files")
+            msg = (f"{kind} {'stopped' if cancelled else 'finished'} in {took}: {count} "
                    f"({st['remembered']} from earlier scans, {st['hashed']} hashed now; {self.run_mode} mode). "
                    f"Next run uses {'RAM' if self.cfg['temp_mode'] == 'ram' else 'SSD'} mode.")
         self.current.setText(msg)
@@ -612,7 +628,7 @@ class VerifierWindow(QMainWindow):
         r = self.model.rows[self.proxy.mapToSource(cur).row()]
         e = html.escape
         col = STATUS_COLORS.get(r.status, "#888")
-        out = [f"<h3 style='margin:0'>{e(r.item.path.name)}</h3>",
+        out = [f"<h3 style='margin:0'>{e(r.item.label)}</h3>",
                f"<p><span style='color:{col};font-weight:bold'>{e(r.status)}</span> — {e(STATUS_HELP.get(r.status, ''))}"
                f"<br>{e(r.note)}</p>"]
         if r.tag:
@@ -687,7 +703,11 @@ class VerifierWindow(QMainWindow):
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def _recheck(self, res: list[sc.Result]):
-        self.start_scan([r.item for r in res], mode=sc.FULL)
+        import dataclasses
+        unique = {}
+        for r in res:   # several games of one archive: re-check the archive once (all its games come back)
+            unique.setdefault(r.item.path, dataclasses.replace(r.item, member=""))
+        self.start_scan(list(unique.values()), mode=sc.FULL)
 
     # ------------------------------------------------------------------ check any file / folder
     def check_files(self):
@@ -725,7 +745,7 @@ class VerifierWindow(QMainWindow):
     def mark(self, res: list[sc.Result], tag: str | None):
         """tag: a tag name; "" = not modified; None = back to automatic (file-name) detection."""
         for r in res:
-            self.marks.set(tg.content_key(r), tag, r.item.path.name)
+            self.marks.set(tg.content_key(r), tag, r.item.label)
             tg.apply(r, self.marks, sc.MODIFIED, sc.TAGGABLE)
             self.model.replace(r)
         self.proxy.invalidateFilter()
@@ -853,11 +873,11 @@ class VerifierWindow(QMainWindow):
                         "dat_rom", "note", "chd_type", "tag"])
             for r in self.model.rows:
                 if not r.entries:
-                    w.writerow([r.status, r.item.system, r.item.path, r.game, r.dat, "", "", "", "", "", "", r.note,
+                    w.writerow([r.status, r.item.system, _csv_path(r), r.game, r.dat, "", "", "", "", "", "", r.note,
                                 media_text(r), r.tag])
                 for er in r.entries:
                     h = er.entry.full
-                    w.writerow([r.status, r.item.system, r.item.path, r.game, r.dat, er.entry.name, h.size, h.crc,
+                    w.writerow([r.status, r.item.system, _csv_path(r), r.game, r.dat, er.entry.name, h.size, h.crc,
                                 h.md5, h.sha1, er.rom or "", r.note, media_text(r), r.tag])
 
     def _export_txt(self, path: Path):
@@ -871,8 +891,8 @@ class VerifierWindow(QMainWindow):
             for s in sc.STATUS_ORDER:
                 if s in by:
                     fh.write(f"\n== {s} ==\n")
-                    for r in sorted(by[s], key=lambda r: (r.item.system, r.item.path.name.lower())):
-                        fh.write(f"[{r.item.system}] {r.item.path.name}"
+                    for r in sorted(by[s], key=lambda r: (r.item.system, r.item.label.lower())):
+                        fh.write(f"[{r.item.system}] {r.item.label}"
                                  + (f"  ->  {r.game}" if r.game and r.game != r.item.stem else "")
                                  + (f"   ({r.note})" if r.note else "") + "\n")
 

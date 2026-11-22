@@ -45,8 +45,8 @@ def plan_from_results(results, use_dat_ext: bool = False) -> list[Op]:
     from .scanner import MISNAMED
     ops = []
     for r in results:
-        if r.status != MISNAMED or not r.game or r.item.kind == "folder":
-            continue
+        if r.status != MISNAMED or not r.game or r.item.kind == "folder" or getattr(r.item, "member", ""):
+            continue  # a game inside a multi-game archive: renaming the archive after it would be wrong
         ext = r.item.path.suffix
         if use_dat_ext and r.item.kind == "file" and r.entries and r.entries[0].rom and not r.entries[0].headerless:
             dat_ext = Path(r.entries[0].rom).suffix
