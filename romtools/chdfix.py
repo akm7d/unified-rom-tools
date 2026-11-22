@@ -27,6 +27,7 @@ from typing import Callable
 
 from . import chd
 from .chdman_tool import Process, chdman_bin
+from .compat import ram_mode_supported, trash as compat_trash
 from .hashing import Cancelled, Entry
 
 Log = Callable[[str], None]
@@ -45,6 +46,7 @@ class FixResult:
 
 
 def temp_root(ram_mode: bool, ssd_dir: Path) -> Path:
+    ram_mode = ram_mode and ram_mode_supported()
     return Path("/dev/shm/romtools-fix") if ram_mode else ssd_dir / "fix"
 
 
@@ -79,14 +81,13 @@ def _sha1(path: Path, cancel: threading.Event) -> str:
 
 
 def _trash(path: Path) -> bool:
-    if shutil.which("gio"):
-        return subprocess.run(["gio", "trash", str(path)], capture_output=True).returncode == 0
-    return False
+    return compat_trash(path)
 
 
 def fix(path: Path, target: str, ram_mode: bool, ssd_dir: Path, cancel: threading.Event,
         log: Log = lambda s: None, progress: Callable[[float, str], None] = lambda f, s: None) -> FixResult:
     """target: "dvd" or "cd". Returns FixResult; the original is only replaced when ok is True."""
+    ram_mode = ram_mode and ram_mode_supported()
     exe = chdman_bin()
     if not exe:
         return FixResult(path, False, "chdman not found")
@@ -144,8 +145,12 @@ def fix(path: Path, target: str, ram_mode: bool, ssd_dir: Path, cancel: threadin
         _run([exe, "verify", "-i", str(tmp_chd)], "verify", cancel, log, prog)
         # 5. compare contents
         log("== Reading the new CHD back and comparing")
-        new_info, entries = chd.stream_hash(tmp_chd, chd.RAM_DIR, cancel,
-                                            lambda _s, f: prog("compare", f))
+        if ram_mode_supported():   # tiny RAM footprint, no disk writes
+            new_info, entries = chd.stream_hash(tmp_chd, chd.RAM_DIR, cancel,
+                                                lambda _s, f: prog("compare", f))
+        else:
+            new_info, entries = chd.extract_and_hash(tmp_chd, root, cancel,
+                                                     lambda _s, f: prog("compare", f))
         after = entries[0].full.sha1 if len(entries) == 1 else ""
         log(f"   SHA-1 {after}")
         if after != before:

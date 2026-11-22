@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from .chdman_tool import chdman_bin
+from .compat import mem_available as _mem_available, pid_alive, ram_mode_supported
 from .hashing import Cancelled, Entry, hash_file
 
 
@@ -202,7 +203,7 @@ def cleanup_stale(tmp_root: Path) -> None:
             pid = int(p.name.split("-")[1])
         except ValueError:
             continue
-        if pid != os.getpid() and Path(f"/proc/{pid}").exists():
+        if pid != os.getpid() and pid_alive(pid):
             continue  # another running instance owns it
         shutil.rmtree(p, ignore_errors=True)
 
@@ -254,14 +255,7 @@ def is_tmpfs(path: Path) -> bool:
 
 
 def mem_available() -> int:
-    try:
-        with open("/proc/meminfo") as fh:
-            for line in fh:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except OSError:
-        pass
-    return 0
+    return _mem_available()
 
 
 def stream_hash(path: Path, ram_root: Path = RAM_DIR, cancel: threading.Event | None = None,
@@ -270,6 +264,8 @@ def stream_hash(path: Path, ram_root: Path = RAM_DIR, cancel: threading.Event | 
     import signal
     from .hashing import _Hasher
 
+    if not ram_mode_supported():
+        raise RuntimeError("RAM mode isn't available on this system; switch CHD temp to SSD")
     ci = info(path)
     ram_root.mkdir(parents=True, exist_ok=True)
     if not is_tmpfs(ram_root):

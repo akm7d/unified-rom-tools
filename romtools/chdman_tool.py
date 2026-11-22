@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .compat import find_tool, popen_session_kwargs, terminate
 from .config import DATA_DIR, get_config
 
 BUILD_DIR = DATA_DIR / "chdman"   # chdman builds made by the updater: BUILD_DIR/<tag>/chdman
@@ -27,7 +28,7 @@ def chdman_bin() -> str | None:
     sel = get_config()["chdman_path"] or "system"
     if sel != "system" and os.access(sel, os.X_OK):
         return sel
-    return shutil.which("chdman")
+    return find_tool("chdman")
 
 
 @dataclass
@@ -172,7 +173,7 @@ class Process:
             if self.cancelled:
                 return -1
             self.proc = subprocess.Popen(self.argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                         start_new_session=True)
+                                         **popen_session_kwargs())
         buf = b""
         last_pct_line = ""
         while True:
@@ -205,11 +206,8 @@ class Process:
     def cancel(self) -> None:
         with self._lock:
             self.cancelled = True
-            if self.proc and self.proc.poll() is None:
-                try:
-                    os.killpg(self.proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+            if self.proc:
+                terminate(self.proc)
 
 
 def _quote(a: str) -> str:

@@ -218,7 +218,9 @@ class SettingsDialog(QDialog):
         form.addRow("Parallel files:", self.workers)
         form.addRow("Parallel CHD extractions:", self.chd)
         form.addRow("SSD-mode temp folder:", tmprow)
-        form.addRow("", QLabel("<small>Only used in SSD mode (RAM mode streams through /dev/shm). "
+        from ..compat import ram_mode_supported
+        form.addRow("", QLabel("<small>" + ("Only used in SSD mode (RAM mode streams through /dev/shm). "
+                                             if ram_mode_supported() else "Used for unpacking CHDs. ") +
                                "PS2 DVDs need up to ~9 GB each here.</small>"))
         form.addRow("Remembered scans:", clear)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -237,7 +239,8 @@ class SettingsDialog(QDialog):
     def accept(self):
         cfg = get_config()
         cfg["workers"], cfg["chd_workers"] = self.workers.value(), self.chd.value()
-        cfg["tmp_dir"] = self.tmp.text().strip() or "/var/tmp/romtools"
+        from ..compat import default_tmp_dir
+        cfg["tmp_dir"] = self.tmp.text().strip() or default_tmp_dir()
         cfg.save()
         super().accept()
 
@@ -429,8 +432,8 @@ class VerifierWindow(QMainWindow):
         self.systems.load(self.picker.path())
 
     def open_renamer(self):
-        subprocess.Popen([sys.executable, "-m", "romtools.gui.renamer"],
-                         cwd=str(Path(__file__).resolve().parents[2]))
+        from ..compat import launch_app
+        launch_app("renamer")
 
     def _filter_changed(self):
         self.proxy.set(statuses={s for s, b in self.chips.items() if b.isChecked()})

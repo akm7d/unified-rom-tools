@@ -125,7 +125,9 @@ def hash_file(path: Path, cancel=None, progress=None, name: str | None = None, p
 # ---------------------------------------------------------------- archives
 
 ARCHIVE_EXTS = {".zip", ".7z", ".rar"}
-SEVENZIP = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+from .compat import find_tool  # noqa: E402
+
+SEVENZIP = find_tool("7z", "7zz", "7za")
 
 
 def hash_zip(path: Path, cancel=None, progress=None) -> list[Entry]:

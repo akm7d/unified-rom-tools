@@ -1,4 +1,4 @@
-"""Persistent settings, stored as JSON under the XDG config directory."""
+"""Persistent settings, stored as JSON under the XDG config directory (%APPDATA% on Windows)."""
 
 from __future__ import annotations
 
@@ -7,21 +7,20 @@ import os
 import threading
 from pathlib import Path
 
+from .compat import IS_WIN, default_tmp_dir, ram_mode_supported, user_dirs
 
-def _xdg(var: str, default: str) -> Path:
-    return Path(os.environ.get(var) or Path.home() / default)
-
-
-CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config") / "romtools"
-DATA_DIR = _xdg("XDG_DATA_HOME", ".local/share") / "romtools"
-CACHE_DIR = _xdg("XDG_CACHE_HOME", ".cache") / "romtools"
+_cfg, _data, _cache = user_dirs()
+CONFIG_DIR = _cfg / "romtools"
+DATA_DIR = _data / "romtools"
+CACHE_DIR = _cache / "romtools"
 DAT_DIR = DATA_DIR / "dats"
 JOURNAL_DIR = DATA_DIR / "rename-journal"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
 def _default_library() -> str:
-    for cand in (Path("/Tank/Romm/roms"), Path.home() / "Tank/Romm/roms"):
+    cands = [] if IS_WIN else [Path("/Tank/Romm/roms"), Path.home() / "Tank/Romm/roms"]
+    for cand in cands:
         if cand.is_dir():
             return str(cand)
     return str(Path.home())
@@ -29,12 +28,13 @@ def _default_library() -> str:
 
 DEFAULTS = {
     "library_root": None,           # filled lazily by _default_library()
-    "tmp_dir": "/var/tmp/romtools",  # local disk, not tmpfs: DVD CHDs extract to ~4-8 GB
+    "tmp_dir": default_tmp_dir(),    # SSD-mode temp folder; local disk, DVD CHDs extract to ~4-8 GB
     "workers": 4,                    # parallel file hashing (network shares like 2-6)
     "chd_workers": 2,                # parallel CHD extractions
     "use_cache": True,
-    "temp_mode": "ram",
-    "chdman_path": "system",         # "system" (PATH) or an absolute path to a chdman binary              # "ram": stream CHDs through /dev/shm (no SSD writes) | "ssd": temp files
+    # "ram": stream CHDs through /dev/shm (no SSD writes) | "ssd": temp files. Windows is always "ssd".
+    "temp_mode": "ram" if ram_mode_supported() else "ssd",
+    "chdman_path": "system",         # "system" (bundled/PATH) or an absolute path to a chdman binary
     # folder name (e.g. "psx") -> {"system": catalog id or "", "dats": [paths]}
     "systems": {},
     "rename_use_dat_ext": False,
@@ -54,6 +54,8 @@ class Config:
             pass
         if not self.data.get("library_root"):
             self.data["library_root"] = _default_library()
+        if not ram_mode_supported():
+            self.data["temp_mode"] = "ssd"
 
     def __getitem__(self, key):
         return self.data.get(key, DEFAULTS.get(key))

@@ -77,9 +77,9 @@ def built_versions() -> list[tuple[str, Path]]:
     out = []
     if BUILD_DIR.is_dir():
         for d in sorted(BUILD_DIR.iterdir(), reverse=True):
-            exe = d / "chdman"
-            if exe.is_file() and os.access(exe, os.X_OK):
-                out.append((d.name, exe))
+            for exe in (d / "chdman", d / "chdman.exe"):
+                if exe.is_file() and (exe.suffix == ".exe" or os.access(exe, os.X_OK)):
+                    out.append((d.name, exe))
     return out
 
 
@@ -152,3 +152,71 @@ mkdir -p {dest}
 install -m755 chdman {dest}/chdman
 echo "== Installed {dest}/chdman"
 """
+
+
+# ---------------------------------------------------------------- Windows: official binaries
+
+WIN_ASSET = "{tag}b_x64.exe"   # MAME's official 64-bit Windows release (a 7-Zip self-extractor)
+
+
+def install_official_windows(tag: str, log, cancel) -> Path:
+    """Download MAME's official Windows release, check it against the published SHA256SUMS, and take
+    chdman.exe out of it into BUILD_DIR/<tag>/chdman.exe. Returns that path."""
+    import hashlib
+    import tempfile
+    from .hashing import SEVENZIP
+
+    if not SEVENZIP:
+        raise RuntimeError("7z.exe is missing from the tools folder")
+    base = REL_URL.format(tag=tag)
+    asset = WIN_ASSET.format(tag=tag)
+    work = Path(tempfile.mkdtemp(prefix="chdman-dl-"))
+    try:
+        def fetch(name: str, dest: Path, progress: bool = False) -> None:
+            req = urllib.request.Request(base + name, headers={"User-Agent": "romtools/1.1"})
+            with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as fh:
+                total = int(r.headers.get("Content-Length") or 0)
+                done, last = 0, -1
+                while chunk := r.read(1 << 20):
+                    if cancel.is_set():
+                        raise RuntimeError("cancelled")
+                    fh.write(chunk)
+                    done += len(chunk)
+                    pct = int(done * 100 / total) if total else 0
+                    if progress and pct // 10 != last:
+                        last = pct // 10
+                        log(f"   {done >> 20} / {total >> 20} MB")
+
+        log(f"== Downloading MAME {tag} checksums and Windows release from GitHub")
+        fetch("SHA256SUMS", work / "SHA256SUMS")
+        fetch(asset, work / asset, progress=True)
+        log("== Checking SHA-256 against MAME's published SHA256SUMS")
+        want = ""
+        for line in (work / "SHA256SUMS").read_text().splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].lstrip("*") == asset:
+                want = parts[0].lower()
+        h = hashlib.sha256()
+        with open(work / asset, "rb") as fh:
+            while chunk := fh.read(8 << 20):
+                h.update(chunk)
+        if not want or h.hexdigest() != want:
+            raise RuntimeError("checksum mismatch - download discarded")
+        log(f"   {asset}: OK")
+        log("== Extracting chdman.exe")
+        r = subprocess.run([SEVENZIP, "e", "-y", f"-o{work}", str(work / asset), "chdman.exe"],
+                           capture_output=True, text=True)
+        exe = work / "chdman.exe"
+        if r.returncode != 0 or not exe.is_file():
+            raise RuntimeError(f"couldn't extract chdman.exe: {r.stderr.strip() or r.stdout.strip()}")
+        v = version(str(exe))
+        if not v:
+            raise RuntimeError("the extracted chdman.exe doesn't run")
+        log(f"   {v.raw}")
+        dest = BUILD_DIR / tag
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(exe, dest / "chdman.exe")
+        log(f"== Installed {dest / 'chdman.exe'}")
+        return dest / "chdman.exe"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)

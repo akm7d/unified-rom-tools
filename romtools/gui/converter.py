@@ -20,6 +20,7 @@ from .. import chdman_tool as ct
 from .. import converter as cv
 from .. import updater as up
 from ..config import get_config
+from ..compat import IS_WIN, find_tool, launch_app, resource_dir
 from .common import Worker, human, is_dark, make_app, restore_geometry, save_geometry
 
 STATUS_COLOR = {"Queued": "#7f8790", "Running": "#2f7fd1", "Done": "#2e9d53", "Failed": "#d1452f",
@@ -915,6 +916,15 @@ class ChdmanTab(QWidget):
         opts.addWidget(self.in_ram)
         opts.addStretch(1)
         a.addLayout(opts, 2, 0, 1, 2)
+        if IS_WIN:  # no pacman / compiler: update by downloading MAME's official Windows chdman.exe
+            self.pac_btn.setVisible(False)
+            for w in (self.jobs, self.in_ram):
+                w.setVisible(False)
+            opts.itemAt(0).widget().setVisible(False)
+            self.build_btn.setText("Download latest official chdman.exe…")
+            self.build_btn.setToolTip("Downloads MAME's official Windows release from GitHub, checks it against "
+                                      "MAME's published SHA-256, and keeps only chdman.exe.")
+            self.cancel_btn.setText("Cancel download")
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         top.addWidget(info, 3)
@@ -929,9 +939,10 @@ class ChdmanTab(QWidget):
         cfg = get_config()
         self.choice.blockSignals(True)
         self.choice.clear()
-        sysbin = ct.shutil.which("chdman")
+        sysbin = find_tool("chdman")
         sv = ct.version(sysbin) if sysbin else None
-        self.choice.addItem(f"System: {sysbin or 'not installed'}" + (f"  (v{sv.number})" if sv else ""), "system")
+        label = "Bundled" if IS_WIN else "System"
+        self.choice.addItem(f"{label}: {sysbin or 'not installed'}" + (f"  (v{sv.number})" if sv else ""), "system")
         for tag, exe in up.built_versions():
             v = ct.version(str(exe))
             self.choice.addItem(f"Built by updater: {tag}" + (f"  (v{v.number})" if v else ""), str(exe))
@@ -1027,6 +1038,8 @@ class ChdmanTab(QWidget):
             if QMessageBox.question(self, "Build", f"{tag} is already built. Build it again?") != \
                     QMessageBox.StandardButton.Yes:
                 return
+        if IS_WIN:
+            return self._download_windows(tag)
         root = Path("/dev/shm/romtools-build") if self.in_ram.isChecked() else Path.home() / ".cache/romtools/build"
         if QMessageBox.question(
                 self, "Build chdman from source",
@@ -1048,6 +1061,34 @@ class ChdmanTab(QWidget):
         self.win.set_busy(True)
         self.worker.start()
 
+    def _download_windows(self, tag: str):
+        if QMessageBox.question(self, "Download chdman", f"Download MAME {self.release.number}'s official Windows "
+                                f"release (~90 MB) from github.com/mamedev/mame, check its SHA-256 and keep only "
+                                f"chdman.exe?") != QMessageBox.StandardButton.Yes:
+            return
+        self.log.clear()
+        self.bar.setVisible(True)
+        self.bar.setRange(0, 0)
+
+        def job(w):
+            try:
+                up.install_official_windows(tag, w.message.emit, w.cancel)
+                return 0
+            except Exception as exc:  # noqa: BLE001
+                w.message.emit(f"== Failed: {exc}")
+                return 1
+
+        self.worker = Worker(job, parent=self)
+        self.proc = None
+        self.cancel_btn.clicked.disconnect()
+        self.cancel_btn.clicked.connect(lambda: self.worker and self.worker.cancel.set())
+        self.worker.message.connect(self._log_line)
+        self.worker.done.connect(lambda rc: self._built(rc, tag))
+        self.build_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.win.set_busy(True)
+        self.worker.start()
+
     def _log_line(self, s: str):
         self.log.appendPlainText(s)
 
@@ -1058,7 +1099,7 @@ class ChdmanTab(QWidget):
         self.win.set_busy(False)
         exe = next((e for t, e in up.built_versions() if t == tag), None)
         if rc == 0 and exe:
-            if QMessageBox.question(self, "Build finished", f"chdman {tag} was built:\n{exe}\n\nUse it from now on "
+            if QMessageBox.question(self, "chdman ready", f"chdman {tag} is ready:\n{exe}\n\nUse it from now on "
                                     f"(in all three tools)?") == QMessageBox.StandardButton.Yes:
                 cfg = get_config()
                 cfg["chdman_path"] = str(exe)
@@ -1084,10 +1125,8 @@ class ConverterWindow(QMainWindow):
         self.addToolBar(tb)
         for label, mod, icon in (("Open ROM Verifier", "verifier", "rom-verifier"),
                                  ("Open ROM Renamer", "renamer", "rom-renamer")):
-            act = QAction(QIcon.fromTheme(icon, QIcon(str(Path(__file__).resolve().parents[2] / "icons" /
-                                                          f"{icon}.svg"))), label, self)
-            act.triggered.connect(lambda _=False, m=mod: __import__("subprocess").Popen(
-                [sys.executable, "-m", f"romtools.gui.{m}"], cwd=str(Path(__file__).resolve().parents[2])))
+            act = QAction(QIcon.fromTheme(icon, QIcon(str(resource_dir() / "icons" / f"{icon}.svg"))), label, self)
+            act.triggered.connect(lambda _=False, m=mod: launch_app(m))
             tb.addAction(act)
 
         self.tabs = QTabWidget()

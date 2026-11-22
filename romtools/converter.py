@@ -356,9 +356,8 @@ class Runner:
 
 
 def _gio_trash(path: Path) -> bool:
-    if shutil.which("gio"):
-        return subprocess.run(["gio", "trash", str(path)], capture_output=True).returncode == 0
-    return False
+    from .compat import trash
+    return trash(path)
 
 
 def free_space(path: Path) -> int:

@@ -50,7 +50,8 @@ def make_app(name: str, icon: str) -> QApplication:
     app.aboutToQuit.connect(Worker.wait_all)  # never destroy a running thread (Qt aborts the process)
     ic = QIcon.fromTheme(icon)
     if ic.isNull():
-        ic = QIcon(str(Path(__file__).resolve().parents[2] / "icons" / f"{icon}.svg"))
+        from ..compat import resource_dir
+        ic = QIcon(str(resource_dir() / "icons" / f"{icon}.svg"))
     app.setWindowIcon(ic)
     # Use the desktop's native style (Breeze on KDE, Adwaita-like on GNOME); fall back to Fusion.
     if app.style().objectName().lower() in ("windows", ""):
@@ -122,6 +123,11 @@ class TempModeCombo(QComboBox):
                         "Writes up to a full disc image to disk per CHD.\n\n"
                         "Changing this during a run takes effect when the current run finishes.")
         self.setCurrentIndex(max(0, self.findData(get_config()["temp_mode"])))
+        from ..compat import ram_mode_supported
+        if not ram_mode_supported():  # Windows: no tmpfs streaming; temp files only
+            self.model().item(0).setEnabled(False)
+            self.setItemText(0, "CHD temp: RAM (Linux only)")
+            self.setCurrentIndex(1)
         self.currentIndexChanged.connect(self._changed)
 
     def _changed(self, _i):

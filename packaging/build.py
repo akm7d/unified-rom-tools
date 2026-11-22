@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""Build romtools for Linux and Windows from one source tree.
+
+    python3 packaging/build.py linux      # dist/romtools-<version>-linux-x64.tar.gz
+    python3 packaging/build.py windows    # dist/romtools-<version>-windows-x64.zip  (Wine on Linux, or native)
+    python3 packaging/build.py all
+    python3 packaging/build.py clean      # remove build/ and dist/
+    python3 packaging/build.py distclean  # also remove the download / venv / Wine cache
+
+Everything external is pinned in packaging/versions.toml and checksum-verified. Downloads, the Linux venv and
+the Wine prefix are cached in ~/.cache/romtools-build (override with ROMTOOLS_BUILD_CACHE), so rebuilds are
+quick. Each build runs the packaged program's --selftest and fails if it doesn't pass.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tomllib
+import urllib.request
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PKG = ROOT / "packaging"
+BUILD = ROOT / "build"
+DIST = ROOT / "dist"
+CACHE = Path(os.environ.get("ROMTOOLS_BUILD_CACHE") or Path.home() / ".cache" / "romtools-build")
+DL = CACHE / "downloads"
+PINS = tomllib.loads((PKG / "versions.toml").read_text())
+VERSION = re.search(r'__version__ = "([^"]+)"', (ROOT / "romtools" / "__init__.py").read_text()).group(1)
+NATIVE_WIN = os.name == "nt"
+
+
+# ---------------------------------------------------------------- helpers
+
+def step(msg: str) -> None:
+    print(f"\n==> {msg}", flush=True)
+
+
+def run(cmd: list, **kw) -> subprocess.CompletedProcess:
+    print("   $ " + " ".join(str(c) for c in cmd), flush=True)
+    return subprocess.run([str(c) for c in cmd], check=True, **kw)
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(8 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download(url: str, sha: str | None = None, name: str | None = None, cache: bool = True) -> Path:
+    DL.mkdir(parents=True, exist_ok=True)
+    dest = DL / (name or url.rsplit("/", 1)[-1])
+    if cache and dest.exists() and (not sha or sha256(dest) == sha):
+        return dest
+    print(f"   downloading {url}", flush=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "romtools-build"})
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as fh:
+        shutil.copyfileobj(r, fh, 1 << 20)
+    if sha and sha256(tmp) != sha:
+        tmp.unlink()
+        raise SystemExit(f"checksum mismatch for {url} - refusing to use it")
+    tmp.replace(dest)
+    return dest
+
+
+def pip_requirements() -> list[str]:
+    return [f"{k}=={v}" for k, v in PINS["pip"].items()]
+
+
+def sevenzip_host() -> str:
+    exe = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+    if not exe:
+        raise SystemExit("7z is needed to unpack the Windows tools (pacman -S 7zip)")
+    return exe
+
+
+# ---------------------------------------------------------------- icons
+
+def make_icons(out: Path) -> Path:
+    """Render icons/*.svg to .png and multi-size .ico (Windows launchers) with the host's PySide6."""
+    out.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+    from PySide6.QtGui import QGuiApplication, QImage, QPainter
+    from PySide6.QtSvg import QSvgRenderer
+    app = QGuiApplication.instance() or QGuiApplication([])  # noqa: F841
+
+    def png(svg: Path, size: int) -> bytes:
+        img = QImage(size, size, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        p = QPainter(img)
+        QSvgRenderer(str(svg)).render(p)
+        p.end()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG")
+        return bytes(ba.data())
+
+    for svg in sorted((ROOT / "icons").glob("*.svg")):
+        sizes = [16, 24, 32, 48, 64, 128, 256]
+        images = [png(svg, s) for s in sizes]
+        (out / f"{svg.stem}.png").write_bytes(images[-1])
+        # ICO with PNG-compressed entries (Windows Vista and later)
+        header = struct.pack("<HHH", 0, 1, len(images))
+        offset = 6 + 16 * len(images)
+        entries, blobs = b"", b""
+        for s, data in zip(sizes, images):
+            entries += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(data), offset + len(blobs))
+            blobs += data
+        (out / f"{svg.stem}.ico").write_bytes(header + entries + blobs)
+    return out
+
+
+# ---------------------------------------------------------------- self-test
+
+def check_selftest(report: Path, label: str) -> None:
+    text = report.read_text(encoding="utf-8") if report.exists() else "(no report written)"
+    print("\n".join("   " + line for line in text.splitlines()))
+    if "RESULT OK" not in text:
+        raise SystemExit(f"{label} self-test FAILED - not packaging a broken build")
+
+
+# ---------------------------------------------------------------- Linux
+
+def build_linux(skip_selftest: bool) -> Path:
+    step(f"Linux build {VERSION}")
+    venv = CACHE / "venv-linux"
+    py = venv / "bin" / "python"
+    if not py.exists():
+        run([sys.executable, "-m", "venv", venv])
+    run([py, "-m", "pip", "install", "-q", "--upgrade", "pip"])
+    run([py, "-m", "pip", "install", "-q", *pip_requirements()])
+
+    icons = make_icons(BUILD / "icons")
+    work, distp = BUILD / "linux" / "work", BUILD / "linux" / "dist"
+    run([py, "-m", "PyInstaller", PKG / "romtools.spec", "--noconfirm", "--log-level", "WARN",
+         "--distpath", distp, "--workpath", work], env={**os.environ, "ROMTOOLS_ICON_DIR": str(icons)})
+
+    name = f"romtools-{VERSION}-linux-x64"
+    out = DIST / name
+    shutil.rmtree(out, ignore_errors=True)
+    shutil.copytree(distp / "romtools", out)
+    shutil.copytree(ROOT / "icons", out / "icons")
+    shutil.copy2(PKG / "linux" / "install.sh", out / "install.sh")
+    shutil.copy2(ROOT / "README.md", out / "README.md")
+    (out / "install.sh").chmod(0o755)
+
+    if not skip_selftest:
+        step("Linux self-test")
+        report = BUILD / "linux" / "selftest.txt"
+        report.unlink(missing_ok=True)
+        subprocess.run([out / "rom-verifier", "--selftest", report], env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+                       timeout=300)
+        check_selftest(report, "Linux")
+
+    step("Packing")
+    archive = DIST / f"{name}.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(out, arcname=name)
+    print(f"   {archive}  ({archive.stat().st_size >> 20} MB)")
+    return archive
+
+
+# ---------------------------------------------------------------- Windows
+
+def wine_env() -> dict:
+    return {**os.environ, "WINEPREFIX": str(CACHE / "wine"), "WINEARCH": "win64", "WINEDEBUG": "-all",
+            "WINEDLLOVERRIDES": "mscoree,mshtml="}
+
+
+def winpath(p: Path) -> str:
+    if NATIVE_WIN:
+        return str(p)
+    return subprocess.run(["winepath", "-w", str(p)], env=wine_env(), capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def windows_tools(dest: Path) -> None:
+    """chdman.exe from MAME's official release, 7z.exe/7z.dll from 7-Zip, both checksum-verified."""
+    dest.mkdir(parents=True, exist_ok=True)
+    seven = sevenzip_host()
+    tag = PINS["chdman_windows"]["mame_tag"]
+    base = f"https://github.com/mamedev/mame/releases/download/{tag}/"
+    sums = download(base + "SHA256SUMS", name=f"{tag}-SHA256SUMS")
+    asset = f"{tag}b_x64.exe"
+    want = next((ln.split()[0] for ln in sums.read_text().splitlines()
+                 if ln.split()[-1].lstrip("*") == asset), None)
+    if not want:
+        raise SystemExit(f"{asset} not listed in MAME's SHA256SUMS")
+    mame = download(base + asset, want)
+    run([seven, "e", "-y", f"-o{dest}", mame, "chdman.exe"], stdout=subprocess.DEVNULL)
+
+    sz = PINS["sevenzip_windows"]
+    inst = download(sz["url"], sz["sha256"])
+    run([seven, "e", "-y", f"-o{dest}", inst, "7z.exe", "7z.dll", "License.txt"], stdout=subprocess.DEVNULL)
+    (dest / "License.txt").replace(dest / "7-Zip-License.txt")
+    (dest / "chdman-LICENSE.txt").write_text(
+        f"chdman.exe is part of MAME {tag} (https://www.mamedev.org), taken unmodified from the official\n"
+        f"release {asset}. MAME is licensed under the GPL-2.0-or-later; source code:\n"
+        f"https://github.com/mamedev/mame/tree/{tag}\n", encoding="utf-8")
+
+
+def build_windows(skip_selftest: bool) -> Path:
+    step(f"Windows build {VERSION}" + ("" if NATIVE_WIN else " (using Wine)"))
+    env = os.environ.copy() if NATIVE_WIN else wine_env()
+    wine = [] if NATIVE_WIN else ["wine"]
+    pyw = PINS["python_windows"]
+    if NATIVE_WIN:
+        py_cmd = [sys.executable]
+    else:
+        if not shutil.which("wine"):
+            raise SystemExit("Wine is needed to build the Windows version on Linux (pacman -S wine)")
+        target = CACHE / "wine" / "drive_c" / "Python314" / "python.exe"
+        stamp = CACHE / "wine" / "python-version"
+        if not target.exists() or not stamp.exists() or stamp.read_text().strip() != pyw["version"]:
+            step(f"Installing Windows Python {pyw['version']} into the build's Wine prefix")
+            run(["wineboot", "-u"], env=env)
+            inst = download(pyw["url"], pyw["sha256"])
+            run(["wine", inst, "/quiet", "InstallAllUsers=0", "TargetDir=C:\\Python314", "Include_test=0",
+                 "Include_tcltk=0", "Include_launcher=0", "Include_doc=0", "Shortcuts=0", "AssociateFiles=0",
+                 "PrependPath=0"], env=env)
+            stamp.write_text(pyw["version"])
+        py_cmd = ["wine", "C:\\Python314\\python.exe"]
+    run([*py_cmd, "-m", "pip", "install", "-q", "--disable-pip-version-check", *pip_requirements()], env=env)
+
+    step("Fetching chdman.exe and 7-Zip")
+    tools = BUILD / "windows" / "tools"
+    shutil.rmtree(tools, ignore_errors=True)
+    windows_tools(tools)
+
+    icons = make_icons(BUILD / "icons")
+    work, distp = BUILD / "windows" / "work", BUILD / "windows" / "dist"
+    step("PyInstaller")
+    run([*py_cmd, "-m", "PyInstaller", winpath(PKG / "romtools.spec"), "--noconfirm", "--log-level", "WARN",
+         "--distpath", winpath(distp), "--workpath", winpath(work)],
+        env={**env, "ROMTOOLS_ICON_DIR": winpath(icons)})
+
+    name = f"romtools-{VERSION}-windows-x64"
+    out = DIST / name
+    shutil.rmtree(out, ignore_errors=True)
+    shutil.copytree(distp / "romtools", out)
+    shutil.copytree(tools, out / "tools")
+    shutil.copy2(PKG / "windows" / "README-Windows.txt", out / "README-Windows.txt")
+    shutil.copy2(ROOT / "README.md", out / "README.md")
+
+    if not skip_selftest:
+        step("Windows self-test" + ("" if NATIVE_WIN else " (under Wine)"))
+        report = BUILD / "windows" / "selftest.txt"
+        report.unlink(missing_ok=True)
+        subprocess.run([*wine, out / "ROM Verifier.exe", "--selftest", winpath(report)],
+                       env={**env, "QT_QPA_PLATFORM": "offscreen"}, timeout=600)
+        check_selftest(report, "Windows")
+
+    step("Packing")
+    archive = DIST / f"{name}.zip"
+    archive.unlink(missing_ok=True)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for f in sorted(out.rglob("*")):
+            zf.write(f, Path(name) / f.relative_to(out))
+    print(f"   {archive}  ({archive.stat().st_size >> 20} MB)")
+    return archive
+
+
+# ---------------------------------------------------------------- cleaning
+
+def _remove(path: Path, must_contain: str) -> None:
+    """Delete a build folder, refusing anything that isn't clearly one of ours."""
+    path = path.resolve()
+    if not path.exists():
+        return
+    if must_contain not in path.name or path in (Path.home().resolve(), Path("/").resolve(), ROOT):
+        raise SystemExit(f"refusing to delete {path}")
+    print(f"   removing {path}")
+    shutil.rmtree(path)
+
+
+def clean(cache_too: bool) -> None:
+    for p in (BUILD, DIST):
+        if p.resolve().parent != ROOT:
+            raise SystemExit(f"refusing to delete {p}")
+        if p.exists():
+            print(f"   removing {p}")
+            shutil.rmtree(p)
+    if cache_too:
+        _remove(CACHE, "romtools-build")
+
+
+# ---------------------------------------------------------------- main
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("target", choices=["linux", "windows", "all", "clean", "distclean"])
+    ap.add_argument("--skip-selftest", action="store_true", help="don't run the packaged program's self-test")
+    args = ap.parse_args()
+    if args.target in ("clean", "distclean"):
+        clean(args.target == "distclean")
+        return 0
+    DIST.mkdir(exist_ok=True)
+    made = []
+    if args.target in ("linux", "all"):
+        made.append(build_linux(args.skip_selftest))
+    if args.target in ("windows", "all"):
+        made.append(build_windows(args.skip_selftest))
+    step("Done")
+    for m in made:
+        print(f"   {m}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

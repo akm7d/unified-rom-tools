@@ -129,8 +129,7 @@ class RenamerWindow(QMainWindow):
         act_dats = QAction(QIcon.fromTheme("view-list-details"), "Manage DATs…", self)
         act_dats.triggered.connect(self.manage_dats)
         act_ver = QAction(QIcon.fromTheme("security-high"), "Open ROM Verifier", self)
-        act_ver.triggered.connect(lambda: subprocess.Popen([sys.executable, "-m", "romtools.gui.verifier"],
-                                                           cwd=str(Path(__file__).resolve().parents[2])))
+        act_ver.triggered.connect(lambda: __import__("romtools.compat", fromlist=["x"]).launch_app("verifier"))
         for a in (self.act_preview, self.act_stop, self.act_apply):
             tb.addAction(a)
         tb.addSeparator()

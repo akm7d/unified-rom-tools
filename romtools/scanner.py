@@ -14,6 +14,7 @@ from typing import Callable
 
 from . import chd
 from .cache import HashCache
+from .compat import ram_mode_supported
 from .dat import DatIndex, Game
 from .hashing import ARCHIVE_EXTS, Cancelled, Entry, hash_archive, hash_file
 
@@ -375,7 +376,7 @@ class Scanner:
 def make_scanner(cfg, cache=None, mode: str = QUICK) -> "Scanner":
     """Build a Scanner from the settings as they are right now (a running scan keeps its own)."""
     s = Scanner(Path(cfg["tmp_dir"]), cfg["workers"], cfg["chd_workers"], cache,
-                ram_mode=cfg["temp_mode"] == "ram")
+                ram_mode=cfg["temp_mode"] == "ram" and ram_mode_supported())
     s.mode = mode
     return s
 

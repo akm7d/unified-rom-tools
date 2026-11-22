@@ -4,9 +4,16 @@ Three Linux-native Qt (PySide6) desktop apps for a RomM-style library (`roms/<sy
 
 ## Install
 
+**Linux (from source, for development):**
+
 ```bash
 ./install.sh
 ```
+
+**Linux / Windows (packaged builds):** download `romtools-<version>-linux-x64.tar.gz` or
+`romtools-<version>-windows-x64.zip`. On Linux, extract it and run `./install.sh` inside it to add the menu
+entries. On Windows, extract it and run `ROM Verifier.exe` (chdman.exe and 7-Zip are included; see
+`README-Windows.txt`). To build either yourself, see [BUILDING.md](BUILDING.md).
 
 Adds `rom-verifier`, `rom-renamer` and `rom-converter` to `~/.local/bin` and to your app menu (Games / Utilities).
 Requirements (already present on this machine): `pyside6`, `mame-tools` (chdman), `7zip`.

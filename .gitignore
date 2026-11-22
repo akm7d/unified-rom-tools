@@ -10,3 +10,7 @@ venv/
 .romtools-*
 .idea/
 .vscode/
+
+# build outputs (packaging/build.py)
+/build/
+/dist/
