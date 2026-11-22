@@ -3,6 +3,12 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.6.1
+- Fix: Switch RomFS / ExeFS extraction asked nstool for partition "/0" instead of "/0/" and failed with "Failed to
+  extract virtual path". The output folder is created first, and if a part still comes out empty the log now
+  includes nstool's listing of the NCA.
+- ROM Optimizer: a failed job's full log is saved in `~/.local/share/romtools/logs/` (portable: `data/logs/`).
+
 ## 1.6.0
 - ROM Optimizer: **Switch NSP / XCI → RomFS + ExeFS folders** task (bundled nstool 1.9.2, MIT). One job per game
   with the newest update applied (from the same package or one next to it) and one per DLC. Needs your

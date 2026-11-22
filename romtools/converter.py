@@ -444,6 +444,23 @@ def collect(paths: list[Path], preset: str, recursive: bool = True) -> list[Path
 
 # ------------------------------------------------------------------ running
 
+def save_log(job: Job) -> Path | None:
+    """Keep a failed job's full log in <data>/logs/ (the window only holds it while it's open)."""
+    import re as _re
+    from .config import DATA_DIR
+    try:
+        d = DATA_DIR / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        name = _re.sub(r"[^\w.-]+", "_", job.title)[:80]
+        f = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{name}.log"
+        f.write_text(f"{job.title}\nsource: {job.source}\nstatus: {job.status}: {job.message}\n"
+                     f"detail: {job.detail}\n\n" + "\n".join(job.log) + "\n", encoding="utf-8")
+        job.log.append(f"(log saved to {f})")
+        return f
+    except OSError:
+        return None
+
+
 class Runner:
     def __init__(self, jobs: list[Job], parallel: int, on_update: Callable[[Job], None],
                  trash: Callable[[Path], bool] | None = None) -> None:
@@ -463,7 +480,12 @@ class Runner:
 
     def run(self) -> None:
         with ThreadPoolExecutor(max_workers=self.parallel) as ex:
-            list(ex.map(self._run_job, [j for j in self.jobs if j.status == "Queued"]))
+            list(ex.map(self._run_and_keep_log, [j for j in self.jobs if j.status == "Queued"]))
+
+    def _run_and_keep_log(self, job: Job) -> None:
+        self._run_job(job)
+        if job.status == "Failed":
+            save_log(job)
 
     def _run_job(self, job: Job) -> None:
         if self.cancel.is_set():

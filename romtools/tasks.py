@@ -435,8 +435,10 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
                 tiks += ["--tik", str(t)]
             ctx.check()
             base_args = ["--basenca", str(local[1])] if base else []
+            dest.mkdir(parents=True, exist_ok=True)
             for i, (part, idx) in enumerate(parts.items()):
-                argv = [exe, "-k", str(keys), *tiks, *base_args, "-x", f"/{idx}", str(dest / part), str(local[0])]
+                # "/N/" with the trailing slash: the form nstool's own --partN shortcuts use for a partition folder
+                argv = [exe, "-k", str(keys), *tiks, *base_args, "-x", f"/{idx}/", str(dest / part), str(local[0])]
                 lo, hi = 0.4 + 0.6 * i / len(parts), 0.4 + 0.6 * (i + 1) / len(parts)
                 stop = threading.Event()
 
@@ -452,7 +454,13 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
                 finally:
                     stop.set()
                 if not (dest / part).is_dir() or not any((dest / part).rglob("*")):
-                    raise RuntimeError(f"nstool produced no {part} (wrong keys, or a missing ticket?)")
+                    # show what nstool sees inside the NCA, so the log says why
+                    try:
+                        _run_tool([exe, "-k", str(keys), *tiks, *base_args, "--fstree", str(local[0])], ctx,
+                                  "Listing the NCA")
+                    except Exception as exc:  # noqa: BLE001
+                        ctx.log(f"(listing failed: {exc})")
+                    raise RuntimeError(f"nstool produced no {part} - see the NCA listing above in the log")
             if "exefs" in parts and not ((dest / "exefs" / "main").exists() or (dest / "exefs" / "main.npdm").exists()):
                 raise RuntimeError("the ExeFS has no main / main.npdm - extraction looks incomplete")
             os.rename(dest, out)
