@@ -27,9 +27,10 @@ ROM_EXTS = {".nes", ".fds", ".unf", ".sfc", ".smc", ".fig", ".swc", ".bs", ".st"
             ".zso", ".rvz", ".gcm", ".gcz", ".wbfs", ".wua", ".wux", ".wud", ".nsp", ".nsz", ".xci", ".pkg",
             ".zip", ".7z", ".rar", ".pbp", ".elf"}
 
-VERIFIED, MISNAMED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED = (
-    "Verified", "Misnamed", "Partial", "Bad dump", "Unknown", "No DAT", "Error", "Skipped")
-STATUS_ORDER = [VERIFIED, MISNAMED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED]
+VERIFIED, MISNAMED, MODIFIED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED = (
+    "Verified", "Misnamed", "Modified", "Partial", "Bad dump", "Unknown", "No DAT", "Error", "Skipped")
+STATUS_ORDER = [VERIFIED, MISNAMED, MODIFIED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED]
+TAGGABLE = {BAD, UNKNOWN, PARTIAL}   # statuses a hack/translation tag can replace
 
 
 @dataclass
@@ -61,6 +62,15 @@ class Result:
     entries: list[EntryResult] = field(default_factory=list)
     chd_info: dict = field(default_factory=dict)
     cached: bool = False
+    media: object = None       # discdetect.MediaCheck for CHDs (None if unknown / not a CHD)
+    tag: str = ""              # hack / translation tag (see tags.py)
+    tag_source: str = ""       # "marked by you" or "from name: …"
+    orig_status: str | None = None   # status before tagging
+    orig_note: str = ""
+
+    @property
+    def media_wrong(self) -> bool:
+        return self.media is not None and not self.media.ok
 
     @property
     def size(self) -> int:
@@ -211,7 +221,7 @@ def match(item: Item, entries: list[Entry], index: DatIndex) -> Result:
         note += f", {unmatched} file track(s) not in DAT entry"
     bad = [er for er in ers if er.rom is None]
     if bad and all(er.entry.name.lower().endswith(".raw") for er in bad):
-        note += " - only audio tracks differ (data is intact; usually a non-Redump/TOSEC GDI source)"
+        note += " - only audio tracks differ from Redump (the game data is intact)"
     return Result(item, PARTIAL, best.name, best.dat, note, ers)
 
 
@@ -239,6 +249,7 @@ class Scanner:
         self.cache = cache
         self.cancel = threading.Event()
         self.mode = QUICK
+        self.marks = None          # tags.MarkStore; set by the caller to apply your hack marks
         self.stats = {"remembered": 0, "hashed": 0, "not_scanned": 0}
         self._stats_lock = threading.Lock()
 
@@ -254,9 +265,20 @@ class Scanner:
         size = st.st_size + sum(x.stat().st_size for x in item.parts)
         if self.cache and self.mode != FULL:
             hit = self.cache.get(p, size, mtime)
+            if hit and item.kind == "chd" and hit[1].get("kind") == "gd" \
+                    and hit[1].get("layout", 1) < chd.TRACK_LAYOUT:
+                hit = None  # GD-ROM hashed with the old .gdi layout: redo it with the Redump-exact one
             if hit:
+                kind, extra, entries = hit
+                if item.kind == "chd" and "frames" not in extra:
+                    # remembered before track details were stored: read the CHD header (fast) and remember it
+                    try:
+                        extra = chd.info(p).as_dict()
+                        self.cache.put(p, size, mtime, kind, extra, entries)
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._count("remembered")
-                return hit[2], hit[1], True
+                return entries, extra, True
         if self.mode == REMEMBERED:
             raise NotScanned()
 
@@ -276,7 +298,7 @@ class Scanner:
                 hasher = chd.stream_hash if self.ram_mode else chd.extract_and_hash
                 root = chd.RAM_DIR if self.ram_mode else self.tmp_dir
                 ci, entries = hasher(p, root, self.cancel, lambda stage, f: progress and progress(stage, f))
-            extra = {"kind": ci.kind, "sha1": ci.sha1, "data_sha1": ci.data_sha1, "version": ci.version}
+            extra = ci.as_dict()
         elif item.kind == "archive":
             entries = hash_archive(p, self.cancel, bytes_cb)
         elif item.kind == "cueset":
@@ -306,6 +328,14 @@ class Scanner:
         r = match(item, entries, index)
         r.chd_info = extra
         r.cached = cached
+        if item.kind == "chd":
+            from .discdetect import check_chd
+            from .systems import guess_system
+            sysdef = guess_system(item.system)
+            game = index.game_named(r.game) if r.game else index.game_named(item.stem)
+            r.media = check_chd(extra, sysdef.id if sysdef else "", game)
+        from . import tags
+        tags.apply(r, self.marks, MODIFIED, TAGGABLE)
         return r
 
     def run(self, items: list[Item], indexes: dict[str, DatIndex | None],

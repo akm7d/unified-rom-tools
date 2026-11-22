@@ -33,7 +33,8 @@ DEFAULTS = {
     "workers": 4,                    # parallel file hashing (network shares like 2-6)
     "chd_workers": 2,                # parallel CHD extractions
     "use_cache": True,
-    "temp_mode": "ram",              # "ram": stream CHDs through /dev/shm (no SSD writes) | "ssd": temp files
+    "temp_mode": "ram",
+    "chdman_path": "system",         # "system" (PATH) or an absolute path to a chdman binary              # "ram": stream CHDs through /dev/shm (no SSD writes) | "ssd": temp files
     # folder name (e.g. "psx") -> {"system": catalog id or "", "dats": [paths]}
     "systems": {},
     "rename_use_dat_ext": False,

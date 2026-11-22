@@ -14,7 +14,7 @@ if ((${#missing[@]})); then
   echo "Install with:  sudo pacman -S ${missing[*]}"
 fi
 
-for app in verifier renamer; do
+for app in verifier renamer converter; do
   name="rom-$app"
   cat > "$BIN/$name" <<SH
 #!/bin/sh
@@ -51,6 +51,19 @@ Categories=Game;Utility;Emulator;
 Keywords=rom;rename;redump;nointro;dat;m3u;
 StartupWMClass=rom-renamer
 D
+cat > "$APPS/rom-converter.desktop" <<D
+[Desktop Entry]
+Type=Application
+Name=ROM Converter
+GenericName=ROM format converter
+Comment=Convert to and from CHD with chdman (batch), run any chdman command, keep chdman updated
+Exec=$BIN/rom-converter
+Icon=rom-converter
+Terminal=false
+Categories=Game;Utility;Emulator;
+Keywords=rom;chd;chdman;convert;compress;iso;cue;gdi;
+StartupWMClass=rom-converter
+D
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" >/dev/null 2>&1 || true
 command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
-echo "Installed: rom-verifier, rom-renamer (menu: Games / Utilities)"
+echo "Installed: rom-verifier, rom-renamer, rom-converter (menu: Games / Utilities)"

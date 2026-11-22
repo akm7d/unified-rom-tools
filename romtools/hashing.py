@@ -95,8 +95,11 @@ class _Hasher:
 
 def hash_stream(fh: BinaryIO, name: str, total: int | None = None,
                 cancel: threading.Event | None = None,
-                progress: Callable[[int], None] | None = None) -> Entry:
+                progress: Callable[[int], None] | None = None, prefix_zeros: int = 0) -> Entry:
+    """prefix_zeros: hash this many zero bytes first (a CD pregap the image leaves out but Redump includes)."""
     full = _Hasher()
+    if prefix_zeros:
+        full.update(bytes(prefix_zeros))
     first = fh.read(CHUNK)
     hlen = detect_header(name, first, total)
     nohdr = _Hasher() if hlen else None
@@ -106,17 +109,17 @@ def hash_stream(fh: BinaryIO, name: str, total: int | None = None,
             raise Cancelled()
         full.update(buf)
         if nohdr is not None:
-            nohdr.update(buf[hlen:] if full.size == len(buf) else buf)
+            nohdr.update(buf[hlen:] if full.size == len(buf) + prefix_zeros else buf)
         if progress:
             progress(len(buf))
         buf = fh.read(CHUNK)
     return Entry(name, full.result(), nohdr.result() if nohdr else None, hlen)
 
 
-def hash_file(path: Path, cancel=None, progress=None, name: str | None = None) -> Entry:
+def hash_file(path: Path, cancel=None, progress=None, name: str | None = None, prefix_zeros: int = 0) -> Entry:
     size = path.stat().st_size
     with open(path, "rb", buffering=0) as fh:
-        return hash_stream(fh, name or path.name, size, cancel, progress)
+        return hash_stream(fh, name or path.name, size, cancel, progress, prefix_zeros)
 
 
 # ---------------------------------------------------------------- archives

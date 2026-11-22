@@ -20,6 +20,7 @@ from ..systems import UNVERIFIABLE_HINT
 STATUS_COLORS = {
     sc.VERIFIED: "#2e9d53",
     sc.MISNAMED: "#2f7fd1",
+    sc.MODIFIED: "#1a9c9c",
     sc.PARTIAL: "#d49a1b",
     sc.BAD: "#d1452f",
     sc.UNKNOWN: "#8a6fc9",
@@ -30,6 +31,8 @@ STATUS_COLORS = {
 STATUS_HELP = {
     sc.VERIFIED: "Hashes match the DAT and the name is correct",
     sc.MISNAMED: "Good dump, but the name differs from the DAT (fix it in ROM Renamer)",
+    sc.MODIFIED: "Tagged as a hack, translation, undub or other modified ROM - expected not to match the DAT "
+                 "(right-click → Mark as… to change)",
     sc.PARTIAL: "Some tracks/files match, others don't",
     sc.BAD: "The name is in the DAT but the data differs: bad dump, hack, trimmed or modified",
     sc.UNKNOWN: "Not in the DAT at all (hacks, translations, homebrew, or wrong system)",
@@ -44,6 +47,7 @@ def make_app(name: str, icon: str) -> QApplication:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(name)
     app.setOrganizationName("romtools")
+    app.aboutToQuit.connect(Worker.wait_all)  # never destroy a running thread (Qt aborts the process)
     ic = QIcon.fromTheme(icon)
     if ic.isNull():
         ic = QIcon(str(Path(__file__).resolve().parents[2] / "icons" / f"{icon}.svg"))
@@ -79,10 +83,22 @@ class Worker(QThread):
     failed = Signal(str)
     done = Signal(object)
 
+    live: set = set()   # running workers, so the app can wait for them before exiting
+
     def __init__(self, fn, *args, parent=None):
         super().__init__(parent)
         self.fn, self.args = fn, args
         self.cancel = threading.Event()
+        Worker.live.add(self)
+        self.finished.connect(lambda: Worker.live.discard(self))
+
+    @staticmethod
+    def wait_all(timeout_ms: int = 8000) -> None:
+        for w in list(Worker.live):
+            w.cancel.set()
+        for w in list(Worker.live):
+            if w.isRunning():
+                w.wait(timeout_ms)
 
     def run(self):
         try:

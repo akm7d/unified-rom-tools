@@ -18,9 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .chdman_tool import chdman_bin
 from .hashing import Cancelled, Entry, hash_file
 
-CHDMAN = shutil.which("chdman")
+
+# 2 = GD-ROMs extracted as split .cue/.bin with chdman's virtual pregaps restored (Redump layout).
+#     Layout 1 extracted GD-ROMs as .gdi, which drops or misplaces the 2-second pregap before track 2.
+TRACK_LAYOUT = 2
+SECTOR_RAW = 2352
 
 CD_TAGS = {"CHT2", "CHTR", "CHCD"}
 GD_TAGS = {"CHGT", "CHGD"}
@@ -35,12 +40,22 @@ class ChdInfo:
     sha1: str
     data_sha1: str
     version: int
+    tracks: int = 1
+    # TRACK_LAYOUT bumps when the way tracks are rebuilt changes, so remembered hashes made the old way get redone.
+    track_types: tuple = ()   # e.g. ("MODE1",) for a CD made from an .iso, ("MODE2_RAW", "AUDIO", ...)
+    frames: int = 0           # total CD frames (sectors); 0 for non-CD
+
+    def as_dict(self) -> dict:
+        return {"kind": self.kind, "sha1": self.sha1, "data_sha1": self.data_sha1, "version": self.version,
+                "tracks": self.tracks, "track_types": list(self.track_types), "frames": self.frames,
+                "logical_size": self.logical_size, "layout": TRACK_LAYOUT}
 
 
 def info(path: Path) -> ChdInfo:
-    if not CHDMAN:
+    exe = chdman_bin()
+    if not exe:
         raise RuntimeError("chdman not found (install the 'mame-tools' package)")
-    res = subprocess.run([CHDMAN, "info", "-i", str(path)], capture_output=True, text=True,
+    res = subprocess.run([exe, "info", "-i", str(path)], capture_output=True, text=True,
                          errors="replace", check=False)
     if res.returncode != 0:
         raise RuntimeError(_last_line(res.stderr or res.stdout) or "chdman info failed")
@@ -60,8 +75,10 @@ def info(path: Path) -> ChdInfo:
         m = re.search(rf"^{label}:\s*(.+)$", out, re.M)
         return m.group(1).strip() if m else ""
 
+    tracks = re.findall(r"TRACK:(\d+) TYPE:(\S+).*?FRAMES:(\d+)", out)
     return ChdInfo(kind, int(grab("Logical size").split()[0].replace(",", "") or 0),
-                   grab("SHA1").lower(), grab("Data SHA1").lower(), int(grab("File Version") or 0))
+                   grab("SHA1").lower(), grab("Data SHA1").lower(), int(grab("File Version") or 0),
+                   max(1, len(tracks)), tuple(t[1] for t in tracks), sum(int(t[2]) for t in tracks))
 
 
 def _last_line(s: str) -> str:
@@ -99,15 +116,39 @@ def _run(cmd: list[str], cancel: threading.Event | None, progress: Callable[[flo
 
 def _extract_cmd(ci: ChdInfo, path: Path, work: Path) -> list[str]:
     i, o = str(path), str(work / "t")
+    CHDMAN = chdman_bin()
     if ci.kind == "cd":
         return [CHDMAN, "extractcd", "-i", i, "-o", o + ".cue", "-sb", "-f"]
     if ci.kind == "gd":
-        return [CHDMAN, "extractcd", "-i", i, "-o", o + ".gdi", "-f"]
+        # split .cue/.bin, not .gdi: the cue keeps Redump's track boundaries (see _cue_pregaps)
+        return [CHDMAN, "extractcd", "-i", i, "-o", o + ".cue", "-sb", "-f"]
     if ci.kind == "dvd":
         return [CHDMAN, "extractdvd", "-i", i, "-o", o + ".iso", "-f"]
     if ci.kind == "hd":
         return [CHDMAN, "extracthd", "-i", i, "-o", o + ".img", "-f"]
     return [CHDMAN, "extractraw", "-i", i, "-o", o + ".bin", "-f"]
+
+
+def _cue_pregaps(cue: Path) -> dict[str, int]:
+    """{bin file name: pregap frames} for tracks whose cue says PREGAP, i.e. a gap chdman didn't write
+    into the file. Redump's track files contain that gap (as silence), so it's hashed back in as zeros."""
+    out: dict[str, int] = {}
+    try:
+        text = cue.read_text(errors="replace")
+    except OSError:
+        return out
+    current = ""
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.match(r'FILE\s+"(.+)"\s+\S+$', line)
+        if m:
+            current = m.group(1)
+            continue
+        m = re.match(r"PREGAP\s+(\d+):(\d+):(\d+)$", line)
+        if m and current:
+            mm, ss, ff = map(int, m.groups())
+            out[current] = (mm * 60 + ss) * 75 + ff
+    return out
 
 
 def _track_label(i: int, n: int, path: Path) -> str:
@@ -141,9 +182,11 @@ def extract_and_hash(path: Path, tmp_root: Path, cancel: threading.Event | None 
             if progress:
                 progress("hashing", done / total)
 
+        pregaps = _cue_pregaps(work / "t.cue")
         entries = []
         for i, f in enumerate(files, 1):
-            entries.append(hash_file(f, cancel, hp, name=_track_label(i, len(files), f)))
+            entries.append(hash_file(f, cancel, hp, name=_track_label(i, len(files), f),
+                                     prefix_zeros=pregaps.get(f.name, 0) * SECTOR_RAW))
             f.unlink()  # free space early on multi-track discs
         return ci, entries
     finally:
@@ -174,6 +217,7 @@ def cleanup_stale(tmp_root: Path) -> None:
 # and nothing is ever written to the SSD.
 
 RAM_DIR = Path("/dev/shm/romtools")
+STD_PREGAP = 150         # frames (2 seconds), the gap before an audio track
 HIGH_WATER = 256 << 20   # pause chdman when this much unhashed data is buffered
 LOW_WATER = 32 << 20     # resume it below this
 READ_CHUNK = 8 << 20
@@ -282,6 +326,11 @@ def stream_hash(path: Path, ram_root: Path = RAM_DIR, cancel: threading.Event | 
             if cur is None:
                 if files:
                     cur, off, punched, h = files[0], 0, 0, _Hasher()
+                    idx = len(done_files)
+                    hg = None  # same data with a standard 2-second silent pregap in front, for audio tracks
+                    if idx > 0 and idx < len(ci.track_types) and ci.track_types[idx] == "AUDIO":
+                        hg = _Hasher()
+                        hg.update(bytes(STD_PREGAP * SECTOR_RAW))
                     fd = os.open(cur, os.O_RDWR)  # RDWR needed to punch holes
                     continue
                 if exited:
@@ -295,6 +344,8 @@ def stream_hash(path: Path, ram_root: Path = RAM_DIR, cancel: threading.Event | 
                     time.sleep(0.01)
                     continue
                 h.update(data)
+                if hg is not None:
+                    hg.update(data)
                 off += len(data)
                 upto = off - off % PUNCH_ALIGN
                 if upto > punched and _punch(fd, punched, upto - punched):
@@ -314,7 +365,7 @@ def stream_hash(path: Path, ram_root: Path = RAM_DIR, cancel: threading.Event | 
                     continue  # final bytes landed after our stat
                 os.close(fd)
                 fd = -1
-                done_files.append((cur, Entry(cur.name, h.result())))
+                done_files.append((cur, Entry(cur.name, h.result()), hg.result() if hg else None))
                 seen.add(cur.name)
                 cur.unlink()
                 cur = None
@@ -325,9 +376,15 @@ def stream_hash(path: Path, ram_root: Path = RAM_DIR, cancel: threading.Event | 
         if proc.returncode != 0:
             msg = _last_line(bytes(err_tail).decode(errors="replace"))
             raise RuntimeError(f"chdman: {msg or 'exit code %d' % proc.returncode}")
+        pregaps = _cue_pregaps(work / "t.cue")
         n = len(done_files)
         entries = []
-        for i, (p, e) in enumerate(done_files, 1):
+        for i, (p, e, with_gap) in enumerate(done_files, 1):
+            gap = pregaps.get(p.name, 0)
+            if gap == STD_PREGAP and with_gap is not None:
+                e.full = with_gap
+            elif gap:
+                raise RuntimeError(f"unusual {gap}-frame pregap on {p.name}; switch to SSD mode for this disc")
             e.name = _track_label(i, n, p)
             entries.append(e)
         return ci, entries

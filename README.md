@@ -1,6 +1,6 @@
-# romtools — ROM Verifier & ROM Renamer
+# romtools — ROM Verifier, ROM Renamer & ROM Converter
 
-Two Linux-native Qt (PySide6) desktop apps for a RomM-style library (`roms/<system>/…`).
+Three Linux-native Qt (PySide6) desktop apps for a RomM-style library (`roms/<system>/…`).
 
 ## Install
 
@@ -8,7 +8,7 @@ Two Linux-native Qt (PySide6) desktop apps for a RomM-style library (`roms/<syst
 ./install.sh
 ```
 
-Adds `rom-verifier` and `rom-renamer` to `~/.local/bin` and to your app menu (Games / Utilities).
+Adds `rom-verifier`, `rom-renamer` and `rom-converter` to `~/.local/bin` and to your app menu (Games / Utilities).
 Requirements (already present on this machine): `pyside6`, `mame-tools` (chdman), `7zip`.
 
 ## ROM Verifier (read-only)
@@ -25,6 +25,16 @@ Requirements (already present on this machine): `pyside6`, `mame-tools` (chdman)
 | Partial | some tracks match (e.g. a Dreamcast CHD built from a TOSEC GDI: data OK, audio offset differs) |
 | Bad dump | name is in the DAT but data differs (bad dump, hack, trimmed, patched) |
 | Unknown | hashes aren't in the DAT (hacks, translations, homebrew) |
+| Modified | tagged as a hack / translation / undub / other mod, so it's expected not to match |
+
+**Hacks & translations:** a modified ROM can never match No-Intro/Redump, so it would otherwise show as
+*Bad dump* (original name) or *Unknown*. Files are tagged automatically from common naming conventions
+(`[T-En by …]`, `(T-En)`, `English Patched`, `(Hack)`, `[h1]`, `Undub`, `[f1]`, `[t1]`, `(Proto)`,
+`(PD)`/Homebrew, …), and **right-click → Mark as…** sets *Translation, Hack, Undub, Improvement, Homebrew,
+Trainer, Prototype, Modified* or a custom tag; *Not modified* overrides name detection and *Automatic* goes
+back to it. Marks are stored by file content in `~/.local/share/romtools/marks.json`, so they survive
+renames and moves. Tagged files get the *Modified* status (with its own filter chip), a *Tag* column (✎ =
+marked by you) and are never renamed by the Renamer's DAT mode.
 
 How formats are checked:
 - **CHD**: the original tracks are rebuilt with `chdman` (CD split per track, GD-ROM via GDI, DVD as ISO)
@@ -37,11 +47,24 @@ How formats are checked:
   - Switching during a run only affects the next run.
 - **zip / 7z / rar**: every member is hashed by streaming (no extraction to disk).
 - **cue/bin, gdi** sets: every track hashed.
+- **Dreamcast GD-ROM CHDs** are rebuilt as split .cue/.bin (not .gdi), and a 2-second pregap that chdman
+  leaves out of the track file is hashed back in as silence, the way Redump's track files contain it.
+  (.gdi output drops or misplaces that pregap, so every Dreamcast CHD used to show *Partial*.)
 - **NES / FDS / Lynx / 7800 / SNES copier headers**: hashed with and without the header in one pass.
 - **Quick scan (F5)** reuses results remembered from earlier scans and only hashes ROMs that are new or
   changed (by size/date). **Full scan (Shift+F5)** re-hashes everything and replaces what's remembered.
   Right-click → *Full re-scan of selected* does the same for a few rows. Remembered results show up as soon
   as the window opens (`~/.cache/romtools/hashes.sqlite`; Settings → *Forget all remembered scans*).
+
+**CHD type check:** every CHD gets a *CHD type* column (CD / DVD / GD). A CHD stored as the wrong type is
+flagged (e.g. a PS2 DVD game packed with `createcd`), using: a "CD" bigger than any CD can hold, the Redump
+DAT (.iso = DVD, .bin/.cue = CD), or the system (PS1 = CD, PSP = DVD, Dreamcast = GD-ROM). The *Wrong CHD
+type* chip filters to them. **Fix CHD types…** (toolbar, or right-click) converts them: the disc image is
+unpacked to RAM or the SSD temp folder (per the CHD temp switch), a new CHD is created next to the original,
+`chdman verify`'d and read back to prove its data SHA-1 is identical; only then is the original moved to the
+trash and the new CHD given its name. Any failure leaves the original untouched. Single-track 2048-byte CD
+CHDs (made from an .iso) convert to DVD losslessly; DVD → CD is also supported. GD-ROM mismatches are reported
+but must be re-created from the original .gdi/.cue.
 
 Right-click rows for: open folder, copy paths / SHA-1s / DAT names, re-check. **Export report** writes a CSV
 (per track hashes) or a plain-text summary.
@@ -61,6 +84,35 @@ discs are renamed (and renamed themselves when all of their discs are). Nothing 
 existing files are never overwritten. Every batch is journaled in `~/.local/share/romtools/rename-journal/`
 and can be reverted from **History / Undo**.
 
+## ROM Converter (chdman GUI)
+
+- **Batch** tab — pick a task, add files/folders (or drag & drop), *Start queue*:
+  - *Create CHD (auto)*: `.cue/.gdi/.toc/.nrg` → `createcd`. For `.iso` it **detects CD vs DVD** and shows why
+    in the *Detected as* column: the disc's own contents first (PSP `PSP GAME`; PS2 `BOOT2` vs PS1 `BOOT` in
+    `SYSTEM.CNF`; Xbox / Xbox 360 / GameCube / Wii / Saturn / Sega CD / Dreamcast headers), then for small PS2
+    images the Redump DAT (CD games are listed as .bin/.cue, DVD games as .iso), then the system folder,
+    then size. It warns when the target emulator can't read CHD (Dolphin, xemu, Xenia, Cemu, RPCS3).
+    *Always DVD* / *Always CD* override it.
+  - *Extract CHD (auto)*: CD → `.cue` + `.bin` (one per track for multi-track discs), GD-ROM → `.gdi`,
+    DVD → `.iso`, HD → `.img`.
+  - *Verify*, *Recompress (copy with new codecs)*, *Info*.
+  - Options: output next to source or into a folder, CD/DVD codec presets (default / Zstandard / LZMA) or
+    custom codecs, hunk size, jobs at once, CPU threads per job, overwrite, verify-after-create, and
+    *move sources to the trash after a verified success* (off by default; only after `chdman verify` passes).
+  - While it runs: a **queue status bar** (overall progress weighted by file size, counts per state,
+    elapsed, ETA, throughput), a **Now running** card per active job (step "2/2 · Verifying CHD", chdman's
+    live phase and compression ratio, step ETA, speed, output name), running rows highlighted with their
+    step, and *Follow running job* keeps the live chdman log on screen. Progress is mirrored in the window
+    title, the Batch tab label and the bottom status bar, so it's visible from every tab.
+  - Existing outputs are skipped unless *Overwrite* is ticked; half-written CHDs are removed on failure or
+    Stop; a free-space check runs before starting. Every job keeps its full chdman log.
+- **chdman commands** tab — every chdman command with a form generated from `chdman help` (so new options
+  appear automatically after an update), live command-line preview, *Run now* or *Add to batch queue*.
+- **chdman version & updates** tab — shows the selected chdman, the latest official MAME release and your
+  pacman package. Update via *pacman* (opens a terminal: `sudo pacman -Syu mame-tools`) or *Build latest
+  from official source* (MAME's GitHub tag, tools only, built in RAM when possible, installed to
+  `~/.local/share/romtools/chdman/<tag>/`). Choose which chdman all three apps use.
+
 ## Files
 
 | Path | What |
@@ -68,4 +120,6 @@ and can be reverted from **History / Undo**.
 | `~/.config/romtools/config.json` | library path, folder → system/DAT mapping, settings |
 | `~/.local/share/romtools/dats/` | downloaded / imported DATs |
 | `~/.local/share/romtools/rename-journal/` | rename history (undo) |
+| `~/.local/share/romtools/marks.json` | your hack / translation tags |
 | `~/.cache/romtools/hashes.sqlite` | hash cache |
+| `~/.local/share/romtools/chdman/` | chdman builds made by the updater |
