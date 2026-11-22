@@ -22,7 +22,8 @@ from .. import tags as tg
 from ..cache import HashCache
 from ..config import get_config
 from ..datmanager import IndexCache
-from .common import (STATUS_COLORS, STATUS_HELP, LibraryPicker, SystemList, TempModeCombo, Worker, human, make_app,
+from .common import (STATUS_COLORS, STATUS_HELP, LibraryPicker, SystemList, TempModeCombo, ThemeButton, Worker,
+                     human, make_app,
                      restore_geometry, save_geometry)
 from .datdialog import DatDialog
 
@@ -301,6 +302,7 @@ class VerifierWindow(QMainWindow):
         self.act_fix.triggered.connect(lambda: self.fix_media(self._fix_candidates()))
         for a in (self.act_fix, act_dats, act_export, act_rename, act_settings):
             tb.addAction(a)
+        tb.addWidget(ThemeButton(self))
 
         # ---- left: library + systems
         self.picker = LibraryPicker()

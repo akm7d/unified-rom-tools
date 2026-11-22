@@ -21,7 +21,7 @@ from .. import converter as cv
 from .. import updater as up
 from ..config import get_config
 from ..compat import FROZEN, IS_WIN, find_tool, launch_app, resource_dir
-from .common import Worker, human, is_dark, make_app, restore_geometry, save_geometry
+from .common import ThemeButton, Worker, human, is_dark, make_app, restore_geometry, save_geometry
 
 STATUS_COLOR = {"Queued": "#7f8790", "Running": "#2f7fd1", "Done": "#2e9d53", "Failed": "#d1452f",
                 "Skipped": "#d49a1b", "Cancelled": "#8a6fc9"}
@@ -1128,6 +1128,8 @@ class ConverterWindow(QMainWindow):
             act = QAction(QIcon.fromTheme(icon, QIcon(str(resource_dir() / "icons" / f"{icon}.svg"))), label, self)
             act.triggered.connect(lambda _=False, m=mod: launch_app(m))
             tb.addAction(act)
+        tb.addSeparator()
+        tb.addWidget(ThemeButton(self))
 
         self.tabs = QTabWidget()
         self.batch = BatchTab(self)

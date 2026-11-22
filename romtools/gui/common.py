@@ -8,9 +8,8 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPalette
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QMessageBox, QPushButton,
-                               QStyleFactory, QTreeWidget, QTreeWidgetItem, QWidget)
+from PySide6.QtGui import QActionGroup, QColor, QGuiApplication, QIcon, QPalette
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QMenu, QMessageBox, QPushButton, QStyleFactory, QToolButton, QTreeWidget, QTreeWidgetItem, QWidget)
 
 from .. import scanner as sc
 from ..config import get_config
@@ -56,7 +55,125 @@ def make_app(name: str, icon: str) -> QApplication:
     # Use the desktop's native style (Breeze on KDE, Adwaita-like on GNOME); fall back to Fusion.
     if app.style().objectName().lower() in ("windows", ""):
         app.setStyle(QStyleFactory.create("Fusion"))
+    apply_theme(current_theme())
     return app
+
+
+# ---------------------------------------------------------------- appearance
+
+THEMES = {"system": "Follow system", "dark": "Dark", "light": "Light"}
+_native: dict = {}
+
+
+def default_theme() -> str:
+    from ..compat import IS_WIN
+    return "dark" if IS_WIN else "system"
+
+
+def current_theme() -> str:
+    t = get_config()["theme"] or default_theme()
+    return t if t in THEMES else default_theme()
+
+
+def _captured_palette() -> QPalette | None:
+    """The desktop colour scheme captured by packaging/capture_theme.py (shipped as theme/dark-palette.json)."""
+    import json
+    from ..compat import FROZEN, resource_dir
+    path = resource_dir() / ("theme" if FROZEN else "packaging/theme") / "dark-palette.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    p = QPalette()
+    for gname, roles in data.get("colours", {}).items():
+        group = getattr(QPalette.ColorGroup, gname, None)
+        for rname, col in roles.items():
+            role = getattr(QPalette.ColorRole, rname, None)
+            if group is not None and role is not None:
+                p.setColor(group, role, QColor(col))
+    return p if p.color(QPalette.ColorRole.Window).lightness() < 128 else None
+
+
+def dark_palette() -> QPalette:
+    captured = _captured_palette()
+    if captured is not None:
+        return captured
+    p = QPalette()
+    c = {
+        QPalette.ColorRole.Window: "#202124", QPalette.ColorRole.WindowText: "#e8eaed",
+        QPalette.ColorRole.Base: "#17181a", QPalette.ColorRole.AlternateBase: "#232427",
+        QPalette.ColorRole.Text: "#e8eaed", QPalette.ColorRole.Button: "#2b2d31",
+        QPalette.ColorRole.ButtonText: "#e8eaed", QPalette.ColorRole.BrightText: "#ffffff",
+        QPalette.ColorRole.ToolTipBase: "#2b2d31", QPalette.ColorRole.ToolTipText: "#e8eaed",
+        QPalette.ColorRole.Highlight: "#2f7fd1", QPalette.ColorRole.HighlightedText: "#ffffff",
+        QPalette.ColorRole.Link: "#6ab0ff", QPalette.ColorRole.LinkVisited: "#b39ddb",
+        QPalette.ColorRole.PlaceholderText: "#8a8f98", QPalette.ColorRole.Light: "#3a3c41",
+        QPalette.ColorRole.Midlight: "#313338", QPalette.ColorRole.Mid: "#26282b",
+        QPalette.ColorRole.Dark: "#141517", QPalette.ColorRole.Shadow: "#000000",
+    }
+    for role, col in c.items():
+        p.setColor(role, QColor(col))
+    for role, col in ((QPalette.ColorRole.WindowText, "#6f737a"), (QPalette.ColorRole.Text, "#6f737a"),
+                      (QPalette.ColorRole.ButtonText, "#6f737a"), (QPalette.ColorRole.Base, "#1c1d20"),
+                      (QPalette.ColorRole.Button, "#242528"), (QPalette.ColorRole.Highlight, "#3a3c41")):
+        p.setColor(QPalette.ColorGroup.Disabled, role, QColor(col))
+    return p
+
+
+def apply_theme(theme: str) -> None:
+    """dark / light: Fusion style with an explicit palette (works the same on every OS, Wine included).
+    system: the desktop's own style and colours. Windows title bars follow via Qt's colour-scheme hint."""
+    app = QApplication.instance()
+    if app is None:
+        return
+    if not _native:
+        _native["style"] = app.style().name()
+        _native["palette"] = QPalette(app.palette())
+    hints = app.styleHints()
+    scheme = getattr(Qt, "ColorScheme", None)
+    if theme == "dark":
+        app.setStyle(QStyleFactory.create("Fusion"))
+        app.setPalette(dark_palette())
+        if scheme and hasattr(hints, "setColorScheme"):
+            hints.setColorScheme(scheme.Dark)
+    elif theme == "light":
+        app.setStyle(QStyleFactory.create("Fusion"))
+        app.setPalette(app.style().standardPalette())
+        if scheme and hasattr(hints, "setColorScheme"):
+            hints.setColorScheme(scheme.Light)
+    else:
+        if hasattr(hints, "unsetColorScheme"):
+            hints.unsetColorScheme()
+        app.setStyle(QStyleFactory.create(_native["style"]) or QStyleFactory.create("Fusion"))
+        app.setPalette(_native["palette"])
+
+
+class ThemeButton(QToolButton):
+    """Toolbar button: Theme ▸ Follow system / Dark / Light (saved, shared by all three apps)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setText("Theme")
+        self.setIcon(QIcon.fromTheme("preferences-desktop-theme"))
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setToolTip("Appearance: dark, light, or follow the system (applies to all three apps)")
+        menu = QMenu(self)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        for key, label in THEMES.items():
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(key == current_theme())
+            act.triggered.connect(lambda _=False, k=key: self._choose(k))
+            group.addAction(act)
+        self.setMenu(menu)
+
+    def _choose(self, key: str):
+        cfg = get_config()
+        cfg["theme"] = key
+        cfg.save()
+        apply_theme(key)
 
 
 def is_dark() -> bool:

@@ -73,6 +73,7 @@ DEFAULTS = {
     # folder name (e.g. "psx") -> {"system": catalog id or "", "dats": [paths]}
     "systems": {},
     "rename_use_dat_ext": False,
+    "theme": "",                     # "" = platform default (dark on Windows, follow system on Linux)
     "window_state": {},
 }
 

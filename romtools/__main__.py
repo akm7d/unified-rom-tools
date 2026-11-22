@@ -115,6 +115,13 @@ def selftest(report: str | None) -> int:
         app.processEvents()
         return f"{len(wins)} main windows created"
 
+    def theme():
+        from romtools.gui.common import _captured_palette, current_theme, default_theme
+        cap = _captured_palette()
+        if cap is None:
+            raise RuntimeError("captured dark colour scheme (theme/dark-palette.json) missing")
+        return f"default {default_theme()}, current {current_theme()}, dark window {cap.color(cap.ColorRole.Window).name()}"
+
     def paths():
         from romtools import compat, config
         mode = (f"portable build (data folder: {compat.app_dir() / 'data'})" if portable_build
@@ -134,7 +141,7 @@ def selftest(report: str | None) -> int:
             os.environ[var] = home
         os.environ["ROMTOOLS_HOME"] = str(Path(home) / "portable")   # never touch the build's own data folder
         for label, fn in (("imports", imports), ("paths", paths), ("chdman", chdman), ("7-Zip", sevenzip),
-                          ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui)):
+                          ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui), ("theme", theme)):
             check(label, fn)
     lines.append("RESULT " + ("OK" if ok else "FAILED"))
     if report:

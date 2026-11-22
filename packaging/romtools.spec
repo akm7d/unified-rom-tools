@@ -19,7 +19,7 @@ a = Analysis(
     [str(ROOT / "romtools" / "__main__.py")],
     pathex=[str(ROOT)],
     hiddenimports=[f"romtools.gui.{m}" for m, *_ in APPS] + ["romtools.gui.datdialog"],
-    datas=[(str(ROOT / "icons"), "icons")],
+    datas=[(str(ROOT / "icons"), "icons"), (str(ROOT / "packaging" / "theme"), "theme")],
     excludes=["tkinter", "unittest", "pydoc_data", "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtNetwork"],
     noarchive=False,
 )

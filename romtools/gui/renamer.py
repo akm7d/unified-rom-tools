@@ -19,7 +19,7 @@ from .. import scanner as sc
 from ..cache import HashCache
 from ..config import get_config
 from ..datmanager import IndexCache
-from .common import LibraryPicker, SystemList, TempModeCombo, Worker, is_dark, make_app, restore_geometry, save_geometry
+from .common import LibraryPicker, SystemList, TempModeCombo, ThemeButton, Worker, is_dark, make_app, restore_geometry, save_geometry
 from .datdialog import DatDialog
 
 C_ON, C_SYS, C_OLD, C_NEW, C_WHY, C_PROBLEM = range(6)
@@ -139,6 +139,7 @@ class RenamerWindow(QMainWindow):
         tb.addSeparator()
         for a in (act_hist, act_dats, act_ver):
             tb.addAction(a)
+        tb.addWidget(ThemeButton(self))
 
         # ---- left
         self.picker = LibraryPicker()
