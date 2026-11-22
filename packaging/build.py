@@ -202,6 +202,13 @@ def linux_tools(dest: Path) -> None:
         f"https://github.com/mamedev/mame/tree/{tag}\n"
         f"lib/libSDL2-2.0.so.0 is a small stub (public domain) for 4 clipboard functions chdman never uses.\n",
         encoding="utf-8")
+    xd = PINS["xdelta3"]
+    with tarfile.open(download(xd["linux_url"], xd["linux_sha256"])) as tf:
+        member = next(m for m in tf.getmembers() if m.name.endswith("/xdelta3"))
+        (dest / "xdelta3").write_bytes(tf.extractfile(member).read())
+    (dest / "xdelta3").chmod(0o755)
+    (dest / "xdelta3-LICENSE.txt").write_text(f"xdelta3 {xd['version']} (https://github.com/jmacd/xdelta), official "
+                                              f"release binary, unmodified. Licensed under the Apache License 2.0.\n")
     sz = PINS["sevenzip_linux"]
     tarball = download(sz["url"], sz["sha256"])
     with tarfile.open(tarball) as tf:
@@ -297,6 +304,11 @@ def windows_tools(dest: Path) -> None:
     mame = download(base + asset, want)
     run([seven, "e", "-y", f"-o{dest}", mame, "chdman.exe"], stdout=subprocess.DEVNULL)
 
+    xd = PINS["xdelta3"]
+    run([seven, "e", "-y", f"-o{dest}", download(xd["windows_url"], xd["windows_sha256"]), "*/xdelta3.exe"],
+        stdout=subprocess.DEVNULL)
+    (dest / "xdelta3-LICENSE.txt").write_text(f"xdelta3 {xd['version']} (https://github.com/jmacd/xdelta), official "
+                                              f"release binary, unmodified. Licensed under the Apache License 2.0.\r\n")
     sz = PINS["sevenzip_windows"]
     inst = download(sz["url"], sz["sha256"])
     run([seven, "e", "-y", f"-o{dest}", inst, "7z.exe", "7z.dll", "License.txt"], stdout=subprocess.DEVNULL)

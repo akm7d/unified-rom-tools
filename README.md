@@ -127,6 +127,12 @@ and can be reverted from **History / Undo**.
     title, the Batch tab label and the bottom status bar, so it's visible from every tab.
   - Existing outputs are skipped unless *Overwrite* is ticked; half-written CHDs are removed on failure or
     Stop; a free-space check runs before starting. Every job keeps its full chdman log.
+- **Patch** tab — apply **IPS / EBP, BPS, UPS, PPF (1/2/3) and xdelta** patches (translations, hacks, fixes),
+  several in a row if needed. Works on plain ROMs, single-game zip/7z/rar, `.cue` sets, `.iso` and **CHDs**
+  (unpacked, patched and rebuilt as a new CHD of the same type, then `chdman verify`'d). The original is
+  identified against your DATs first; BPS/UPS checksums are enforced (wrong ROM or already-patched ROM is
+  refused) and copier headers are handled automatically. The original is never modified, an existing file is
+  never overwritten, and the result can be tagged (Translation, Hack…) so ROM Verifier lists it as *Modified*.
 - **chdman commands** tab — every chdman command with a form generated from `chdman help` (so new options
   appear automatically after an update), live command-line preview, *Run now* or *Add to batch queue*.
 - **chdman version & updates** tab — shows the selected chdman, the latest official MAME release and your

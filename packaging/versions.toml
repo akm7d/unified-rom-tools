@@ -36,6 +36,14 @@ version = "26.06"
 url = "https://github.com/ip7z/7zip/releases/download/26.06/7z2606-linux-x64.tar.xz"
 sha256 = "2b539cf067b2ad48e1baa5093dbaa8818b73542d1222a0ffde9dc5f2922ea62e"
 
+[xdelta3]
+# Official xdelta3 release binaries (jmacd/xdelta on GitHub) for xdelta patches; bundled in both builds.
+version = "3.2.2"
+linux_url = "https://github.com/jmacd/xdelta/releases/download/v3.2.2/xdelta3-3.2.2-linux-x86_64.tar.gz"
+linux_sha256 = "a8ce7d2c943ae2b3d308942643cb36d4805a1f16775abe1be64fee292d7c2506"
+windows_url = "https://github.com/jmacd/xdelta/releases/download/v3.2.2/xdelta3-3.2.2-windows-x86_64.zip"
+windows_sha256 = "d48f7651d86b78fdca397057b46601f89131f37219675df736db70af44ec3379"
+
 [sevenzip_windows]
 # 7z.exe / 7z.dll bundled in the Windows build (archive hashing, chdman updates).
 # Same file on github.com/ip7z/7zip and 7-zip.org (checked 2026-11-22).

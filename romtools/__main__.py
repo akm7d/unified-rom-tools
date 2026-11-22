@@ -53,7 +53,7 @@ def selftest(report: str | None) -> int:
     def imports():
         import romtools
         from romtools import (cache, chd, chdfix, chdman_tool, compat, config, converter, dat, datmanager,  # noqa
-                              discdetect, hashing, library, renamer, scanner, systems, tags, updater)
+                              discdetect, hashing, library, patching, renamer, scanner, systems, tags, updater)
         from romtools.gui import common, converter as c2, datdialog, renamer as r2, verifier  # noqa
         return f"romtools {romtools.__version__}, Python {sys.version.split()[0]}, {sys.platform}"
 
@@ -115,6 +115,38 @@ def selftest(report: str | None) -> int:
         app.processEvents()
         return f"{len(wins)} main windows created"
 
+    def patching():
+        import struct
+        from romtools import patching as pt
+        from romtools.compat import find_tool
+        orig = bytes(range(256)) * 2048
+        mod = bytearray(orig)
+        mod[100:108] = b"PATCHED!"
+        mod = bytes(mod)
+        assert pt.apply_bps(orig, pt.create_bps(orig, mod)) == mod, "BPS"
+        ips = b"PATCH" + (100).to_bytes(3, "big") + (8).to_bytes(2, "big") + b"PATCHED!" + b"EOF"
+        assert pt.apply_ips(orig, ips) == mod, "IPS"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            (d / "o.bin").write_bytes(orig)
+            (d / "m.bin").write_bytes(mod)
+            ppf = b"PPF10\x00" + b"t".ljust(50) + struct.pack("<I", 100) + bytes([8]) + b"PATCHED!"
+            (d / "p.ppf").write_bytes(ppf)
+            pt.apply_ppf(d / "o.bin", d / "p.ppf", d / "r.bin")
+            assert (d / "r.bin").read_bytes() == mod, "PPF"
+            exe = find_tool("xdelta3")
+            if not exe:
+                from romtools.compat import FROZEN
+                if FROZEN:
+                    raise RuntimeError("bundled xdelta3 missing")
+                return "IPS, BPS, PPF (xdelta skipped: xdelta3 isn't installed; the builds bundle it)"
+            import subprocess
+            subprocess.run([exe, "-e", "-f", "-s", str(d / "o.bin"), str(d / "m.bin"), str(d / "p.xd")], check=True,
+                           capture_output=True)
+            pt.apply_xdelta(d / "o.bin", d / "p.xd", d / "x.bin")
+            assert (d / "x.bin").read_bytes() == mod, "xdelta"
+        return f"IPS, BPS, PPF, xdelta ({exe})"
+
     def theme():
         from romtools.gui.common import _captured_palette, current_theme, default_theme
         cap = _captured_palette()
@@ -141,7 +173,8 @@ def selftest(report: str | None) -> int:
             os.environ[var] = home
         os.environ["ROMTOOLS_HOME"] = str(Path(home) / "portable")   # never touch the build's own data folder
         for label, fn in (("imports", imports), ("paths", paths), ("chdman", chdman), ("7-Zip", sevenzip),
-                          ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui), ("theme", theme)):
+                          ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui), ("theme", theme),
+                          ("patching", patching)):
             check(label, fn)
     lines.append("RESULT " + ("OK" if ok else "FAILED"))
     if report:

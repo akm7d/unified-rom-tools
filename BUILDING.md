@@ -26,6 +26,7 @@ Makefile               shortcuts (below)
 | `make linux` | `dist/romtools-<version>-linux-x64.tar.gz` |
 | `make windows` | `dist/romtools-<version>-windows-x64.zip` (built with Wine on Linux) |
 | `make all` | both |
+| `make capture-theme` | save this desktop's colour scheme as the apps' Dark theme (`packaging/theme/dark-palette.json`) |
 | `make test-portable` | self-test the Linux build on a clean Ubuntu 24.04 in Docker (no chdman/7-Zip installed) |
 | `make clean` / `make distclean` | remove `build/` + `dist/` / also the download, venv and Wine cache |
 
@@ -76,6 +77,7 @@ Edit `packaging/versions.toml`, then `make all`:
 - **Linux Python**: `[python_linux]`, a python-build-standalone `install_only_stripped` x86_64 build, with its
   SHA-256 from that release's `SHA256SUMS`.
 - **7-Zip**: change `version`, `url` and `sha256` (compare the GitHub and 7-zip.org copies).
+- **xdelta3**: `[xdelta3]`, official release binaries from github.com/jmacd/xdelta (pin both SHA-256s).
 
 Downloads whose SHA-256 doesn't match are refused.
 

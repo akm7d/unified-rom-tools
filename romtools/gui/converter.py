@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                QScrollArea, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleOptionProgressBar,
-                               QTableWidget, QTableWidgetItem, QTabWidget, QToolBar, QVBoxLayout, QWidget)
+                               QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QToolBar, QVBoxLayout, QWidget)
 
 from .. import __version__
 from .. import chdman_tool as ct
@@ -672,6 +672,283 @@ class BatchTab(QWidget):
         QApplication.alert(self.win)
 
 
+# ====================================================================== Patch tab
+
+class PatchTab(QWidget):
+    """Apply IPS / BPS / UPS / PPF / xdelta patches to a ROM, archive, .cue set or CHD. Writes a new file."""
+
+    ROM_FILTER = ("ROMs, archives and disc images (*.nes *.fds *.sfc *.smc *.gb *.gbc *.gba *.nds *.n64 *.z64 *.v64 "
+                  "*.md *.gen *.bin *.sms *.gg *.pce *.a26 *.a78 *.lnx *.ws *.wsc *.ngp *.ngc *.iso *.cue *.chd *.zip "
+                  "*.7z *.rar);;All files (*)")
+
+    def __init__(self, win: "ConverterWindow"):
+        super().__init__()
+        from .. import patching as pt
+        from .. import tags as tg
+        self.pt, self.win = pt, win
+        self.worker: Worker | None = None
+        self.base_info = None
+        self.setAcceptDrops(True)
+
+        self.rom = QLineEdit()
+        self.rom.setPlaceholderText("ROM, zip/7z with one ROM, .cue, .iso or .chd — or drop it here")
+        self.rom.editingFinished.connect(self._changed)
+        self.patches = QListWidget()
+        self.patches.setToolTip("Applied top to bottom")
+        self.patches.setMaximumHeight(110)
+        add_p = QPushButton(QIcon.fromTheme("list-add"), "Add patch…")
+        add_p.clicked.connect(self._add_patches)
+        rm_p = QPushButton(QIcon.fromTheme("list-remove"), "Remove")
+        rm_p.clicked.connect(lambda: (self.patches.takeItem(self.patches.currentRow()), self._changed()))
+        up_p = QPushButton(QIcon.fromTheme("go-up"), "")
+        up_p.setToolTip("Apply earlier")
+        up_p.clicked.connect(lambda: self._move(-1))
+        down_p = QPushButton(QIcon.fromTheme("go-down"), "")
+        down_p.setToolTip("Apply later")
+        down_p.clicked.connect(lambda: self._move(1))
+        for b, t in ((up_p, "↑"), (down_p, "↓")):
+            if b.icon().isNull():
+                b.setText(t)
+
+        self.out_name = QLineEdit()
+        self.out_name.setPlaceholderText("name of the patched file")
+        self._name_auto = True   # follow the picked ROM/patch until the user types a name of their own
+        self.out_name.textEdited.connect(lambda t: setattr(self, "_name_auto", not t.strip()))
+        self.out_where = QComboBox()
+        self.out_where.addItems(["Next to the original", "Into this folder:"])
+        self.out_dir = QLineEdit()
+        self.out_dir_row = file_row(self.out_dir, False, self, directory=True)
+        self.out_dir_row.setEnabled(False)
+        self.out_where.currentIndexChanged.connect(lambda i: self.out_dir_row.setEnabled(i == 1))
+        self.header = QComboBox()
+        self.header.addItem("Automatic (BPS/UPS pick the right one by checksum)", "auto")
+        self.header.addItem("Keep the ROM as it is", "keep")
+        self.header.addItem("Remove the copier header first", "strip")
+        self.header.setToolTip("SNES/NES/Lynx/7800 ROMs can carry a copier header. Most modern patches expect "
+                               "No-Intro ROMs without one.")
+        self.tag = QComboBox()
+        self.tag.addItem("Don't tag", "")
+        for name in tg.TAGS:
+            self.tag.addItem(name, name)
+        self.tag.setCurrentIndex(self.tag.findData("Translation"))
+        self.tag.setToolTip("Tags the new file in ROM Verifier, so it shows as Modified instead of a bad dump")
+
+        self.details = QTextBrowser()
+        self.details.setPlaceholderText("Pick a ROM and a patch to see whether they belong together.")
+        self.apply_btn = QPushButton(QIcon.fromTheme("document-save"), "Create patched copy")
+        self.apply_btn.clicked.connect(self.apply)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setVisible(False)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setFont(mono())
+        self.log.setMaximumBlockCount(2000)
+        self.log.setPlaceholderText("Progress appears here. The original is never changed.")
+
+        form = QFormLayout()
+        form.addRow("<b>1. Original ROM</b>", file_row(self.rom, False, self, self.ROM_FILTER))
+        prow = QHBoxLayout()
+        prow.addWidget(self.patches, 1)
+        pbtn = QVBoxLayout()
+        for b in (add_p, rm_p, up_p, down_p):
+            pbtn.addWidget(b)
+        pbtn.addStretch(1)
+        prow.addLayout(pbtn)
+        form.addRow("<b>2. Patch(es)</b>", prow)
+        orow = QHBoxLayout()
+        orow.addWidget(self.out_name, 2)
+        orow.addWidget(self.out_where)
+        orow.addWidget(self.out_dir_row, 2)
+        form.addRow("<b>3. Save as</b>", orow)
+        form.addRow("Copier header:", self.header)
+        form.addRow("Tag the result as:", self.tag)
+        brow = QHBoxLayout()
+        brow.addWidget(self.apply_btn)
+        brow.addWidget(self.bar, 1)
+        lay = QVBoxLayout(self)
+        intro = QLabel("Apply <b>IPS, BPS, UPS, PPF</b> or <b>xdelta</b> patches (translations, hacks, fixes). "
+                       "Works on plain ROMs, single-game zip/7z/rar, .cue sets, .iso and <b>CHDs</b> (unpacked, "
+                       "patched and rebuilt as a new CHD). The original is never modified.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        lay.addLayout(form)
+        lay.addLayout(brow)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self.details)
+        split.addWidget(self.log)
+        split.setSizes([260, 160])
+        lay.addWidget(split, 1)
+
+    # ------------------------------------------------------------------ inputs
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        for u in e.mimeData().urls():
+            p = Path(u.toLocalFile())
+            if p.suffix.lower() in self.pt.PATCH_EXTS:
+                self._append_patch(p)
+            elif p.is_file():
+                self.rom.setText(str(p))
+        self._changed()
+
+    def _add_patches(self):
+        start = get_config()["window_state"].get("last_patch_dir") or str(Path.home())
+        exts = " ".join(f"*{e}" for e in self.pt.PATCH_EXTS)
+        files, _ = QFileDialog.getOpenFileNames(self, "Choose patch file(s)", start,
+                                                f"Patches ({exts});;All files (*)")
+        for f in files:
+            self._append_patch(Path(f))
+        if files:
+            cfg = get_config()
+            cfg["window_state"]["last_patch_dir"] = str(Path(files[0]).parent)
+            cfg.save()
+        self._changed()
+
+    def _append_patch(self, p: Path):
+        it = QListWidgetItem(p.name)
+        it.setData(Qt.ItemDataRole.UserRole, str(p))
+        it.setToolTip(str(p))
+        self.patches.addItem(it)
+
+    def _move(self, d: int):
+        r = self.patches.currentRow()
+        if r < 0 or not 0 <= r + d < self.patches.count():
+            return
+        it = self.patches.takeItem(r)
+        self.patches.insertItem(r + d, it)
+        self.patches.setCurrentRow(r + d)
+        self._changed()
+
+    def patch_paths(self) -> list[Path]:
+        return [Path(self.patches.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(self.patches.count())]
+
+    def _changed(self):
+        src = Path(self.rom.text().strip()) if self.rom.text().strip() else None
+        pats = self.patch_paths()
+        if src and src.is_file() and pats and self._name_auto:
+            self.out_name.setText(self.pt.default_output_name(src, pats) + self.pt.output_suffix(src))
+        self._describe(src, pats)
+
+    def _describe(self, src, pats):
+        import html
+        e = html.escape
+        rows = []
+        for p in pats:
+            try:
+                i = self.pt.inspect(p)
+                line = f"<b>{e(p.name)}</b> — {i.format}"
+                if i.description:
+                    line += f" · “{e(i.description[:80])}”"
+                if i.source_crc:
+                    line += (f"<br>&nbsp;&nbsp;expects an original of {i.source_size:,} bytes, CRC32 {i.source_crc}; "
+                             f"result CRC32 {i.target_crc} (both checked automatically)")
+                elif i.format.startswith("PPF"):
+                    line += "<br>&nbsp;&nbsp;checks the disc image's identity block before patching" \
+                        if i.format != "PPF1" else ""
+                else:
+                    line += ("<br>&nbsp;&nbsp;this format can't confirm the original — make sure it's the exact "
+                             "version the patch's readme names (see the identification below)")
+                for n in i.notes:
+                    line += f"<br>&nbsp;&nbsp;{e(n)}"
+                rows.append(line)
+            except Exception as exc:  # noqa: BLE001
+                rows.append(f"<b>{e(p.name)}</b> — <span style='color:#d1452f'>{e(str(exc))}</span>")
+        if src and src.is_file():
+            rows.append(f"<b>Original:</b> {e(src.name)} — press <i>Create patched copy</i>; it's identified against "
+                        f"your DATs first, and the details appear in the log.")
+        self.details.setHtml("<br><br>".join(rows) or "")
+
+    # ------------------------------------------------------------------ apply
+    def apply(self):
+        if self.worker and self.worker.isRunning():
+            return
+        src = Path(self.rom.text().strip())
+        pats = self.patch_paths()
+        if not src.is_file() or not pats:
+            QMessageBox.information(self, "Patch", "Pick the original ROM and at least one patch.")
+            return
+        name = self.out_name.text().strip() or (self.pt.default_output_name(src, pats) + self.pt.output_suffix(src))
+        if not Path(name).suffix:
+            name += self.pt.output_suffix(src)
+        folder = Path(self.out_dir.text().strip()) if self.out_where.currentIndex() == 1 and self.out_dir.text().strip() \
+            else src.parent
+        out = folder / name
+        if out.exists():
+            QMessageBox.warning(self, "Patch", f"{out.name} already exists there — choose another name.")
+            return
+        from .. import compat, chd
+        from ..config import get_config as _cfg
+        cfg = _cfg()
+        size = src.stat().st_size
+        if src.suffix.lower() == ".chd":
+            try:
+                ci = chd.info(src)
+                size = ci.frames * 2352 if ci.kind == "cd" else ci.logical_size
+            except Exception:  # noqa: BLE001
+                pass
+        ram = (cfg["temp_mode"] == "ram" and compat.ram_mode_supported() and compat.mem_available() > 3 * size + (1 << 30))
+        tmp_root = Path("/dev/shm/romtools-patch") if ram else Path(cfg["tmp_dir"]) / "patch"
+        header, tag = self.header.currentData(), self.tag.currentData()
+        self.log.clear()
+        self.log.appendPlainText(f"Patching {src.name} → {out}" + (f"  (temp: {'RAM' if ram else tmp_root})"
+                                                                  if src.suffix.lower() == ".chd" else ""))
+        self.bar.setVisible(True)
+        self.bar.setRange(0, 0)
+        self.apply_btn.setEnabled(False)
+        self.win.set_busy(True)
+        pt = self.pt
+
+        def job(w: Worker):
+            info, res = pt.patch_rom(src, pats, out, tmp_root, header, tag,
+                                     progress=lambda s, f=0.0: w.progress.emit(0, 0, s, f))
+            return info, res
+
+        self.worker = Worker(job, parent=self)
+        self.worker.progress.connect(self._progress)
+        self.worker.done.connect(lambda r: self._done(r, out, tag))
+        self.worker.failed.connect(self._failed)
+        self.worker.start()
+
+    def _progress(self, _d, _t, msg, frac):
+        if msg and (self.log.toPlainText().splitlines() or [""])[-1] != msg:
+            self.log.appendPlainText(msg)
+        if frac > 0:
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(int(frac * 1000))
+
+    def _finish_ui(self):
+        self.bar.setVisible(False)
+        self.apply_btn.setEnabled(True)
+        self.win.set_busy(False)
+
+    def _done(self, result, out: Path, tag: str):
+        self._finish_ui()
+        info, res = result
+        ident = (f"identified as <b>{info.dat_game}</b> ({info.dat_name})" if info.dat_game else
+                 "<span style='color:#d49a1b'>not found in your DATs</span> — if the result doesn't work, the "
+                 "patch was probably made for a different version")
+        ver = {True: "<span style='color:#2e9d53'>result matches the patch's checksum ✔</span>",
+               None: "result CRC32 " + res.target_crc}.get(res.verified, "")
+        notes = "".join(f"<br>• {n}" for n in res.notes)
+        orig = info.path.name if info.kind in ("chd", "file") else f"{info.target_name} (from {info.path.name})"
+        self.details.setHtml(f"<h3 style='margin:0'>Done: {out.name}</h3>Original {orig}: {ident}"
+                             f"<br>{ver}{notes}<br>Saved in {out.parent}" + (f"<br>Tagged as <b>{tag}</b> for ROM "
+                                                                          f"Verifier" if tag else ""))
+        self.log.appendPlainText(f"Done: {out}")
+        self._name_auto = True   # next ROM/patch gets a fresh suggestion
+        QApplication.alert(self.win)
+
+    def _failed(self, msg: str):
+        self._finish_ui()
+        msg = msg.split(": ", 1)[-1] if msg.startswith("PatchError") else msg
+        self.log.appendPlainText(f"Failed: {msg}")
+        self.details.setHtml(f"<h3 style='margin:0;color:#d1452f'>Not patched</h3>{msg}<br>The original was not "
+                             f"changed and no output was left behind.")
+
+
 # ====================================================================== Commands tab
 
 class CommandsTab(QWidget):
@@ -1133,9 +1410,11 @@ class ConverterWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.batch = BatchTab(self)
+        self.patch = PatchTab(self)
         self.commands = CommandsTab(self)
         self.chdman = ChdmanTab(self)
         self.tabs.addTab(self.batch, QIcon.fromTheme("view-list-details"), "Batch")
+        self.tabs.addTab(self.patch, QIcon.fromTheme("document-edit"), "Patch")
         self.tabs.addTab(self.commands, QIcon.fromTheme("utilities-terminal"), "chdman commands")
         self.tabs.addTab(self.chdman, QIcon.fromTheme("system-software-update"), "chdman version && updates")
         self.setCentralWidget(self.tabs)
@@ -1199,7 +1478,7 @@ class ConverterWindow(QMainWindow):
             for p in (self.commands.proc, self.chdman.proc):
                 if p:
                     p.cancel()
-            for w in (self.batch.worker, self.commands.worker, self.chdman.worker):
+            for w in (self.batch.worker, self.commands.worker, self.chdman.worker, self.patch.worker):
                 if w:
                     w.wait(10000)
         self.batch.save_state()
