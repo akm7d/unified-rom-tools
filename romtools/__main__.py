@@ -151,6 +151,11 @@ def selftest(report: str | None) -> int:
     def disc_tools():
         from romtools.compat import FROZEN, find_tool
         found = {t: find_tool(t) for t in ("nodtool", "nsz")}
+        from romtools.nod import parse_verify
+        got = parse_verify(["Title: X", "Game ID: GZ2E01", "Redump: X ✅", "CRC32 : 0ab54d43 ✅",
+                            "SHA-1 : 75EDD3DDFF41F125D1B4CE1A40378F1B565519E7 ✅", "XXH64 : 0123456789abcdef"])
+        assert got.get("sha1") == "75edd3ddff41f125d1b4ce1a40378f1b565519e7" and got.get("crc32") == "0ab54d43" \
+            and got.get("game_id") == "GZ2E01", f"nodtool output parsing: {got}"
         missing = [t for t, p in found.items() if not p]
         if missing and FROZEN:
             raise RuntimeError("bundled tool(s) missing: " + ", ".join(missing))

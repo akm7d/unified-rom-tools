@@ -32,6 +32,8 @@ WRONG_MEDIA = "#d49a1b"
 def media_text(r: sc.Result) -> str:
     if r.media is not None:
         return ("⚠ " if not r.media.ok else "") + r.media.label
+    if r.chd_info and "disc" in r.chd_info:      # RVZ/CISO/... read with nodtool
+        return str(r.chd_info["disc"].get("container", "")).upper()
     kind = r.chd_info.get("kind", "") if r.chd_info else ""
     return kind.upper()
 
@@ -637,7 +639,13 @@ class VerifierWindow(QMainWindow):
                        f"{e(r.orig_status or '')})</small></p>")
         if r.game:
             out.append(f"<p><b>DAT game:</b> {e(r.game)} <small>({e(r.dat)})</small></p>")
-        if r.chd_info:
+        if r.chd_info and "disc" in r.chd_info:
+            d = r.chd_info["disc"]
+            out.append(f"<p><b>Disc image:</b> {e(str(d.get('format') or d.get('container', '')).upper())}"
+                       f"{', ' + e(d['title']) if d.get('title') else ''}"
+                       f"{' (' + e(d['game_id']) + ')' if d.get('game_id') else ''}, "
+                       f"disc SHA-1 {e(d.get('sha1', ''))} <small>(read with nodtool)</small></p>")
+        elif r.chd_info:
             out.append(f"<p><b>CHD:</b> v{r.chd_info.get('version')} {e(str(r.chd_info.get('kind', '')).upper())}, "
                        f"SHA-1 {e(r.chd_info.get('sha1', ''))}</p>")
         if r.media is not None:

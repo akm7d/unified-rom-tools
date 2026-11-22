@@ -104,6 +104,9 @@ def item_for_file(path: Path):
     ext = path.suffix.lower()
     if ext == ".chd":
         return Item(OTHER, path, "chd")
+    from .nod import DISC_EXTS
+    if ext in DISC_EXTS:
+        return Item(OTHER, path, "disc")
     if ext in ARCHIVE_EXTS:
         return Item(OTHER, path, "archive")
     if ext == ".cue":

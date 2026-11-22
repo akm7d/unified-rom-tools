@@ -32,6 +32,10 @@ picked. If the folder you choose is itself a system folder (e.g. `…/gb`), its 
 **Check file/folder** (toolbar, `Ctrl+O` / `Ctrl+Shift+O`, or drag files and folders onto the window) verifies
 any ROM, archive or folder right away, wherever it is, without touching your library setting or ticked systems.
 
+**Compressed GameCube / Wii images** (`.rvz`, `.ciso`, `.gcz`, `.wia`, `.wbfs`) are checked by the disc inside
+them: the bundled `nodtool` decompresses the image in memory (nothing is written to disk) and its SHA-1 is
+compared with the Redump entry for the plain `.iso`. WBFS files are scrubbed when made, so they can't match.
+
 1. **Manage DATs…** → *Download all missing*. Disc systems get official **Redump** DATs; cartridge systems
    get **No-Intro** DATs (libretro mirror). *Add DAT file…* imports any Logiqx / ClrMamePro DAT
    (Dat-o-Matic packs, translation DATs, …); several DATs per folder are merged.

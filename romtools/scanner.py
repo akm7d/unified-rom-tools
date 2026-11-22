@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import chd
+from . import chd, nod
 from .cache import HashCache
 from .compat import ram_mode_supported
 from .dat import DatIndex, Game
@@ -25,7 +25,7 @@ ROM_EXTS = {".nes", ".fds", ".unf", ".sfc", ".smc", ".fig", ".swc", ".bs", ".st"
             ".gbc", ".gba", ".nds", ".dsi", ".3ds", ".cia", ".cci", ".vb", ".min", ".md", ".gen", ".smd", ".bin",
             ".sms", ".gg", ".32x", ".sg", ".pce", ".sgx", ".a26", ".a52", ".a78", ".lnx", ".lyx", ".j64", ".ngp",
             ".ngc", ".ws", ".wsc", ".rom", ".mx1", ".mx2", ".iso", ".chd", ".cue", ".gdi", ".ccd", ".img", ".cso",
-            ".zso", ".rvz", ".gcm", ".gcz", ".wbfs", ".wua", ".wux", ".wud", ".nsp", ".nsz", ".xci", ".pkg",
+            ".zso", ".rvz", ".ciso", ".wia", ".gcm", ".gcz", ".wbfs", ".wua", ".wux", ".wud", ".nsp", ".nsz", ".xci", ".pkg",
             ".zip", ".7z", ".rar", ".pbp", ".elf"}
 
 VERIFIED, MISNAMED, MODIFIED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED = (
@@ -38,7 +38,7 @@ TAGGABLE = {BAD, UNKNOWN, PARTIAL}   # statuses a hack/translation tag can repla
 class Item:
     system: str
     path: Path                 # main file (or folder)
-    kind: str                  # file | archive | chd | cueset | folder
+    kind: str                  # file | archive | chd | disc (RVZ/CISO/... read by nodtool) | cueset | folder
     parts: list[Path] = field(default_factory=list)  # extra files for cue/gdi sets
     member: str = ""           # one game inside a multi-game archive (its file name inside the archive)
 
@@ -152,7 +152,8 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
         ext = f.suffix.lower()
         if f in consumed or ext in (".cue", ".gdi") or ext in IGNORE_EXTS:
             continue
-        kind = "chd" if ext == ".chd" else "archive" if ext in ARCHIVE_EXTS else "file"
+        kind = ("chd" if ext == ".chd" else "disc" if ext in nod.DISC_EXTS
+                else "archive" if ext in ARCHIVE_EXTS else "file")
         items.append(Item(system, f, kind))
     for d in dirs:
         if depth < MAX_DEPTH and (_has_roms(d) or _has_rom_subdirs(d)):
@@ -354,6 +355,14 @@ class Scanner:
                 root = chd.RAM_DIR if self.ram_mode else self.tmp_dir
                 ci, entries = hasher(p, root, self.cancel, lambda stage, f: progress and progress(stage, f))
             extra = ci.as_dict()
+        elif item.kind == "disc":
+            with self.chd_sem:   # a whole disc is decompressed: throttle like CHDs
+                if self.cancel.is_set():
+                    raise Cancelled()
+                if progress:
+                    progress("reading the disc inside (nodtool)", 0.0)
+                entry, info = nod.disc_hash(p, self.cancel)
+            entries, extra = [entry], {"disc": info}
         elif item.kind == "archive":
             entries = hash_archive(p, self.cancel, bytes_cb)
         elif item.kind == "cueset":
@@ -387,7 +396,20 @@ class Scanner:
         return self._finish(item, entries, index, extra, cached)
 
     def _finish(self, item: Item, entries: list[Entry], index: DatIndex, extra: dict, cached: bool) -> Result:
+        if item.kind == "disc":
+            for e in entries:   # nodtool gives no disc size: take it from the DAT entry the SHA-1 matches
+                hits = index.lookup(e.full.size, e.full.crc, e.full.md5, e.full.sha1)
+                if hits and not e.full.size:
+                    e.full.size = hits[0][1].size or 0
         r = match(item, entries, index)
+        if item.kind == "disc":
+            fmt = item.path.suffix[1:].upper()
+            if r.status in (BAD, UNKNOWN) and item.path.suffix.lower() == ".wbfs":
+                r.note += " - WBFS files are scrubbed when made, so they can't match Redump"
+            elif r.status in (BAD, UNKNOWN):
+                r.note += f" (checked the disc inside the {fmt} with nodtool)"
+            elif not r.note:
+                r.note = f"Disc inside the {fmt} matches"
         r.chd_info = extra
         r.cached = cached
         if item.system == "(other)":
@@ -431,7 +453,7 @@ class Scanner:
                 on_progress(done, total, it.path.name, 1.0)
 
         # Small files first so the table fills quickly; CHDs are throttled by the semaphore.
-        order = sorted(items, key=lambda it: (it.kind == "chd", _safe_size(it.path)))
+        order = sorted(items, key=lambda it: (it.kind in ("chd", "disc"), _safe_size(it.path)))
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
             for f in [ex.submit(job, it) for it in order]:
                 exc = f.exception()
