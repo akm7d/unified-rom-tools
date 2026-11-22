@@ -3,6 +3,12 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.4.1
+- Fix: running from the source folder (the `./install.sh` menu launchers), RVZ/CISO files showed *Error*
+  ("nodtool not found") because nodtool, nsz and xdelta3 only came with the packaged builds. `./install.sh` now
+  fetches the same pinned, checksum-verified binaries into `./tools` (`make tools` does only that), and the
+  error says how to fix it.
+
 ## 1.4.0
 - ROM Optimizer → Save space: **Run ticked now** converts the ticked files right there, without going to Tasks.
   A new *Status* column shows each file's progress (Queued, ▶ 45% · Compressing, ✔ Done, ✖ Failed with the

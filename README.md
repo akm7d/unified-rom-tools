@@ -19,7 +19,9 @@ runs on distros with glibc 2.38 or newer (Ubuntu 24.04+, Debian 13, Fedora 39+, 
 build either yourself, see [BUILDING.md](BUILDING.md).
 
 Adds `rom-verifier`, `rom-renamer` and `rom-optimizer` (old name `rom-converter` still works) to `~/.local/bin` and to your app menu (Games / Utilities).
-Requirements (already present on this machine): `pyside6`, `mame-tools` (chdman), `7zip`.
+Requirements (already present on this machine): `pyside6`, `mame-tools` (chdman), `7zip`. It also fetches the
+same pinned, checksum-verified `nodtool` (RVZ/CISO), `nsz` and `xdelta3` the builds bundle into `./tools`
+(`make tools` does just that step).
 
 ## ROM Verifier (read-only)
 

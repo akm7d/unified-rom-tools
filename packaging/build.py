@@ -4,6 +4,7 @@
     python3 packaging/build.py linux      # dist/romtools-<version>-linux-x64.tar.gz
     python3 packaging/build.py windows    # dist/romtools-<version>-windows-x64.zip  (Wine on Linux, or native)
     python3 packaging/build.py all
+    python3 packaging/build.py tools      # source checkout: fetch nodtool, nsz, xdelta3 into ./tools
     python3 packaging/build.py test-portable  # self-test the Linux build on a clean Ubuntu 24.04 (Docker)
     python3 packaging/build.py clean      # remove build/ and dist/
     python3 packaging/build.py distclean  # also remove the download / venv / Wine cache
@@ -239,6 +240,21 @@ def linux_tools(dest: Path) -> None:
     (dest / "7zz").chmod(0o755)
 
 
+def source_tools() -> Path:
+    """For running from the source checkout (install.sh launchers): put the same pinned, checksum-verified
+    nodtool, nsz and xdelta3 the builds bundle into <repo>/tools, where romtools.compat.find_tool looks.
+    chdman and 7-Zip are left to the system (and ROM Optimizer's chdman choice), as before."""
+    dest = ROOT / "tools"
+    dest.mkdir(exist_ok=True)
+    xd = PINS["xdelta3"]
+    with tarfile.open(download(xd["linux_url"], xd["linux_sha256"])) as tf:
+        member = next(m for m in tf.getmembers() if m.name.endswith("/xdelta3"))
+        (dest / "xdelta3").write_bytes(tf.extractfile(member).read())
+    (dest / "xdelta3").chmod(0o755)
+    _single_binaries(dest, "linux")
+    return dest
+
+
 # ---------------------------------------------------------------- Linux
 
 def build_linux(skip_selftest: bool) -> Path:
@@ -457,11 +473,16 @@ def clean(cache_too: bool) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("target", choices=["linux", "windows", "all", "test-portable", "clean", "distclean"])
+    ap.add_argument("target", choices=["linux", "windows", "all", "tools", "test-portable", "clean", "distclean"])
     ap.add_argument("--skip-selftest", action="store_true", help="don't run the packaged program's self-test")
     args = ap.parse_args()
     if args.target in ("clean", "distclean"):
         clean(args.target == "distclean")
+        return 0
+    if args.target == "tools":
+        if sys.platform == "win32":
+            raise SystemExit("`tools` is for a Linux source checkout; Windows builds bundle their tools")
+        step(f"Fetching nodtool, nsz and xdelta3 into {source_tools()}")
         return 0
     if args.target == "test-portable":
         test_portable()

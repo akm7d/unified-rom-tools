@@ -49,8 +49,10 @@ def disc_hash(path: Path, cancel: threading.Event | None = None, on_line=None) -
     from .compat import find_tool
     exe = find_tool("nodtool")
     if not exe:
-        raise NodError("nodtool not found, needed to check RVZ/CISO/GCZ/WIA/WBFS files "
-                       "(it's bundled in the packaged builds)")
+        from .compat import FROZEN
+        raise NodError("nodtool not found, needed to check RVZ/CISO/GCZ/WIA/WBFS files" +
+                       (" (the build is incomplete: tools/ is missing it)" if FROZEN else
+                        " - run ./install.sh (or `make tools`) in the romtools folder to fetch it"))
     lines: list[str] = []
 
     def line(s: str):

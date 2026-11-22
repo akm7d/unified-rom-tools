@@ -14,6 +14,12 @@ if ((${#missing[@]})); then
   echo "Install with:  sudo pacman -S ${missing[*]}"
 fi
 
+# nodtool (RVZ/CISO checks and conversion), nsz (NSZ) and xdelta3 (patches): the same pinned, checksum-verified
+# binaries the packaged builds bundle, fetched into ./tools
+if [ "$(uname -s)" = Linux ]; then
+  python3 "$HERE/packaging/build.py" tools || echo "Could not fetch nodtool/nsz/xdelta3 (offline?) - re-run later"
+fi
+
 for app in verifier renamer converter; do
   name="rom-$app"; [ "$app" = converter ] && name=rom-optimizer
   cat > "$BIN/$name" <<SH

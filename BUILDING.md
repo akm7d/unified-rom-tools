@@ -27,6 +27,7 @@ Makefile               shortcuts (below)
 | `make windows` | `dist/romtools-<version>-windows-x64.zip` (built with Wine on Linux) |
 | `make all` | both |
 | `make capture-theme` | save this desktop's colour scheme as the apps' Dark theme (`packaging/theme/dark-palette.json`) |
+| `make tools` | source checkout only: fetch the pinned `nodtool`, `nsz`, `xdelta3` into `./tools` (run by `./install.sh`) |
 | `make test-portable` | self-test the Linux build on a clean Ubuntu 24.04 in Docker (no chdman/7-Zip installed) |
 | `make clean` / `make distclean` | remove `build/` + `dist/` / also the download, venv and Wine cache |
 
