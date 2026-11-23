@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
                                QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
                                QVBoxLayout, QWidget, QListWidget, QListWidgetItem, QSizePolicy)
@@ -29,11 +29,16 @@ MOVE_COLOR = "#2f7fd1"
 
 def op_action(op) -> tuple[str, bool]:
     """(what the change does, in words; whether it moves the file to another folder)."""
+    if op.kind == rn.M3U_EDIT and op.move and op.dst.parent != op.src.parent:
+        return f"Update playlist + move into {op.dst.parent.name}/", True
     if op.kind == rn.M3U_EDIT:
         return ("Update playlist" + (" + rename" if op.dst != op.src else "")), False
     if not op.move or op.dst.parent == op.src.parent:
         return "Rename", False
-    where = op.dst.parent.name + "/" + ("" if op.dst.parent.exists() else " (new folder)")
+    home = op.dst.parent
+    # a game's folder inside another one ("psx/Final Fantasy VII"): show both
+    name = home.name if home.parent in (op.src.parent, op.src.parent.parent) else f"{home.parent.name}/{home.name}"
+    where = name + "/" + ("" if op.dst.parent.exists() else " (new folder)")
     return (f"Move into {where}" if op.dst.name == op.src.name else f"Rename + move into {where}"), True
 
 
@@ -223,6 +228,28 @@ class RenamerWindow(QMainWindow):
         pl.addLayout(mi)
         pl.addStretch(1)
 
+        sec_sort = QGroupBox("Sort into system folders")
+        sec_sort.setCheckable(True)
+        sec_sort.setChecked(st.get("sort", False))
+        sec_sort.setToolTip("Moves ROMs that lie loose, or in another system's folder, into their own system's folder "
+                            "(snes, psx …). The system comes from the ROM's data, never from its name or where it is. "
+                            "Uses the folder you already have for a system, or makes one. Nothing moves before you "
+                            "press Apply, and History / Undo puts everything back.")
+        sl = QVBoxLayout(sec_sort)
+        self.s_header = QCheckBox("Also ROMs no DAT knows (by their own header)")
+        self.s_header.setToolTip("Hacks, translations, homebrew, and systems without a DAT: the ROM's own header says "
+                                 "which console it is for. Off: only ROMs whose data matches a DAT (or packages).")
+        self.s_header.setChecked(st.get("s_header", True))
+        self.s_ext = QCheckBox("Fix extensions the system doesn't use (rom.bin → rom.gba)")
+        self.s_ext.setChecked(st.get("s_ext", True))
+        for w in (self.s_header, self.s_ext):
+            sl.addWidget(w)
+        note = QLabel("<small>Tick <i>Other folders &amp; loose files</i> on the left to include loose ROMs. Discs move "
+                      "with their tracks, playlists and saves; folders that hold one game stay together.</small>")
+        note.setWordWrap(True)
+        sl.addWidget(note)
+        sl.addStretch(1)
+
         sec_rules = QGroupBox("Cleanup rules (any file)")
         sec_rules.setCheckable(True)
         sec_rules.setChecked(st.get("rules", False))
@@ -266,17 +293,21 @@ class RenamerWindow(QMainWindow):
         fr.addWidget(self.r_regex)
         rg.addLayout(fr)
 
-        self.sec_dat, self.sec_pkg, self.sec_rules = sec_dat, sec_pkg, sec_rules
-        for g in (sec_dat, sec_pkg, sec_rules):
+        self.sec_dat, self.sec_pkg, self.sec_sort, self.sec_rules = sec_dat, sec_pkg, sec_sort, sec_rules
+        for g in (sec_dat, sec_pkg, sec_sort, sec_rules):
             g.toggled.connect(lambda _on: self._sections_changed())
         self.sections = QWidget()
-        secl = QHBoxLayout(self.sections)
+        secl = QGridLayout(self.sections)          # two by two: all four in a row would need a very wide window
         secl.setContentsMargins(0, 0, 0, 0)
-        secl.addWidget(sec_dat, 3)
-        secl.addWidget(sec_pkg, 3)
-        secl.addWidget(sec_rules, 5)
+        secl.addWidget(sec_dat, 0, 0)
+        secl.addWidget(sec_pkg, 0, 1)
+        secl.addWidget(sec_sort, 1, 0)
+        secl.addWidget(sec_rules, 1, 1)
+        secl.setColumnStretch(0, 1)
+        secl.setColumnStretch(1, 1)
         self.order_note = QLabel("<small>One preview for all ticked sections. If two would rename the same file, the "
-                                 "DAT name wins, then the package name, then the cleanup rules.</small>")
+                                 "DAT name wins, then the package name, then the cleanup rules. Sorting only decides the "
+                                 "folder.</small>")
         self.order_note.setWordWrap(True)
 
         # ---- preview table
@@ -354,13 +385,14 @@ class RenamerWindow(QMainWindow):
     def _save_sections(self):
         self.cfg["window_state"]["renamer_sections"] = {
             "dat": self.sec_dat.isChecked(), "pkg": self.sec_pkg.isChecked(), "rules": self.sec_rules.isChecked(),
+            "sort": self.sec_sort.isChecked(), "s_header": self.s_header.isChecked(), "s_ext": self.s_ext.isChecked(),
             "skip_uncached": self.skip_uncached.isChecked(), "p_rename": self.p_rename.isChecked(),
             "p_org": self.p_org.isChecked(), "p_multi": self.p_multi.isChecked(),
             "rule_boxes": {k: b.isChecked() for k, b in self._rule_boxes.items()}}
         self.cfg.save()
 
     def _sections_changed(self):
-        on = self.sec_dat.isChecked() or self.sec_pkg.isChecked() or self.sec_rules.isChecked()
+        on = any(s.isChecked() for s in (self.sec_dat, self.sec_pkg, self.sec_sort, self.sec_rules))
         self.act_preview.setEnabled(on and not (self.worker and self.worker.isRunning()))
         self._save_sections()
 
@@ -381,9 +413,10 @@ class RenamerWindow(QMainWindow):
             return
         self.systems.remember()
         do_dat, do_pkg, do_rules = (self.sec_dat.isChecked(), self.sec_pkg.isChecked(), self.sec_rules.isChecked())
-        if not (do_dat or do_pkg or do_rules):
-            QMessageBox.information(self, "Preview", "Tick at least one section: official names, console packages "
-                                                     "or cleanup rules.")
+        do_sort, s_opts = self.sec_sort.isChecked(), (self.s_header.isChecked(), self.s_ext.isChecked())
+        if not (do_dat or do_pkg or do_rules or do_sort):
+            QMessageBox.information(self, "Preview", "Tick at least one section: official names, console packages, "
+                                                     "sorting or cleanup rules.")
             return
         self._save_sections()
         p_opts = (self.p_rename.isChecked(), self.p_org.isChecked(), self.p_multi.isChecked())
@@ -400,14 +433,17 @@ class RenamerWindow(QMainWindow):
             say = lambda m: w.progress.emit(0, 0, m, 0)       # noqa: E731
             ops: list[rn.Op] = []
             notes: list[str] = []
-            if do_dat:
+            sorting: list[rn.Op] = []
+            if do_dat or do_sort:
                 results, skipped, items = [], [], []
                 listed, indexes = library.collect(cfg, root, systems, idxc, say)
                 pkg_sys = {s for s in systems if (system_for(cfg, s) or None) and system_for(cfg, s).source == "package"}
                 nodat = sorted({it.system for it in listed if indexes.get(it.system) is None} - pkg_sys
                                - {library.OTHER})
                 for it in listed:
-                    if indexes.get(it.system) is None or it.kind in ("folder", "package"):
+                    if it.kind in ("folder", "package") and not do_sort:
+                        continue
+                    if indexes.get(it.system) is None and not do_sort and it.kind != "package":
                         continue
                     if skip_unc and it.kind == "chd":
                         try:
@@ -421,9 +457,14 @@ class RenamerWindow(QMainWindow):
                 scanner = sc.make_scanner(cfg, cache, sc.QUICK)
                 scanner.cancel = w.cancel
                 scanner.run(items, indexes, results.append, lambda d, t, m, f: w.progress.emit(d, t, m, f))
-                for op in rn.plan_from_results(results, use_ext):
+                for op in rn.plan_from_results(results, use_ext) if do_dat else []:
                     op.reason = op.reason if op.reason.startswith("DAT") else "DAT: " + op.reason
                     ops.append(op)
+                if do_sort and not w.cancel.is_set():
+                    sorting, snotes = rn.plan_sorting(results, root, cfg, *s_opts)
+                    notes += snotes
+                    if not do_dat:
+                        nodat = []
                 if nodat:
                     notes.append(f"No DAT for: {', '.join(nodat)} (Manage DATs, or use the cleanup rules)")
                 if skipped:
@@ -441,11 +482,7 @@ class RenamerWindow(QMainWindow):
                     op.reason = "Cleanup: " + op.reason if op.reason else "Cleanup"
                     ops.append(op)
             # one change per file: DAT name, then package name, then cleanup rules (that's the order added above)
-            seen, merged = set(), []
-            for op in ops:
-                if op.src not in seen:
-                    seen.add(op.src)
-                    merged.append(op)
+            merged = rn.merge(ops, sorting)
             return merged, notes
 
         self.worker = Worker(job, parent=self)

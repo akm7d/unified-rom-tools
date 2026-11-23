@@ -376,14 +376,41 @@ def convert_disc_nod(src: Path, out: Path) -> Callable[[TaskContext], str]:
     return run
 
 
+_KEYS_FOUND: dict[str, Path | None] = {}
+
+
 def find_switch_keys(extra: list[Path] | None = None) -> Path | None:
-    cands = [Path.home() / ".switch" / "prod.keys", Path.home() / ".switch" / "keys.txt"]
+    """prod.keys in ~/.switch, or near the top of these folders. Only two levels deep and a limited number of entries,
+    and once per folder: walking a whole library on a network share took minutes."""
+    for c in (Path.home() / ".switch" / "prod.keys", Path.home() / ".switch" / "keys.txt"):
+        if c.is_file():
+            return c
     for base in extra or []:
+        key = str(base)
+        if key not in _KEYS_FOUND:
+            _KEYS_FOUND[key] = _search_keys(Path(base))
+        if _KEYS_FOUND[key]:
+            return _KEYS_FOUND[key]
+    return None
+
+
+def _search_keys(base: Path, levels: int = 2, budget: int = 3000) -> Path | None:
+    todo = [(base, 0)]
+    while todo and budget > 0:
+        folder, depth = todo.pop(0)
         try:
-            cands += sorted(base.rglob("prod.keys"))[:3] + sorted(base.rglob("keys.txt"))[:3]
+            with os.scandir(folder) as it:
+                for e in it:
+                    budget -= 1
+                    if budget <= 0:
+                        break
+                    if e.name.lower() in ("prod.keys", "keys.txt") and e.is_file():
+                        return Path(e.path)
+                    if depth < levels and not e.name.startswith(".") and e.is_dir(follow_symlinks=False):
+                        todo.append((Path(e.path), depth + 1))
         except OSError:
-            pass
-    return next((c for c in cands if c.is_file()), None)
+            continue
+    return None
 
 
 def convert_nsz(src: Path, out: Path, keys: Path | None) -> Callable[[TaskContext], str]:

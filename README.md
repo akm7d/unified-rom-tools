@@ -33,6 +33,11 @@ same pinned, checksum-verified `nodtool` (RVZ/CISO), `nsz` and `xdelta3` the bui
 
 ## ROM Verifier (read-only)
 
+ROMs are identified by **what's in them**: folder names, file names and extensions only serve as hints. Loose files,
+deep folder trees, files without an extension, wrong folders, zips inside zips, copier headers, byte-swapped N64 dumps
+and trimmed dumps are all fine. What no DAT knows is still recognised by its own header where the format has one (not:
+Atari 2600, PC Engine cartridges and a few others, nor CHDs, which only their hash can tell).
+
 Point it at **any folder**. Sub-folders recognised as systems (`psx/`, `snes/`, … as RomM, ES-DE or Batocera
 lay them out) are checked against their own DAT. Everything else (ROMs and zip/7z/rar archives lying directly
 in the folder, game-named folders like `Blue Stinger (USA)/`, nested collections up to 3 levels deep) appears
@@ -72,6 +77,7 @@ needs one that isn't set, ROM Optimizer asks you to locate it.
 |---|---|
 | Verified | hashes match the DAT and the name is right |
 | Misnamed | good dump, wrong name → fix with ROM Renamer |
+| Wrong folder | good dump, but in another system's folder → sort it with ROM Renamer |
 | Partial | some tracks match (e.g. a Dreamcast CHD built from a TOSEC GDI: data OK, audio offset differs) |
 | Bad dump | name is in the DAT but data differs (bad dump, hack, trimmed, patched) |
 | Unknown | hashes aren't in the DAT (hacks, translations, homebrew) |
@@ -123,10 +129,12 @@ Right-click rows for: open folder, copy paths / SHA-1s / DAT names, re-check. **
 
 ## ROM Renamer (preview first, undoable)
 
-One panel with three sections; tick the ones you want and press **Build preview** (F5) for one combined preview.
+One panel with four sections; tick the ones you want and press **Build preview** (F5) for one combined preview.
 If two sections would rename the same file, the DAT name wins, then the package name, then the cleanup rules; the
 *Reason* column says which section each change comes from.
 
+- **Sort into system folders** (off by default): moves loose or misplaced ROMs into their system's folder, using the one
+  you already have or making it. Tracks, playlists and saves go along; extensions the system doesn't use can be fixed.
 - **Official names from DATs (No-Intro / Redump)**: renames verified-good ROMs to their exact DAT name (identified
   by hash, shares the Verifier's cache). By default it skips CHDs ROM Verifier hasn't checked yet; untick that to
   check them now, and choose whether they're unpacked in RAM or on the SSD.

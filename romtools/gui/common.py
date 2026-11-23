@@ -19,6 +19,7 @@ from ..systems import UNVERIFIABLE_HINT
 STATUS_COLORS = {
     sc.VERIFIED: "#2e9d53",
     sc.MISNAMED: "#2f7fd1",
+    sc.MISPLACED: "#4f63d2",
     sc.MODIFIED: "#1a9c9c",
     sc.PARTIAL: "#d49a1b",
     sc.BAD: "#d1452f",
@@ -32,11 +33,13 @@ STATUS_COLORS = {
 STATUS_HELP = {
     sc.VERIFIED: "Hashes match the DAT and the name is correct",
     sc.MISNAMED: "Good dump, but the name differs from the DAT (fix it in ROM Renamer)",
+    sc.MISPLACED: "Good dump of another system's game: its data says it belongs in a different system folder (sort it "
+                  "with ROM Renamer)",
     sc.MODIFIED: "Tagged as a hack, translation, undub or other modified ROM - expected not to match the DAT "
-                 "(right-click → Mark as… to change)",
+                 "(right-click → Mark as… to change); also trimmed dumps and dumps with extra bytes",
     sc.PARTIAL: "Some tracks/files match, others don't",
     sc.BAD: "The name is in the DAT but the data differs: bad dump, hack, trimmed or modified",
-    sc.UNKNOWN: "Not in the DAT at all (hacks, translations, homebrew, or wrong system)",
+    sc.UNKNOWN: "Not in any of your DATs (hacks, translations, homebrew); the Notes say which system its own header names",
     sc.IDENTIFIED: "Console package (PS4 PKG, Switch NSP/XCI) identified from its own data - no DAT exists for these",
     sc.ATTENTION: "Console package with a problem: an update or DLC without its game, DLC for another region, a "
                   "duplicate or an older update",

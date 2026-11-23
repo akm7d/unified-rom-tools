@@ -193,14 +193,15 @@ class DatIndex:
         self.by_sha1: dict[str, list[tuple[Game, Rom]]] = {}
         self.by_md5: dict[str, list[tuple[Game, Rom]]] = {}
         self.by_crc: dict[tuple[str, int | None], list[tuple[Game, Rom]]] = {}
-        self.by_name: dict[str, Game] = {}
+        self.by_name: dict[str, list[Game]] = {}
+        self._sizes: dict[str, list[int]] = {}
         for d in dats or []:
             self.add(d)
 
     def add(self, dat: Dat) -> None:
         self.dats.append(dat)
         for g in dat.games:
-            self.by_name.setdefault(g.name.lower(), g)
+            self.by_name.setdefault(g.name.lower(), []).append(g)
             for r in g.roms:
                 if r.sha1:
                     self.by_sha1.setdefault(r.sha1, []).append((g, r))
@@ -222,5 +223,13 @@ class DatIndex:
         hits = self.by_crc.get((crc, size), [])
         return [(g, r) for g, r in hits if not r.sha1 and not r.md5]
 
-    def game_named(self, stem: str) -> Game | None:
-        return self.by_name.get(stem.lower())
+    def game_named(self, stem: str, dats: set[str] | None = None) -> Game | None:
+        """The game with this name. ``dats``: only from these DATs (by their name)."""
+        return next((g for g in self.by_name.get(stem.lower(), []) if dats is None or g.dat in dats), None)
+
+    def sizes(self, dat: str) -> list[int]:
+        """Every ROM size a DAT lists, sorted."""
+        if dat not in self._sizes:
+            self._sizes[dat] = sorted({r.size for d in self.dats if d.name == dat for g in d.games
+                                       for r in g.data_roms if r.size})
+        return self._sizes[dat]

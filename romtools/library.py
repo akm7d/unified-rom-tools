@@ -53,6 +53,25 @@ def other_label(cfg: Config, root: Path) -> tuple[str, str]:
     return OTHER_LABEL, "identified using all your DATs"
 
 
+_SHARED = IndexCache()
+
+
+def shared_index(dats: list[str]):
+    """One parsed index of these DATs for the whole program (loading all of them takes a moment)."""
+    return _SHARED.get(dats) if dats else None
+
+
+def dats_of(index, sysid: str, family: bool = False) -> set[str]:
+    """Names of the DATs in an index that belong to a system (``family``: or to one whose games look the same)."""
+    from .scanner import same_family
+    out = set()
+    for d in index.dats:
+        s = system_for_dat(d.name)
+        if s and (s == sysid or family and same_family(s, sysid)):
+            out.add(d.name)
+    return out
+
+
 def all_dats(cfg: Config) -> list[str]:
     found = {str(p) for p in DAT_DIR.glob("*") if p.suffix.lower() in (".dat", ".xml", ".zip")} \
         if DAT_DIR.is_dir() else set()
@@ -79,17 +98,22 @@ def collect(cfg: Config, root: Path, keys: list[str], index_cache: IndexCache,
     for key in keys:
         if key == OTHER:
             progress("Listing loose files and other folders…")
-            items += _items_in(OTHER, root, skip_dirs=set(systems))
             rs = root_system(cfg, root)
+            from .systems import guess_system
+            own = (cfg["systems"].get(rs) or {}).get("system") or getattr(guess_system(rs), "id", "") if rs else ""
+            items += _items_in(OTHER, root, skip_dirs=set(systems), expected=own)
             dats = (cfg["systems"].get(rs) or {}).get("dats", []) if rs else []
-            if not dats:
+            needed = any(it.system == OTHER for it in items)
+            if not needed:
+                dats = []
+            elif not dats:
                 dats = all_dats(cfg)
                 if dats:
                     progress(f"Loading all {len(dats)} DATs (first time takes a few seconds)…")
-            indexes[OTHER] = index_cache.get(dats) if dats else None
+            indexes[OTHER] = (index_cache.get(dats) if rs else shared_index(dats)) if dats else None
         else:
             progress(f"Listing {key}…")
-            items += enumerate_system(key, root / key)
+            items += enumerate_system(key, root / key, (cfg["systems"].get(key) or {}).get("system") or "")
             dats = cfg.system(key)["dats"]
             if dats:
                 progress(f"Loading DAT for {key}…")
@@ -99,24 +123,13 @@ def collect(cfg: Config, root: Path, keys: list[str], index_cache: IndexCache,
 
 def item_for_file(path: Path):
     """A scan item for one picked file (ROM, archive, CHD, or a .cue/.gdi with its tracks)."""
-    from .hashing import ARCHIVE_EXTS
-    from .scanner import Item, _cue_parts, _gdi_parts
+    from .scanner import Item, _cue_parts, _gdi_parts, _system_of_folder, kind_for
     ext = path.suffix.lower()
-    if ext == ".chd":
-        return Item(OTHER, path, "chd")
-    from .nod import DISC_EXTS
-    from .packages import PACKAGE_EXTS
-    if ext in DISC_EXTS:
-        return Item(OTHER, path, "disc")
-    if ext in PACKAGE_EXTS:
-        return Item(OTHER, path, "package")
-    if ext in ARCHIVE_EXTS:
-        return Item(OTHER, path, "archive")
-    if ext == ".cue":
-        return Item(OTHER, path, "cueset", [p for p in _cue_parts(path) if p.exists()])
-    if ext == ".gdi":
-        return Item(OTHER, path, "cueset", [p for p in _gdi_parts(path) if p.exists()])
-    return Item(OTHER, path, "file")
+    parts = _cue_parts(path) if ext == ".cue" else _gdi_parts(path) if ext == ".gdi" else None
+    expected = next((s for s in map(_system_of_folder, (p.name for p in path.parents[:3])) if s), "")
+    if parts is not None:
+        return Item(OTHER, path, "cueset", [p for p in parts if p.exists()], expected=expected)
+    return Item(OTHER, path, kind_for(ext), expected=expected)
 
 
 def collect_paths(cfg: Config, paths: list[Path], index_cache: IndexCache,
@@ -137,7 +150,7 @@ def collect_paths(cfg: Config, paths: list[Path], index_cache: IndexCache,
         dats = all_dats(cfg)
         if dats:
             progress(f"Loading all {len(dats)} DATs…")
-        indexes[OTHER] = index_cache.get(dats) if dats else None
+        indexes[OTHER] = shared_index(dats)
     seen, unique = set(), []
     for it in items:                       # the same file picked twice, or a file inside a picked folder
         if it.path not in seen:

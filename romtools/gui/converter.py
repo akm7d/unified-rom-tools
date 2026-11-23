@@ -3,6 +3,7 @@ the ROM Storage Advisor, and advanced chdman tools (every command, version & upd
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import os
 import sys
@@ -58,6 +59,22 @@ class ProgressDelegate(QStyledItemDelegate):
         opt.text = f"{val * 100:.0f}%"
         opt.textVisible = True
         QApplication.style().drawControl(QStyle.ControlElement.CE_ProgressBar, opt, painter)
+
+
+class PathDelegate(QStyledItemDelegate):
+    """Long paths are shortened in the middle, so the folder and the name both stay visible."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.TextElideMode.ElideMiddle
+
+
+def output_text(j: cv.Job) -> str:
+    """Where a job writes: the full path, plus the names of any further files in that folder."""
+    if not j.outputs:
+        return "—"
+    first, *more = j.outputs
+    return ", ".join([str(first)] + [o.name if o.parent == first.parent else str(o) for o in more])
 
 
 class RunnerWorker(Worker):
@@ -356,10 +373,12 @@ class BatchTab(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setItemDelegateForColumn(Q_PROGRESS, ProgressDelegate(self.table))
+        self.table.setItemDelegateForColumn(Q_OUTPUT, PathDelegate(self.table))
+        self.table.setWordWrap(False)           # one line per job, so a long path is only shortened in the middle
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setStretchLastSection(True)
-        for c, wdt in ((Q_TITLE, 250), (Q_SOURCE, 170), (Q_OUTPUT, 200), (Q_DETECT, 330), (Q_STATUS, 80),
+        for c, wdt in ((Q_TITLE, 250), (Q_SOURCE, 170), (Q_OUTPUT, 290), (Q_DETECT, 240), (Q_STATUS, 80),
                        (Q_PROGRESS, 110)):
             self.table.setColumnWidth(c, wdt)
         self.table.currentCellChanged.connect(lambda r, *_: self._show_log(r))
@@ -561,6 +580,11 @@ class BatchTab(QWidget):
                 return
         if preset == cv.PS4_EXTRACT and not self.ps4_beta_ok():
             return
+        if "output_dir" in cv.used_options(preset, self.options()) and self.out_mode.currentIndex() == 1 \
+                and not self.out_dir.text().strip():
+            QMessageBox.information(self, "Output folder", "Output is set to “Into this folder:”, but no folder is "
+                                                           "chosen. Choose one first.")
+            return
         self._plan_in_background(preset, paths, self.options(), first=True)
 
     def ps4_beta_ok(self) -> bool:
@@ -613,11 +637,15 @@ class BatchTab(QWidget):
             if first and preset == cv.SWITCH_FS and missing and self.ask_for_keys("title", missing):
                 self._plan_in_background(preset, paths, self.options(), first=False)   # again, with title.keys
                 return
-            queued = {(j.source, j.steps[0][1] if j.steps else "") for j in self.jobs if j.status == "Queued"}
-            jobs = [j for j in jobs if (j.source, j.steps[0][1] if j.steps else "") not in queued]
+            # a file already waiting for the same task isn't queued twice: its job takes the options chosen now
+            jobs, again = cv.merge_plan(self.jobs, jobs)
+            for j in again:
+                self._fill_row(j)
             self.add_jobs(jobs)
             self.save_state()
-            self.win.statusBar().showMessage(f"Added {len(jobs)} job(s).", 5000)
+            self.win.statusBar().showMessage(
+                f"Added {len(jobs)} job(s)." + (f" {len(again)} already queued: updated to the current options."
+                                                if again else ""), 6000)
 
         def failed(err):
             self.unsetCursor()
@@ -657,9 +685,10 @@ class BatchTab(QWidget):
 
     def enqueue_preset(self, preset: str, files: list[Path], **overrides) -> int:
         """Queue files for a task chosen elsewhere (ROM Storage Advisor), using the current options plus overrides."""
-        import dataclasses
         opts = dataclasses.replace(self.options(), **overrides)
         jobs = cv.plan(preset, files, opts)
+        for j in jobs:
+            j.overrides = dict(overrides)
         self.add_jobs(jobs)
         return len(jobs)
 
@@ -669,8 +698,17 @@ class BatchTab(QWidget):
             r = self.table.rowCount()
             self.table.insertRow(r)
             self.rows[j.id] = r
+            for c in (Q_STATUS, Q_PROGRESS, Q_NOTE):
+                self.table.setItem(r, c, QTableWidgetItem())
+            self._fill_row(j)
+        self._summary()
+
+    def _fill_row(self, j: cv.Job):
+        """Show what a job will do (again, when it was planned with other options)."""
+        r = self.rows.get(j.id)
+        if r is not None:
             for c, text in ((Q_TITLE, j.title), (Q_SOURCE, str(j.source)),
-                            (Q_OUTPUT, ", ".join(o.name for o in j.outputs) or "—")):
+                            (Q_OUTPUT, output_text(j))):
                 it = QTableWidgetItem(text)
                 it.setToolTip(text if c != Q_OUTPUT else "\n".join(map(str, j.outputs)))
                 self.table.setItem(r, c, it)
@@ -679,11 +717,7 @@ class BatchTab(QWidget):
             if "⚠" in j.detail:
                 det.setForeground(QColor("#d49a1b"))
             self.table.setItem(r, Q_DETECT, det)
-            self.table.setItem(r, Q_STATUS, QTableWidgetItem())
-            self.table.setItem(r, Q_PROGRESS, QTableWidgetItem())
-            self.table.setItem(r, Q_NOTE, QTableWidgetItem())
             self.update_job(j)
-        self._summary()
 
     def is_running(self) -> bool:
         return bool(self.worker and self.worker.isRunning())
@@ -816,13 +850,41 @@ class BatchTab(QWidget):
         self._rebuild()
 
     def retry_failed(self):
-        if self.worker and self.worker.isRunning():
+        """Queue every failed, stopped or skipped job again, planned afresh with the current options: that also covers
+        jobs that were skipped when they were added (missing keys, an unreadable file)."""
+        if self.is_running() or self._planning():
             return
-        for j in self.jobs:
-            if j.status in ("Failed", "Cancelled", "Skipped") and j.steps:
-                j.status, j.progress, j.message, j.log = "Queued", 0.0, "", []
-                self.update_job(j)
-        self._summary()
+        todo = [j for j in self.jobs if j.status in ("Failed", "Cancelled", "Skipped")]
+        if not todo:
+            self.win.statusBar().showMessage("Nothing to retry: no failed, stopped or skipped jobs.", 6000)
+            return
+
+        def done(res):
+            pairs, extra = res
+            for j, fresh in pairs:
+                if fresh is not None:           # else: leave the row and its reason as they are
+                    cv.reset(j)
+                    cv.take_plan(j, fresh)
+                    self._fill_row(j)
+            for j in todo:
+                if not j.preset and (j.steps or j.func):        # playlists, custom chdman commands
+                    cv.reset(j)
+                    self._fill_row(j)
+            self.add_jobs(extra)
+            self._summary()
+            n = sum(j.status == "Queued" and j.follows is None for j in todo)
+            left = sum(j.status != "Queued" for j in todo)
+            self.win.statusBar().showMessage(
+                (f"{n} job(s) queued again - press Start queue." if n else "Nothing could be queued again.") +
+                (f" {left} still can't be done (see Notes)." if left else ""), 10000)
+
+        self._replan([j for j in todo if j.preset], "Looking at the files again…", done)
+
+    def _planning(self) -> bool:
+        if getattr(self, "_planner", None) is not None and self._planner.isRunning():
+            self.win.statusBar().showMessage("Still looking at the files - try again in a moment.", 6000)
+            return True
+        return False
 
     def _summary(self):
         counts: dict[str, int] = {}
@@ -843,6 +905,8 @@ class BatchTab(QWidget):
             return False
         if not ct.chdman_bin():
             QMessageBox.critical(self, "chdman missing", "chdman was not found. See the chdman (advanced) tab.")
+            return False
+        if not self._options_settled():
             return False
         # free-space check per output folder
         need: dict[str, int] = {}
@@ -878,6 +942,70 @@ class BatchTab(QWidget):
         self._running(True)
         self.worker.start()
         return True
+
+    def _options_settled(self) -> bool:
+        """Jobs are planned when they're added. If the options (output folder, compression, …) were changed since,
+        ask which ones to use. False = don't start now (cancelled, or the jobs are being planned again)."""
+        if self._planning():
+            return False
+        old = cv.outdated(self.jobs, self.options())
+        if not old:
+            return True
+        cur = self.options()
+
+        def place(j, opts=None):
+            d = opts.output_dir if opts else j.planned.get("output_dir", "")
+            return d or "next to the source"
+        moved = [j for j in old if "output_dir" in j.planned and cv.used_options(
+            j.preset, dataclasses.replace(cur, **j.overrides))["output_dir"] != j.planned["output_dir"]]
+        lines = [f"• {j.source.name}\n   added with: {place(j)}\n   now set to: {place(j, cur)}" for j in moved[:4]]
+        if len(moved) > 4:
+            lines.append(f"• … and {len(moved) - 4} more")
+        box = QMessageBox(QMessageBox.Icon.Question, "Options changed",
+                          ("A queued job was" if len(old) == 1 else f"{len(old)} queued jobs were") + " added before the " +
+                          ("output folder" if moved else "options") + " changed. Use the current options?",
+                          parent=self)
+        box.setInformativeText("\n".join(lines))
+        now = box.addButton("Use current options", QMessageBox.ButtonRole.AcceptRole)
+        keep = box.addButton("Keep as added", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(now)
+        box.exec()
+        if box.clickedButton() is keep:
+            return True
+        if box.clickedButton() is now:
+            def apply(res):
+                for j, fresh in res[0]:
+                    if j.status == "Queued":
+                        cv.take_plan(j, fresh)
+                    self._fill_row(j)
+                self.add_jobs(res[1])
+                QTimer.singleShot(0, self.start)
+            self._replan(old, "Applying the current options to the queued jobs…", apply)
+        return False
+
+    def _replan(self, jobs: list[cv.Job], what: str, then):
+        """Plan jobs again with the current options, off the GUI thread; then(result of cv.replan)."""
+        opts = self.options()
+        self.win.statusBar().showMessage(what)
+        self.setCursor(Qt.CursorShape.BusyCursor)
+
+        def done(res):
+            self.unsetCursor()
+            self._planner = None
+            self.win.statusBar().clearMessage()
+            then(res)
+
+        def failed(err):
+            self.unsetCursor()
+            self.win.statusBar().clearMessage()
+            QMessageBox.critical(self, "Couldn't look at the files again", err)
+
+        w = Worker(lambda _w: cv.replan(jobs, opts), parent=self)
+        w.done.connect(done)
+        w.failed.connect(failed)
+        self._planner = w
+        w.start()
 
     def _tick(self):
         """Twice a second while running: overall bar, ETA, counts, live cards, window title."""

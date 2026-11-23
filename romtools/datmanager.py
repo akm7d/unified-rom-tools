@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import re
 import shutil
+import threading
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -70,9 +71,13 @@ def ensure_mapping(cfg: Config, folders: list[str]) -> None:
     for f in folders:
         s = cfg.system(f)
         g = guess_system(f)
-        # console-package systems were added later: map folders set up before (unless "none" was chosen)
-        if s.get("_guessed") and not s["system"] and not s.get("_none") and g and g.source == "package":
+        # systems and folder names that are recognised now but weren't when the folder was first seen (unless "none"
+        # was chosen for it)
+        if s.get("_guessed") and not s["system"] and not s.get("_none") and not s["dats"] and g:
             s["system"] = g.id
+            cand = DAT_DIR / dat_filename(g)
+            if g.url and cand.exists():
+                s["dats"] = [str(cand)]
             changed = True
         if not s.get("_guessed"):
             g = guess_system(f)
@@ -97,12 +102,26 @@ class IndexCache:
 
     def __init__(self) -> None:
         self._cache: dict[tuple, DatIndex] = {}
+        self._lock = threading.Lock()
 
     def get(self, dat_paths: list[str]) -> DatIndex | None:
         paths = [Path(p) for p in dat_paths if Path(p).is_file()]
         if not paths:
             return None
         key = tuple((str(p), p.stat().st_mtime) for p in paths)
-        if key not in self._cache:
-            self._cache[key] = DatIndex([parse_dat(p) for p in paths])
-        return self._cache[key]
+        with self._lock:
+            if key not in self._cache:
+                self._cache[key] = DatIndex([_parsed(p) for p in paths])
+            return self._cache[key]
+
+
+_PARSED: dict[Path, tuple[float, object]] = {}
+
+
+def _parsed(path: Path):
+    """A DAT, parsed once: its own index and the one over all DATs share the entries."""
+    mtime = path.stat().st_mtime
+    hit = _PARSED.get(path)
+    if hit is None or hit[0] != mtime:
+        hit = _PARSED[path] = (mtime, parse_dat(path))
+    return hit[1]

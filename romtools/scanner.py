@@ -8,15 +8,15 @@ from __future__ import annotations
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import chd, nod, packages
+from . import chd, identify, nod, packages
 from .cache import HashCache
 from .compat import ram_mode_supported
 from .dat import DatIndex, Game
-from .hashing import ARCHIVE_EXTS, Cancelled, Entry, hash_archive, hash_file
+from .hashing import ARCHIVE_EXTS, HASH_VERSION, Cancelled, Entry, hash_archive, hash_file
 
 IGNORE_EXTS = {".m3u", ".txt", ".nfo", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".ds_store", ".db", ".ini",
                ".xml", ".json", ".sav", ".srm", ".state", ".keys", ".pdf", ".url", ".lnk", ".sfv", ".md5",
@@ -32,7 +32,8 @@ VERIFIED, MISNAMED, MODIFIED, PARTIAL, BAD, UNKNOWN, NODAT, ERROR, SKIPPED = (
     "Verified", "Misnamed", "Modified", "Partial", "Bad dump", "Unknown", "No DAT", "Error", "Skipped")
 # console packages (PS4 PKG, Switch NSP/XCI) have no DAT: they are identified from their own metadata
 IDENTIFIED, ATTENTION = "Identified", "Check"
-STATUS_ORDER = [VERIFIED, MISNAMED, MODIFIED, IDENTIFIED, PARTIAL, ATTENTION, BAD, UNKNOWN, NODAT, ERROR, SKIPPED]
+MISPLACED = "Wrong folder"      # a good dump, but in another system's folder
+STATUS_ORDER = [VERIFIED, MISNAMED, MISPLACED, MODIFIED, IDENTIFIED, PARTIAL, ATTENTION, BAD, UNKNOWN, NODAT, ERROR, SKIPPED]
 TAGGABLE = {BAD, UNKNOWN, PARTIAL}   # statuses a hack/translation tag can replace
 
 
@@ -44,6 +45,8 @@ class Item:
                                # | cueset | folder
     parts: list[Path] = field(default_factory=list)  # extra files for cue/gdi sets
     member: str = ""           # one game inside a multi-game archive (its file name inside the archive)
+    maybe: bool = False        # only shown if a DAT knows it (no extension or signature says it's a ROM)
+    expected: str = ""         # catalogue id of the nearest folder named like a system ("" = none)
 
     @property
     def stem(self) -> str:
@@ -77,6 +80,10 @@ class Result:
     media: object = None       # discdetect.MediaCheck for CHDs (None if unknown / not a CHD)
     tag: str = ""              # hack / translation tag (see tags.py)
     tag_source: str = ""       # "marked by you" or "from name: …"
+    found: str = ""            # catalogue id of the system the data itself says (by DAT hash, else by its header)
+    found_by: str = ""         # "hash" | "header" | "package"
+    ident: object = None       # identify.Ident of the file's own header, if it has one
+    misplaced: bool = False    # found and item.expected don't agree
     orig_status: str | None = None   # status before tagging
     orig_note: str = ""
 
@@ -98,7 +105,7 @@ class Result:
     @property
     def expected_name(self) -> str | None:
         """File name the DAT says this item should have (same extension), or None."""
-        if self.status != MISNAMED or not self.game:
+        if self.status not in (MISNAMED, MISPLACED) or not self.game or self.game == self.item.stem:
             return None
         return self.game + self.item.path.suffix
 
@@ -129,16 +136,74 @@ def _gdi_parts(gdi: Path) -> list[Path]:
     return parts
 
 
-MAX_DEPTH = 3   # system/game/disc-style nesting
+MAX_DEPTH = 12      # folders inside folders (symlink loops end here too)
+OTHER = "(other)"    # group key for loose files / folders that aren't a system's (see library.py)
+# extensions that other kinds of files use as well: outside a system folder they need a ROM's signature to count
+WEAK_EXTS = {".bin", ".elf", ".md", ".rom", ".img", ".st", ".bs", ".min", ".gen", ".sg", ".pkg", ".unf", ".swc",
+             ".fig"}
+STRONG_EXTS = ROM_EXTS - WEAK_EXTS
+NEVER_ROMS = {".m3u", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf", ".sav", ".srm", ".state", ".keys", ".url",
+              ".lnk", ".mp3", ".mp4", ".mkv", ".ogg", ".wav", ".flac"}
+MEDIA_DIRS = {"images", "media", "videos", "manuals", "screenshots", "covers", "boxart", "box art", "snaps",
+              "node_modules", "__macosx", "$recycle.bin", "system volume information"}
+_TRACK = re.compile(r"^(.*?)\s*\(Track \d+\)", re.I)
 
 
-def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | frozenset = frozenset()) -> list[Item]:
+def _maybe_rom(f: Path) -> bool:
+    """Generic or no extension, no signature, but a size old cartridges come in: only its hash can tell."""
+    ext, n = f.suffix.lower(), _safe_size(f)
+    return (ext in WEAK_EXTS - {".md", ".pkg", ".elf"} or not ext) and 2048 <= n <= 8 << 20 and n % 1024 in (0, 512)
+
+
+def _is_rom(f: Path, in_system: bool) -> bool:
+    """Should this file be checked? Known ROM extensions always; in a system folder everything that isn't a picture,
+    text or save; anything else when its content says it's a ROM (whatever it is called)."""
+    ext = f.suffix.lower()
+    if ext in STRONG_EXTS:
+        return True
+    if ext in NEVER_ROMS or f.name.startswith("."):
+        return False
+    if in_system and ext not in IGNORE_EXTS:
+        return True
+    size = _safe_size(f)
+    if size < (8192 if ext in IGNORE_EXTS else 1024):
+        return False
+    hit = identify.identify(f)
+    if hit and (hit.system or hit.container in ("chd", "disc", "package")
+                or (hit.container == "archive" and (not ext or ext in ROM_EXTS))
+                or (hit.ext == ".bin" and ext in (".bin", ".img"))):
+        return True
+    return False
+
+
+def kind_for(ext: str) -> str:
+    return ("chd" if ext == ".chd" else "disc" if ext in nod.DISC_EXTS else "package" if ext in packages.PACKAGE_EXTS
+            else "archive" if ext in ARCHIVE_EXTS else "file")
+
+
+def _entries(folder: Path) -> tuple[list[Path], list[Path]]:
+    """(files, sub-folders), sorted, without hidden ones. One directory read - no extra request per file, which is what
+    takes the time on a network share."""
+    import os
+    files, dirs = [], []
     try:
-        children = sorted(folder.iterdir(), key=lambda p: p.name.lower())
+        with os.scandir(folder) as it:
+            for e in it:
+                if e.name.startswith("."):
+                    continue
+                try:
+                    (dirs if e.is_dir() else files).append(Path(e.path))
+                except OSError:
+                    continue
     except OSError:
-        return []
-    files = [p for p in children if p.is_file() and not p.name.startswith(".")]
-    dirs = [p for p in children if p.is_dir() and not p.name.startswith(".") and p.name not in skip_dirs]
+        return [], []
+    return sorted(files, key=lambda p: p.name.lower()), sorted(dirs, key=lambda p: p.name.lower())
+
+
+def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | frozenset = frozenset(),
+              expected: str = "") -> list[Item]:
+    files, dirs = _entries(folder)
+    dirs = [p for p in dirs if p.name not in skip_dirs]
     consumed: set[Path] = set()
     items: list[Item] = []
     for f in files:
@@ -150,47 +215,87 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
         else:
             continue
         consumed.update(parts)
-        items.append(Item(system, f, "cueset", parts))
+        items.append(Item(system, f, "cueset", parts, expected=expected))
+    # the tracks of one disc without their .cue
+    tracks: dict[str, list[Path]] = {}
+    for f in files:
+        m = _TRACK.match(f.stem)
+        if m and f not in consumed and f.suffix.lower() in (".bin", ".raw", ".img"):
+            tracks.setdefault(m[1].lower(), []).append(f)
+    for group in tracks.values():
+        if len(group) > 1:
+            consumed.update(group)
+            items.append(Item(system, group[0], "cueset", group[1:], expected=expected))
     for f in files:
         ext = f.suffix.lower()
-        if f in consumed or ext in (".cue", ".gdi") or ext in IGNORE_EXTS:
+        if f in consumed or ext in (".cue", ".gdi"):
             continue
-        kind = ("chd" if ext == ".chd" else "disc" if ext in nod.DISC_EXTS
-                else "package" if ext in packages.PACKAGE_EXTS else "archive" if ext in ARCHIVE_EXTS else "file")
-        items.append(Item(system, f, kind))
+        sure = _is_rom(f, system != OTHER)
+        if sure or ext not in NEVER_ROMS and _maybe_rom(f):
+            items.append(Item(system, f, kind_for(ext), expected=expected, maybe=not sure))
     for d in dirs:
-        if packages.is_extracted_switch(d):            # an extracted Switch game: identified, not "Skipped"
-            items.append(Item(system, d, "package"))
-            continue
-        if depth < MAX_DEPTH and (_has_roms(d) or _has_rom_subdirs(d)):
-            items.extend(_items_in(system, d, depth + 1))
+        here = _system_of_folder(d.name) or expected
+        skip = d.name.lower() in MEDIA_DIRS or depth >= MAX_DEPTH or d.is_symlink()
+        inside = None if skip else _entries(d)
+        game = identify.extracted_game(d, {p.name.lower() for x in inside for p in x} if inside else None)
+        if game == "switch" and packages.is_extracted_switch(d):   # an extracted Switch game: identified, not "Skipped"
+            items.append(Item(system, d, "package", expected=here))
+        elif game is None and inside and holds_roms(d, inside):
+            items.extend(_items_in(system, d, depth + 1, expected=here))
         else:
-            items.append(Item(system, d, "folder"))
+            items.append(Item(system, d, "folder", expected=here))
     return items
 
 
-def _has_roms(d: Path) -> bool:
-    try:
-        return any(p.is_file() and p.suffix.lower() in ROM_EXTS and p.suffix.lower() not in (".bin", ".elf")
-                   for p in d.iterdir()) or any(p.suffix.lower() == ".cue" for p in d.iterdir())
-    except OSError:
-        return False
+def _system_of_folder(name: str) -> str:
+    from .systems import guess_system
+    g = guess_system(name)
+    return g.id if g else ""
 
 
-def _has_rom_subdirs(d: Path) -> bool:
-    try:
-        return any(p.is_dir() and not p.name.startswith(".") and _has_roms(p) for p in d.iterdir())
-    except OSError:
-        return False
+def holds_roms(d: Path, inside: tuple[list[Path], list[Path]] | None = None, budget: int = 4000,
+               looks: int = 24) -> bool:
+    """Is there a ROM anywhere under this folder? Stops at the first one, and gives up on huge trees of other files."""
+    from collections import deque
+    todo: "deque[tuple[Path, int]]" = deque([(d, 0)])
+    while todo and budget > 0:
+        cur, depth = todo.popleft()
+        files, dirs = inside if inside is not None and cur is d else _entries(cur)
+        if depth:
+            game = identify.extracted_game(cur, {p.name.lower() for x in (files, dirs) for p in x})
+            if game is not None:
+                if game == "switch" and packages.is_extracted_switch(cur):
+                    return True
+                continue
+        budget -= len(files) + len(dirs)
+        if any(p.suffix.lower() in STRONG_EXTS for p in files):
+            return True
+        for p in files:
+            if looks <= 0:
+                break
+            if p.suffix.lower() not in NEVER_ROMS:
+                looks -= 1
+                if _is_rom(p, False) or _maybe_rom(p):           # by content
+                    return True
+        if depth < MAX_DEPTH:
+            todo.extend((p, depth + 1) for p in dirs if p.name.lower() not in MEDIA_DIRS and not p.is_symlink())
+    return False
 
 
-def enumerate_system(system: str, folder: Path) -> list[Item]:
-    return _items_in(system, folder)
+def enumerate_system(system: str, folder: Path, expected: str = "") -> list[Item]:
+    return _items_in(system, folder, expected=expected or _system_of_folder(folder.name))
 
 
 # ------------------------------------------------------------ matching
 
-def match(item: Item, entries: list[Entry], index: DatIndex) -> Result:
+def hits_of(entries: list[Entry], index: DatIndex) -> int:
+    """How many of these files / tracks a DAT knows by hash."""
+    return sum(any(index.lookup(v.size, v.crc, v.md5, v.sha1) for v in (e.full, e.headerless) if v is not None)
+               for e in entries if not e.name.lower().endswith((".cue", ".gdi")))
+
+
+def match(item: Item, entries: list[Entry], index: DatIndex, name_dats: set[str] | None = None) -> Result:
+    """``name_dats``: only these DATs count for a match by name alone (the data matched nothing)."""
     data_entries = [e for e in entries if not e.name.lower().endswith((".cue", ".gdi"))]
     per_entry: list[tuple[Entry, list[tuple[Game, object, bool]]]] = []
     for e in data_entries:
@@ -210,7 +315,7 @@ def match(item: Item, entries: list[Entry], index: DatIndex) -> Result:
 
     stem = item.stem
     if not scores:
-        g = index.game_named(stem)
+        g = index.game_named(stem, name_dats)
         ers = [EntryResult(e) for e in data_entries]
         if g:
             return Result(item, BAD, g.name, g.dat, "Name matches the DAT but the data does not "
@@ -284,7 +389,7 @@ def split_archive(item: Item, entries: list[Entry], index: DatIndex) -> list[tup
         members = [data[i] for i in idxs]
         names = {Path(m.name).stem for m in members}
         cues = [e for e in entries if e.name.lower().endswith((".cue", ".gdi")) and Path(e.name).stem in names]
-        sub = Item(item.system, item.path, item.kind, member=members[0].name)
+        sub = Item(item.system, item.path, item.kind, member=members[0].name, expected=item.expected)
         out.append((sub, members + cues))
     return out
 
@@ -314,6 +419,8 @@ class Scanner:
         self.marks = None          # tags.MarkStore; set by the caller to apply your hack marks
         self.switch_keys: Path | None = None   # prod.keys for reading Switch packages (make_scanner sets it)
         self.packages_off: set[str] = set()    # system folders where reading package data is turned off
+        self.all_index: Callable[[], DatIndex | None] = lambda: None    # every DAT there is (loaded when needed)
+        self.folder_system: dict[str, str] = {}     # folder name -> system chosen for it in Manage DATs
         self.stats = {"remembered": 0, "hashed": 0, "not_scanned": 0}
         self._stats_lock = threading.Lock()
 
@@ -322,18 +429,21 @@ class Scanner:
             self.stats[key] += 1
 
     # -- hashing one item (with cache) --------------------------------
-    def hash_item(self, item: Item, progress: ProgressCb | None = None) -> tuple[list[Entry], dict, bool]:
+    def hash_item(self, item: Item, progress: ProgressCb | None = None,
+                  again: bool = False) -> tuple[list[Entry], dict, bool]:
         p = item.path
         st = p.stat()
         mtime = st.st_mtime + sum(x.stat().st_mtime for x in item.parts)
         size = st.st_size + sum(x.stat().st_size for x in item.parts)
-        if self.cache and self.mode != FULL:
+        if self.cache and self.mode != FULL and not again:
             hit = self.cache.get(p, size, mtime)
             if hit and item.kind == "chd" and hit[1].get("kind") == "gd" \
                     and hit[1].get("layout", 1) < chd.TRACK_LAYOUT:
                 hit = None  # GD-ROM hashed with the old .gdi layout: redo it with the Redump-exact one
             if hit:
                 kind, extra, entries = hit
+                if item.kind == "file" and kind in ("archive", "chd", "disc"):
+                    item.kind = kind            # found out earlier: it isn't what its extension says
                 if item.kind == "chd" and "frames" not in extra:
                     # remembered before track details were stored: read the CHD header (fast) and remember it
                     try:
@@ -377,6 +487,9 @@ class Scanner:
             entries = [hash_file(p, self.cancel)] + [hash_file(x, self.cancel, bytes_cb) for x in item.parts]
         else:
             entries = [hash_file(p, self.cancel, bytes_cb)]
+        extra["hv"] = HASH_VERSION
+        if item.kind in ("file", "archive", "cueset", "disc"):
+            extra["ident"] = _ident_dict(item)
         if self.cache:
             self.cache.put(p, size, mtime, item.kind, extra, entries)
         self._count("hashed")
@@ -385,27 +498,112 @@ class Scanner:
     def check(self, item: Item, index: DatIndex | None,
               progress: ProgressCb | None = None) -> Result | list[Result] | None:
         if item.kind == "folder":
-            return Result(item, SKIPPED, note="Folder (extracted game / installed title) - not checked")
+            game = identify.extracted_game(item.path)
+            return Result(item, SKIPPED, note="Folder (extracted game / installed title) - not checked",
+                          found=game or "", found_by="header" if game else "")
+        if item.kind == "file" and item.path.suffix.lower() not in STRONG_EXTS:
+            self._right_kind(item)      # no extension or a generic one: what is it really?
         if item.kind == "package":
             if item.system in self.packages_off:
                 return Result(item, NODAT, note="Reading package data is turned off for this folder (Manage DATs)")
             return self.check_package(item)
         if index is None:
-            from .systems import UNVERIFIABLE_HINT
-            return Result(item, NODAT, note=UNVERIFIABLE_HINT.get(item.system, "No DAT loaded for this system"))
+            return None if item.maybe else self._no_dat(item, progress)
+        return self._check_dat(item, index, progress)
+
+    def _right_kind(self, item: Item) -> "identify.Ident | None":
+        """Files that aren't what their extension says (a zip called .sfc, a CHD called .bin)."""
+        hit = identify.identify(item.path)
+        if hit and hit.container and item.kind == "file":
+            item.kind = hit.container
+        return hit
+
+    def _no_dat(self, item: Item, progress) -> Result | list[Result] | None:
+        """No DAT for this folder's system. A file that belongs to another system is still checked with that one's."""
+        from .systems import UNVERIFIABLE_HINT
+        hit = self._right_kind(item) if item.kind == "file" else \
+            _ident_from(_ident_dict(item)) if self.mode != REMEMBERED else None
+        if item.kind == "package":
+            return self.check_package(item)
+        want = self._expected(item)
+        if hit and hit.system and not same_family(hit.system, want):
+            index = self.all_index()
+            if index is not None:
+                return self._check_dat(item, index, progress)
+        r = Result(item, NODAT, note=UNVERIFIABLE_HINT.get(item.system, "No DAT loaded for this system"))
+        self._place(r, hit, "")
+        return r
+
+    def _check_dat(self, item: Item, index: DatIndex, progress) -> Result | list[Result] | None:
         try:
             entries, extra, cached = self.hash_item(item, progress)
+            own = hits_of(entries, index)
+            data = sum(not e.name.lower().endswith((".cue", ".gdi")) for e in entries)
+            if own < data and item.kind == "file" and self._right_kind(item) and item.kind != "file":
+                if item.kind == "package":
+                    return self.check_package(item)
+                entries, extra, cached = self.hash_item(item, progress, again=True)
+                own = hits_of(entries, index)
+            elif own < data and cached and self.mode != REMEMBERED and extra.get("hv", 1) < HASH_VERSION \
+                    and item.kind in ("file", "archive") and _safe_size(item.path) <= 512 << 20:
+                entries, extra, cached = self.hash_item(item, progress, again=True)   # remembered by an older version
+                own = hits_of(entries, index)
         except Cancelled:
             raise
         except NotScanned:
             self._count("not_scanned")
             return None
         except Exception as exc:  # noqa: BLE001 - report every failure as a row
-            return Result(item, ERROR, note=str(exc) or exc.__class__.__name__)
-        parts = split_archive(item, entries, index)
+            r = Result(item, ERROR, note=str(exc) or exc.__class__.__name__)
+            self._place(r, identify.identify(item.path), "")
+            return r
+        ident = _ident_from(extra.get("ident"))
+        if ident is None and not own and self.mode != REMEMBERED and item.kind in ("file", "archive", "cueset", "disc"):
+            ident = _ident_from(_ident_dict(item))
+        # what the folder's own DAT doesn't know may well be in another system's
+        used = index
+        if own < data:
+            everything = self.all_index()
+            if everything is not None and everything is not index and (
+                    hits_of(entries, everything) > own or not own and ident is not None and ident.system
+                    and not same_family(ident.system, self._expected(item) or ident.system)):
+                used = everything
+        if item.maybe and not hits_of(entries, used) and ident is None:
+            return None
+        parts = split_archive(item, entries, used)
         if parts:
-            return [self._finish(sub, ents, index, extra, cached) for sub, ents in parts]
-        return self._finish(item, entries, index, extra, cached)
+            return [self._finish(sub, ents, used, dict(extra), cached, ident, used is index) for sub, ents in parts]
+        return self._finish(item, entries, used, extra, cached, ident, used is index)
+
+    # -- whose system is it? ----------------------------------------------
+    def _expected(self, item: Item) -> str:
+        """The system this file's place in the library says it is ("" = the folder doesn't say)."""
+        if item.expected and item.expected != _system_of_folder(item.system):
+            return item.expected                    # a nearer folder, named like a system
+        if any(p.name == item.system for p in item.path.parents):
+            return self.folder_system.get(item.system) or item.expected
+        return item.expected
+
+    def _place(self, r: Result, ident, dat: str, own: bool = False) -> None:
+        """Fill in r.found / r.misplaced: by the DAT its data matched, else by its own header."""
+        from .library import system_for_dat
+        r.ident = ident
+        by_hash = system_for_dat(dat) if dat and any(er.rom for er in r.entries) else None
+        if by_hash:
+            r.found, r.found_by = by_hash, "hash"
+        elif ident is not None and ident.system:
+            r.found, r.found_by = ident.system, "header"
+        want = self._expected(r.item)
+        if not r.found or not want or r.found == want or own and by_hash and want == self.folder_system.get(
+                r.item.system):
+            return
+        if r.found_by == "header" and same_family(r.found, want):
+            return                                  # the header alone can't tell these apart for sure
+        if by_hash and ident is not None and ident.system == want:
+            return                                  # listed under one system, made for both (Game Boy / Color)
+        if _shares_folder(r.item, r.found):
+            return
+        r.misplaced = True
 
     # -- console packages ------------------------------------------------
     def check_package(self, item: Item) -> Result:
@@ -423,19 +621,35 @@ class Scanner:
         problems = _package_problems(item, info, self.switch_keys)
         if item.system == "(other)":
             item.system = info.platform
+        want = self._expected(item)
         r = Result(item, ATTENTION if problems else IDENTIFIED, packages.clean_title(info.title),
                    "PS4 package data" if info.platform == "ps4" else "Switch package data",
                    packages.describe(info) + ("" if not problems else " ⚠ " + "; ".join(problems)))
         r.chd_info = {"package": info.as_dict(), "problems": problems}
+        r.found, r.found_by = info.platform, "package"
+        if want and want != r.found and not (info.platform == "switch" and want == "switch2"):
+            r.misplaced, r.status = True, MISPLACED
+            r.note += f" ⚠ belongs in a {system_name(r.found)} folder, not {system_name(want)}"
         return r
 
-    def _finish(self, item: Item, entries: list[Entry], index: DatIndex, extra: dict, cached: bool) -> Result:
+    def _finish(self, item: Item, entries: list[Entry], index: DatIndex, extra: dict, cached: bool,
+                ident=None, own: bool = True) -> Result:
+        from .library import dats_of, system_for_dat
         if item.kind == "disc":
             for e in entries:   # nodtool gives no disc size: take it from the DAT entry the SHA-1 matches
                 hits = index.lookup(e.full.size, e.full.crc, e.full.md5, e.full.sha1)
                 if hits and not e.full.size:
                     e.full.size = hits[0][1].size or 0
-        r = match(item, entries, index)
+        # a name without matching data only means something within the right system's DAT
+        sysid = ident.system if ident is not None and ident.system else identify.system_from_ext(
+            item.member or item.path.name) or (self._expected(item) if item.system != OTHER else "")
+        named = dats_of(index, sysid, family=True) if sysid else None
+        if named is None and len({g.dat for g in index.by_name.get(item.stem.lower(), [])}) > 1:
+            named = set()                   # the name is in several systems' DATs: can't tell which
+        if named is not None and not named and own and item.system != OTHER and same_family(
+                sysid, self.folder_system.get(item.system, sysid)):
+            named = None                    # the folder's own DAT, under a name we don't know
+        r = match(item, entries, index, named)
         if item.kind == "disc":
             fmt = item.path.suffix[1:].upper()
             if r.status in (BAD, UNKNOWN) and item.path.suffix.lower() == ".wbfs":
@@ -444,22 +658,65 @@ class Scanner:
                 r.note += f" (checked the disc inside the {fmt} with nodtool)"
             elif not r.note:
                 r.note = f"Disc inside the {fmt} matches"
-        r.chd_info = extra
+        r.chd_info = {k: v for k, v in extra.items() if k not in ("hv", "ident", "fuzzy")}
         r.cached = cached
-        if item.system == "(other)":
-            # identified across several DATs: show (and use) the system the matching DAT belongs to
-            from .library import system_for_dat
-            detected = system_for_dat(r.dat) if r.dat else None
-            item.system = detected or "(other)"
+        self._place(r, ident, r.dat, own)
+        if r.misplaced:
+            where = f"{system_name(r.found)} game in a {system_name(self._expected(item))} folder"
+            if r.status in (VERIFIED, MISNAMED):
+                also = f"; should be named “{r.game}”" if r.status == MISNAMED else ""
+                r.status, r.note = MISPLACED, where + also
+            else:
+                r.note += f" - {where}"
+        elif r.found_by == "header" and r.status in (UNKNOWN, NODAT) and item.system in (OTHER, ""):
+            r.note += f" - {system_name(r.found)} ROM" + (f", titled “{ident.title}”" if ident.title else "")
+        elif r.status == UNKNOWN and ident is not None and ident.title:
+            r.note += f" (titled “{ident.title}” inside)"
+        if item.system == OTHER:
+            # identified across several DATs: show (and use) the system the data belongs to
+            item.system = r.found or (system_for_dat(r.dat) if r.dat else None) or OTHER
         if item.kind == "chd":
             from .discdetect import check_chd
             from .systems import guess_system
-            sysdef = guess_system(item.system)
+            sysdef = guess_system(r.found or item.system)
             game = index.game_named(r.game) if r.game else index.game_named(item.stem)
             r.media = check_chd(extra, sysdef.id if sysdef else "", game)
         from . import tags
         tags.apply(r, self.marks, MODIFIED, TAGGABLE)
+        if r.status in (UNKNOWN, BAD) and item.kind == "file":
+            self._trimmed_or_padded(r, index, extra)
         return r
+
+    def _trimmed_or_padded(self, r: Result, index: DatIndex, extra: dict) -> None:
+        """A cartridge dump with its unused end cut off, or with extra bytes after it, is still that game: compare
+        it at the sizes the DAT lists. (The result is remembered with the hashes.)"""
+        from .library import dats_of
+        item = r.item
+        if "fuzzy" not in extra:
+            if self.mode == REMEMBERED:
+                return
+            extra["fuzzy"] = None
+            size = _safe_size(item.path)
+            sysid = r.found or identify.system_from_ext(item.path.name)
+            full = self.all_index() or index
+            dats = dats_of(full, sysid, family=True) if sysid in identify.SYSTEM_EXTS else set()
+            if dats and 1024 < size <= 256 << 20:
+                extra["fuzzy"] = _fuzzy(item.path, size, r.entries[0].entry.header_len if r.entries else 0, full, dats)
+            if self.cache:
+                try:
+                    st = item.path.stat()
+                    self.cache.put(item.path, st.st_size, st.st_mtime, item.kind, extra,
+                                   [er.entry for er in r.entries])
+                except OSError:
+                    pass
+        hit = extra["fuzzy"]
+        if hit:
+            r.status, r.game, r.dat = MODIFIED, hit["game"], hit["dat"]
+            r.note = hit["what"] + (f" - {system_name(r.found)} game in another system's folder" if r.misplaced else "")
+            r.tag, r.tag_source = hit["tag"], "from its data"
+            r.orig_status, r.orig_note = MODIFIED, r.note
+            from .library import system_for_dat
+            r.found, r.found_by = system_for_dat(r.dat) or r.found, "hash"
 
     def run(self, items: list[Item], indexes: dict[str, DatIndex | None],
             on_result: Callable[[Result], None],
@@ -495,11 +752,105 @@ class Scanner:
                     raise exc
 
 
+# systems whose headers look alike or whose games run on each other's console
+_FAMILIES = [{"gb", "gbc"}, {"ngp", "ngpc"}, {"wonderswan", "wonderswan-color"}, {"tg16", "supergrafx", "pcecd"},
+             {"genesis", "sega32", "segacd"}, {"sms", "gamegear", "sg1000"}, {"xbox", "xbox360"}, {"nes", "fds"},
+             {"switch", "switch2"}, {"ngc", "wii"}]
+
+
+def same_family(a: str, b: str) -> bool:
+    return a == b or any(a in f and b in f for f in _FAMILIES)
+
+
+def _shares_folder(item: Item, system: str) -> bool:
+    """The folder is one both systems use (RomM's "pce" holds PC Engine cartridges and CDs)."""
+    from .systems import BY_ID
+    names = {n.lower() for n in (item.system, *(p.name for p in item.path.parents[:3]))}
+    return bool(system in BY_ID and names & set(BY_ID[system].folders))
+
+
+def system_name(sysid: str) -> str:
+    from .systems import BY_ID
+    return BY_ID[sysid].name if sysid in BY_ID else sysid
+
+
+def _ident_dict(item: Item) -> dict | None:
+    if item.kind == "archive":
+        hit = identify.identify_archive(item.path)
+    else:
+        path = item.path
+        if item.kind == "cueset" and path.suffix.lower() in (".cue", ".gdi"):
+            hit = None
+            if path.suffix.lower() == ".gdi":
+                return asdict(identify.Ident("dc", "GD-ROM descriptor", ext=".gdi"))
+            for part in item.parts[:3]:             # the data track is first or second
+                hit = identify.identify(part)
+                if hit and hit.system:
+                    break
+        else:
+            hit = identify.identify(path)
+    return asdict(hit) if hit else None
+
+
+def _ident_from(d: dict | None) -> "identify.Ident | None":
+    try:
+        return identify.Ident(**d) if d else None
+    except TypeError:
+        return None
+
+
+def _fuzzy(path: Path, size: int, header: int, index: DatIndex, dats: set[str]) -> dict | None:
+    """Does this dump equal a DAT entry once the missing end is filled up, or the extra end is cut off?"""
+    import hashlib
+    import zlib
+
+    def hit_for(n: int, crc: int, md5, sha1):
+        for g, rom in index.lookup(n, f"{crc & 0xFFFFFFFF:08x}", md5.hexdigest(), sha1.hexdigest()):
+            if g.dat in dats:
+                return g
+        return None
+    with open(path, "rb") as fh:
+        data = memoryview(fh.read())[header:]
+    size = len(data)
+    sizes = sorted({n for d in dats for n in index.sizes(d)})
+    md5, sha1, crc, pos = hashlib.md5(), hashlib.sha1(), 0, 0
+    for n in [n for n in sizes if size / 4 <= n < size][-40:] + [size]:      # the beginning, cut at each known size
+        crc = zlib.crc32(data[pos:n], crc)
+        md5.update(data[pos:n])
+        sha1.update(data[pos:n])
+        pos = n
+        if n < size:
+            g = hit_for(n, crc, md5, sha1)
+            if g:
+                return {"game": g.name, "dat": g.dat, "tag": "Overdump",
+                        "what": f"“{g.name}” with {size - n:,} extra bytes at the end"}
+    last = data[-1] if size else 0
+    for fill in dict.fromkeys((0xFF, 0x00, last)):
+        m2, s2, c2, pos = md5.copy(), sha1.copy(), crc, size
+        for n in [n for n in sizes if size < n <= max(size * 16, 1 << 20) and n <= 512 << 20][:40]:
+            block = bytes([fill]) * min(n - pos, 1 << 20)
+            while pos < n:
+                b = block[:n - pos]
+                c2 = zlib.crc32(b, c2)
+                m2.update(b)
+                s2.update(b)
+                pos += len(b)
+            g = hit_for(n, c2, m2, s2)
+            if g:
+                return {"game": g.name, "dat": g.dat, "tag": "Trimmed",
+                        "what": f"“{g.name}” with its unused end cut off ({n - size:,} bytes; ROM Optimizer can "
+                                f"untrim it)"}
+    return None
+
+
 def make_scanner(cfg, cache=None, mode: str = QUICK) -> "Scanner":
     """Build a Scanner from the settings as they are right now (a running scan keeps its own)."""
     s = Scanner(Path(cfg["tmp_dir"]), cfg["workers"], cfg["chd_workers"], cache,
                 ram_mode=cfg["temp_mode"] == "ram" and ram_mode_supported())
     s.mode = mode
+    from .library import all_dats, shared_index
+    s.all_index = lambda: shared_index(all_dats(cfg))
+    s.folder_system = {f: (st or {}).get("system") or "" for f, st in (cfg["systems"] or {}).items()}
     s.packages_off = {f for f, st in (cfg["systems"] or {}).items() if (st or {}).get("read_packages") is False}
     try:
         s.switch_keys = packages.switch_keys(cfg)

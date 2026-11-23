@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -132,6 +132,9 @@ class Job:
     func_label: str = ""                    # e.g. "Trimming", "Converting to RVZ"
     log_total: int = 0                      # lines ever logged (the log keeps only the newest ones)
     follows: "Job | None" = None            # a row that only mirrors another job (e.g. the update it applies)
+    preset: str = ""                        # the task it was planned for, with the options that shaped it, so a
+    planned: dict = field(default_factory=dict)     # queued job can be planned again when those change
+    overrides: dict = field(default_factory=dict)   # options fixed by whoever queued it (ROM Storage Advisor)
 
     @property
     def step_name(self) -> str:
@@ -425,13 +428,115 @@ def CIFS_SAFE(name: str) -> str:   # noqa: N802 - folder names that also work on
 
 def plan(preset: str, files: list[Path], opts: Options) -> list[Job]:
     if preset == SWITCH_FS:
-        return plan_switch_fs(files, opts)
-    jobs = []
-    for src in files:
-        j = _plan_one(preset, src, opts)
-        if j:
-            jobs.append(j)
+        jobs = plan_switch_fs(files, opts)
+    else:
+        jobs = []
+        for src in files:
+            try:
+                j = _plan_one(preset, src, opts)
+            except Exception as exc:  # noqa: BLE001 - one unreadable file mustn't keep the others out of the queue
+                j = _skipped(src.name, src, f"couldn't be read: {exc}")
+            if j:
+                jobs.append(j)
+    used = used_options(preset, opts)
+    for j in jobs:
+        j.preset, j.planned = preset, dict(used)
     return jobs
+
+
+def used_options(preset: str, opts: Options) -> dict:
+    """The options that shape this task's jobs (a changed codec doesn't matter to a PS4 extraction)."""
+    names: list[str] = []
+    if preset not in (FIX_CHD, VERIFY, INFO, M3U):
+        names.append("output_dir")
+    if preset in (TO_CHD, RECOMPRESS):
+        names += ["overwrite", "cd_codec", "dvd_codec", "custom_codec", "hunk_size", "processors", "verify_after",
+                  "trash_sources"]
+    if preset == TO_CHD:
+        names.append("iso_as")
+    if preset == FROM_CHD:
+        names += ["overwrite", "split_bin"]
+    if preset in (TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ, TRIM, UNTRIM):
+        names.append("trash_sources")
+    if preset in (TO_NSZ, FROM_NSZ, SWITCH_FS):
+        names.append("switch_keys")
+    if preset == SWITCH_FS:
+        names.append("title_keys")
+    out = {n: getattr(opts, n) for n in names}
+    if out.get("output_dir"):
+        out["output_dir"] = str(Path(out["output_dir"]).expanduser())     # "/x/" and "/x" are the same folder
+    return out
+
+
+def outdated(jobs: list[Job], opts: Options) -> list[Job]:
+    """Queued jobs that were planned with other options than the current ones."""
+    return [j for j in jobs if j.status == "Queued" and j.preset
+            and used_options(j.preset, replace(opts, **j.overrides)) != j.planned]
+
+
+def replan(jobs: list[Job], opts: Options) -> tuple[list[tuple[Job, Job | None]], list[Job]]:
+    """Plan these jobs again with the current options: [(job, its new plan or None)], and rows that now come with one
+    of them (the update a Switch extraction applies). The jobs themselves aren't changed yet."""
+    groups: dict[tuple, list[Job]] = {}
+    for j in jobs:
+        groups.setdefault((j.preset, tuple(sorted(j.overrides.items()))), []).append(j)
+    res: list[tuple[Job, Job | None]] = []
+    extra: list[Job] = []
+    for (preset, over), old in groups.items():
+        fresh = plan(preset, list(dict.fromkeys(j.source for j in old)), replace(opts, **dict(over)))
+        pairs = pair(old, fresh)
+        match = {f.id: j for j, f in pairs if f is not None}
+        for f in fresh:
+            if f.follows and f.follows.id in match and f.id not in match:
+                f.follows = match[f.follows.id]
+                extra.append(f)
+        res += pairs
+    return res, extra
+
+
+def reset(job: Job) -> None:
+    """Put a finished job back in the queue as if it had just been added."""
+    job.status, job.message, job.log, job.log_total = "Queued", "", [], 0
+    job.progress = job.step_progress = job.started = job.finished = job.step_started = 0.0
+    job.step_index, job.step_label, job.phase, job.weight = 0, "", "", 0
+
+
+def pair(old: list[Job], fresh: list[Job]) -> list[tuple[Job, Job | None]]:
+    """Match queued jobs with newly planned ones for the same task and file."""
+    by_src: dict[tuple, list[Job]] = {}
+    for f in fresh:
+        by_src.setdefault((f.preset, f.source), []).append(f)
+    res = []
+    for j in old:
+        same = by_src.get((j.preset, j.source), [])
+        hit = next((f for f in same if f.title == j.title), None)     # one file can hold several jobs (game + DLC)
+        if hit is None and len(same) == 1 and j.preset != SWITCH_FS:    # e.g. createcd became createdvd
+            hit = same[0]
+        res.append((j, hit))
+    return res
+
+
+def merge_plan(queue: list[Job], fresh: list[Job]) -> tuple[list[Job], list[Job]]:
+    """Files added again while still waiting for the same task: their jobs take the new plan instead of being queued
+    twice. Returns (jobs that are new to the queue, queued jobs that were updated)."""
+    waiting = [j for j in queue if j.status == "Queued" and j.preset]
+    match = {f.id: j for f, j in pair(fresh, waiting) if j is not None}
+    for f in fresh:
+        if f.id in match:
+            take_plan(match[f.id], f)
+        elif f.follows and f.follows.id in match:
+            f.follows = match[f.follows.id]
+    return [f for f in fresh if f.id not in match], list(match.values())
+
+
+def take_plan(job: Job, fresh: Job | None) -> None:
+    """Give a queued job its new plan (it keeps its id, its place in the queue and the row it mirrors)."""
+    if fresh is None:
+        job.status, job.message = "Skipped", "it can't be done with the current options - add the file again"
+        return
+    for n in ("title", "steps", "outputs", "sources", "func", "func_label", "detail", "trash", "status", "message",
+              "planned", "log", "log_total"):
+        setattr(job, n, getattr(fresh, n))
 
 
 def _plan_one(preset: str, src: Path, opts: Options) -> Job | None:

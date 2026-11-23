@@ -41,6 +41,14 @@ def media_text(r: sc.Result) -> str:
     return kind.upper()
 
 
+def system_text(r: sc.Result) -> str:
+    """The folder's system, and the one the data belongs to when that's another: "gb → snes"."""
+    here = "?" if r.item.system == "(other)" else r.item.system
+    if r.misplaced and r.found and r.found != here:
+        return f"{here} → {r.found}"
+    return here
+
+
 class ResultsModel(QAbstractTableModel):
     def __init__(self):
         super().__init__()
@@ -102,7 +110,7 @@ class ResultsModel(QAbstractTableModel):
             if c == C_TAG:
                 return (r.tag + (" ✎" if r.tag_source == "marked by you" else "")) if r.tag else ""
             if c == C_SYSTEM:
-                return "?" if r.item.system == "(other)" else r.item.system
+                return system_text(r)
             if c == C_FILE:
                 return r.item.label
             if c == C_GAME:
@@ -136,6 +144,11 @@ class ResultsModel(QAbstractTableModel):
             if c == C_TAG and r.tag:
                 return f"{r.tag}: {tg.TAGS.get(r.tag, 'custom tag')}\n{r.tag_source}" + (
                     f"\nWithout the tag this would be: {r.orig_status}" if r.orig_status else "")
+            if c == C_SYSTEM and r.found:
+                by = {"hash": "its data matches that system's DAT", "header": "its own header",
+                      "package": "its own package data"}.get(r.found_by, "")
+                return f"{sc.system_name(r.found)} (known from: {by})" + (
+                    f"\nIt lies in a {r.item.system} folder." if r.misplaced else "")
             if c == C_FILE:
                 return str(r.item.path) + (f"\ninside the archive: {r.item.member}" if r.item.member else "")
             if c == C_NOTE:
@@ -407,7 +420,7 @@ class VerifierWindow(QMainWindow):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setStretchLastSection(True)
-        for c, w in ((C_STATUS, 110), (C_TAG, 100), (C_SYSTEM, 60), (C_FILE, 340), (C_GAME, 300), (C_SIZE, 80), (C_MEDIA, 150),
+        for c, w in ((C_STATUS, 110), (C_TAG, 100), (C_SYSTEM, 90), (C_FILE, 340), (C_GAME, 300), (C_SIZE, 80), (C_MEDIA, 150),
                      (C_CRC, 80), (C_SHA1, 120)):
             self.table.setColumnWidth(c, w)
         self.table.selectionModel().currentRowChanged.connect(self._show_detail)
@@ -520,6 +533,8 @@ class VerifierWindow(QMainWindow):
             counts[r.status] = counts.get(r.status, 0) + 1
         for s, b in self.chips.items():
             b.setText(f"{s}: {counts[s]}")
+            # only what there is (and what was switched off): all of them need a very wide window
+            b.setVisible(bool(counts[s]) or not b.isChecked() or s == sc.VERIFIED)
         wrong = [r for r in self.model.rows if r.media_wrong]
         self.media_chip.setText(f"Wrong CHD type: {len(wrong)}")
         running = bool(self.worker and self.worker.isRunning())
@@ -579,7 +594,7 @@ class VerifierWindow(QMainWindow):
             else:   # re-check of selected rows: their systems may be detected ones or the "other" group
                 todo = items
                 keys = sorted({it.system for it in todo})
-                _t, indexes = library.collect(cfg, root, [k for k in keys if k == library.OTHER], indexes_cache)
+                indexes = {library.OTHER: library.shared_index(library.all_dats(cfg))} if library.OTHER in keys else {}
                 for k in keys:
                     if k != library.OTHER:
                         indexes[k] = indexes_cache.get(cfg.system(k)["dats"]) if cfg.system(k)["dats"] else \
@@ -732,6 +747,72 @@ class VerifierWindow(QMainWindow):
                    f"Next run uses {'RAM' if self.cfg['temp_mode'] == 'ram' else 'SSD'} mode.")
         self.current.setText(msg)
         QApplication.alert(self)
+        if not cancelled and self.scan_mode in (sc.QUICK, sc.FULL):
+            QTimer.singleShot(0, self._offer_found_dats)
+
+    def _offer_found_dats(self):
+        """ROMs recognised by their header whose system has no DAT at all yet (in any folder): offer to get it and
+        check just those again."""
+        from .. import library
+        from ..datmanager import dat_filename
+        from ..systems import BY_ID
+        have = {Path(d).name for d in library.all_dats(self.cfg)}
+        declined = set(self.cfg["window_state"].get("dat_prompt_declined", []))
+        rows: dict[str, list] = {}
+        for r in self.model.rows:
+            if r.found_by == "header" and r.status in (sc.UNKNOWN, sc.BAD, sc.NODAT, sc.MODIFIED) and r.found in BY_ID:
+                d = BY_ID[r.found]
+                if d.url and dat_filename(d) not in have and f"found:{r.found}" not in declined \
+                        and (r.misplaced or not (self.cfg["systems"].get(r.item.system) or {}).get("dats")):
+                    rows.setdefault(r.found, []).append(r)
+        if not rows or (self.worker and self.worker.isRunning()):
+            return
+        box = QMessageBox(QMessageBox.Icon.Question, "DATs for the systems found",
+                          f"ROMs of {len(rows)} system(s) were recognised by their own header, but there is no DAT to "
+                          f"verify them with yet:",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        box.setInformativeText("\n".join(f"• {BY_ID[k].name}: {len(v)} ROM(s)" for k, v in rows.items()) +
+                               "\n\nDownload them and check those ROMs again?")
+        box.button(QMessageBox.StandardButton.Yes).setText("Download and check")
+        box.button(QMessageBox.StandardButton.No).setText("Not now")
+        dont = QCheckBox("Don't ask again for these systems")
+        box.setCheckBox(dont)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            if dont.isChecked():
+                self.cfg["window_state"]["dat_prompt_declined"] = sorted(declined | {f"found:{k}" for k in rows})
+                self.cfg.save()
+            return
+        from ..datmanager import download
+        self.act_scan.setEnabled(False)
+        self.act_full.setEnabled(False)
+
+        def job(w):
+            errs = {}
+            for i, k in enumerate(rows):
+                w.progress.emit(i, len(rows), f"Downloading {BY_ID[k].name}…", 0)
+                try:
+                    download(BY_ID[k])
+                except Exception as exc:  # noqa: BLE001
+                    errs[k] = str(exc)
+            return errs
+
+        def finished(errs):
+            self.act_scan.setEnabled(True)
+            self.act_full.setEnabled(True)
+            if errs:
+                QMessageBox.warning(self, "Some DAT downloads failed",
+                                    "\n".join(f"{BY_ID[k].name}: {e}" for k, e in errs.items()))
+            again = [r.item for k, v in rows.items() if k not in errs for r in v]
+            if again:
+                self.start_scan(again)
+
+        w = Worker(job, parent=self)
+        w.progress.connect(lambda d, t, msg, _f: self.statusBar().showMessage(msg))
+        w.done.connect(finished)
+        w.failed.connect(lambda e: (self.act_scan.setEnabled(True), self.act_full.setEnabled(True),
+                                    QMessageBox.critical(self, "Download DATs", e)))
+        self._dat_worker = w
+        w.start()
 
     def _on_failed(self, msg: str):
         self._set_running(False)
@@ -758,6 +839,19 @@ class VerifierWindow(QMainWindow):
                        f"{e(r.orig_status or '')})</small></p>")
         if r.game:
             out.append(f"<p><b>DAT game:</b> {e(r.game)} <small>({e(r.dat)})</small></p>")
+        if r.found or r.ident is not None:
+            said = []
+            if r.found:
+                said.append(f"{e(sc.system_name(r.found))} <small>(from "
+                            f"{e({'hash': 'the DAT its data matches', 'header': 'its own header'}.get(r.found_by, 'its own data'))})"
+                            f"</small>")
+            if r.ident is not None:
+                said.append(f"<small>{e(r.ident.what)}" + (f", titled “{e(r.ident.title)}”" if r.ident.title else "") +
+                            "</small>")
+            out.append("<p><b>What the file itself says:</b> " + "; ".join(said) + "</p>")
+        if r.misplaced:
+            out.append(f"<p style='color:{STATUS_COLORS[sc.MISPLACED]}'>Lies in another system's folder. ROM Renamer → "
+                       f"<i>Sort into system folders</i> moves it.</p>")
         if r.chd_info and "disc" in r.chd_info:
             d = r.chd_info["disc"]
             out.append(f"<p><b>Disc image:</b> {e(str(d.get('format') or d.get('container', '')).upper())}"
@@ -804,7 +898,8 @@ class VerifierWindow(QMainWindow):
                 h = er.entry.headerless if er.headerless and er.entry.headerless else er.entry.full
                 match = (f"<span style='color:{STATUS_COLORS[sc.VERIFIED]}'>✔ {e(er.rom)}</span>"
                          if er.rom else f"<span style='color:{STATUS_COLORS[sc.BAD]}'>✘ no match</span>")
-                hdr = f"<br><small>header {er.entry.header_len} B skipped</small>" if er.headerless else ""
+                hdr = (f"<br><small>compared {e(er.entry.norm or f'without its {er.entry.header_len}-byte header')}"
+                       f"</small>") if er.headerless else ""
                 out.append(f"<tr><td>{e(er.entry.name)}{hdr}</td><td>{h.size:,}</td><td><tt>{h.crc}</tt></td>"
                            f"<td><tt>{h.md5}</tt></td><td><tt>{h.sha1}</tt></td><td>{match}</td></tr>")
             out.append("</table>")

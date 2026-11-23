@@ -92,6 +92,13 @@ def _ps4_version(s: str) -> int:
 
 
 def read_ps4(path: Path) -> PackageInfo:
+    try:
+        return _read_ps4(path)
+    except (struct.error, IndexError, UnicodeDecodeError) as exc:
+        raise PackageError("damaged or incomplete package (its header is cut off)") from exc
+
+
+def _read_ps4(path: Path) -> PackageInfo:
     with open(path, "rb") as f:
         h = f.read(0x40)
         if h[:4] != b"\x7fCNT":

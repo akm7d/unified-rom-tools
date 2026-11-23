@@ -36,8 +36,9 @@ class Entry:
     """One hashed piece of data: a file, an archive member, or a CHD track."""
     name: str
     full: HashSet
-    headerless: HashSet | None = None
+    headerless: HashSet | None = None    # the same data the way DATs list it (no copier header, .z64 byte order …)
     header_len: int = 0
+    norm: str = ""                       # what was done for that, in words
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -45,7 +46,7 @@ class Entry:
     @staticmethod
     def from_dict(d: dict) -> "Entry":
         return Entry(d["name"], HashSet(**d["full"]),
-                     HashSet(**d["headerless"]) if d.get("headerless") else None, d.get("header_len", 0))
+                     HashSet(**d["headerless"]) if d.get("headerless") else None, d.get("header_len", 0), d.get("norm", ""))
 
     def variants(self):
         yield self.full
@@ -53,13 +54,11 @@ class Entry:
             yield self.headerless
 
 
-HEADER_EXTS = {".nes", ".fds", ".lnx", ".lyx", ".a78", ".sfc", ".smc", ".fig", ".swc", ".unf", ".unif"}
+HASH_VERSION = 2       # 2: headers and byte order are recognised by content, not by extension; nested zips are opened
 
 
 def detect_header(name: str, first: bytes, total: int | None) -> int:
-    ext = Path(name).suffix.lower()
-    if ext not in HEADER_EXTS:
-        return 0
+    """Length of the copier / emulator header in front of the ROM, going by the data itself."""
     if first[:4] == b"NES\x1a":
         return 16
     if first[:4] == b"FDS\x1a":
@@ -68,9 +67,25 @@ def detect_header(name: str, first: bytes, total: int | None) -> int:
         return 64
     if first[1:10] == b"ATARI7800":
         return 128
-    if ext in (".sfc", ".smc", ".fig", ".swc") and total is not None and total % 1024 == 512:
-        return 512
+    if total is not None and total % 1024 == 512 and 32768 < total <= 16 << 20:
+        return 512              # a copier header (SNES, PC Engine, Mega Drive …): no cartridge has such a size
     return 0
+
+
+def _normaliser(name: str, first: bytes, total: int | None):
+    """(what it does in words, header bytes to drop, block size, function for each block) or None."""
+    from .identify import n64_order, n64_swap, smd_decode
+    if total is not None and total % 16384 == 512 and first[8:10] == b"\xaa\xbb" and \
+            smd_decode(first[512:512 + 16384])[0x100:0x110].lstrip().startswith(b"SEGA"):
+        return "decoded from the .smd copier format", 512, 16384, \
+            lambda b: b"".join(smd_decode(b[i:i + 16384]) for i in range(0, len(b), 16384))
+    hlen = detect_header(name, first, total)
+    if hlen:
+        return f"without its {hlen}-byte header", hlen, 1, None
+    order = n64_order(first)
+    if order in ("v64", "n64"):
+        return f"in .z64 byte order (the file is .{order})", 0, 4, lambda b: n64_swap(b, order)
+    return None
 
 
 class _Hasher:
@@ -101,19 +116,28 @@ def hash_stream(fh: BinaryIO, name: str, total: int | None = None,
     if prefix_zeros:
         full.update(bytes(prefix_zeros))
     first = fh.read(CHUNK)
-    hlen = detect_header(name, first, total)
-    nohdr = _Hasher() if hlen else None
+    norm = _normaliser(name, first, total)
+    what, drop, block, func = norm or ("", 0, 1, None)
+    hlen = drop
+    nohdr = _Hasher() if norm else None
+    rest = b""                             # bytes of an unfinished block
     buf = first
     while buf:
         if cancel is not None and cancel.is_set():
             raise Cancelled()
         full.update(buf)
         if nohdr is not None:
-            nohdr.update(buf[hlen:] if full.size == len(buf) + prefix_zeros else buf)
+            part = rest + buf[drop:]
+            drop = 0
+            cut = len(part) - len(part) % block
+            rest = part[cut:]
+            nohdr.update(func(part[:cut]) if func and cut else part[:cut])
         if progress:
             progress(len(buf))
         buf = fh.read(CHUNK)
-    return Entry(name, full.result(), nohdr.result() if nohdr else None, hlen)
+    if nohdr is not None and rest:
+        nohdr.update(rest)
+    return Entry(name, full.result(), nohdr.result() if nohdr else None, hlen, what)
 
 
 def hash_file(path: Path, cancel=None, progress=None, name: str | None = None, prefix_zeros: int = 0) -> Entry:
@@ -130,13 +154,29 @@ from .compat import find_tool  # noqa: E402
 SEVENZIP = find_tool("7z", "7zz", "7za")
 
 
-def hash_zip(path: Path, cancel=None, progress=None) -> list[Entry]:
+NESTED_MAX = 512 << 20      # an archive inside an archive is read into memory, up to this size
+
+
+def hash_zip(path, cancel=None, progress=None, depth: int = 0) -> list[Entry]:
+    """Every file in a zip; a zip inside it is opened too (downloads are often packed twice)."""
     out = []
     with zipfile.ZipFile(path) as zf:
         for info in zf.infolist():
             if info.is_dir():
                 continue
             with zf.open(info) as fh:
+                inner = depth < 2 and info.file_size <= NESTED_MAX and fh.peek(4)[:4] == b"PK\x03\x04"
+                if inner:
+                    import io
+                    data = io.BytesIO(fh.read())
+                    try:
+                        out += [Entry(f"{info.filename}/{e.name}", e.full, e.headerless, e.header_len, e.norm)
+                                for e in hash_zip(data, cancel, progress, depth + 1)]
+                        continue
+                    except (zipfile.BadZipFile, NotImplementedError):
+                        data.seek(0)
+                        out.append(hash_stream(data, info.filename, info.file_size, cancel, progress))
+                        continue
                 out.append(hash_stream(fh, info.filename, info.file_size, cancel, progress))
     return out
 
@@ -177,7 +217,9 @@ def hash_7z(path: Path, cancel=None, progress=None) -> list[Entry]:
 
 
 def hash_archive(path: Path, cancel=None, progress=None) -> list[Entry]:
-    if path.suffix.lower() == ".zip":
+    with open(path, "rb") as fh:
+        is_zip = fh.read(4)[:2] == b"PK" or path.suffix.lower() == ".zip"
+    if is_zip:
         try:
             return hash_zip(path, cancel, progress)
         except (zipfile.BadZipFile, NotImplementedError):

@@ -43,10 +43,10 @@ class Op:
 # ---------------------------------------------------------------- planning
 
 def plan_from_results(results, use_dat_ext: bool = False) -> list[Op]:
-    from .scanner import MISNAMED
+    from .scanner import MISNAMED, MISPLACED
     ops = []
     for r in results:
-        if r.status != MISNAMED or not r.game or r.item.kind == "folder" or getattr(r.item, "member", ""):
+        if r.status not in (MISNAMED, MISPLACED) or r.found_by == "package" or r.game == r.item.stem or not r.game or r.item.kind == "folder" or getattr(r.item, "member", ""):
             continue  # a game inside a multi-game archive: renaming the archive after it would be wrong
         ext = r.item.path.suffix
         if use_dat_ext and r.item.kind == "file" and r.entries and r.entries[0].rom and not r.entries[0].headerless:
@@ -58,6 +58,171 @@ def plan_from_results(results, use_dat_ext: bool = False) -> list[Op]:
         dst = r.item.path.with_name(r.game + ext)
         ops.append(Op(r.item.path, dst, f"DAT match: {r.dat}", system=r.item.system))
     return ops
+
+
+# ---------------------------------------------------------------- sorting into system folders
+
+# saves, patches and subchannel data that belong to a ROM: they move (and are named) with it
+SIDECARS = (".sav", ".srm", ".state", ".sbi", ".cht", ".dsv", ".eep", ".fla", ".sra", ".mpk", ".rtc")
+_DISC_PART = re.compile(r"\s*\((?:Disc|Disk|CD|Side|Track)\b[^)]*\)", re.I)
+
+
+def system_folders(root: Path, cfg, results=()) -> dict[str, Path]:
+    """Where each system's ROMs live in this library: {catalogue id: folder}. A folder directly in the library wins
+    over one further down (which is taken from the scanned files)."""
+    from .datmanager import library_folders
+    from .systems import guess_system
+    out: dict[str, Path] = {}
+    exact: set[str] = set()
+    for name in library_folders(root):
+        st = (cfg["systems"] or {}).get(name) or {}
+        g = guess_system(name)
+        sid = st.get("system") or (g.id if g else "")
+        if sid and (sid not in out or (name.lower() == sid and sid not in exact)):
+            out[sid] = root / name
+            if name.lower() == sid:
+                exact.add(sid)
+    deeper: dict[str, dict[Path, int]] = {}
+    for r in results:
+        if r.misplaced or not r.item.expected or r.item.expected in out:
+            continue
+        for p in r.item.path.parents:
+            if p == root or root not in p.parents:
+                break
+            g = guess_system(p.name)
+            if g and g.id == r.item.expected:
+                d = deeper.setdefault(g.id, {})
+                d[p] = d.get(p, 0) + 1
+                break
+    for sid, found in deeper.items():
+        out[sid] = max(found, key=found.get)
+    return out
+
+
+def _right_ext(r) -> str:
+    """The extension this file should have, when its own isn't one its system uses."""
+    from . import identify
+    from .scanner import STRONG_EXTS
+    path, ext = r.item.path, r.item.path.suffix
+    if r.item.kind in ("archive", "chd", "disc", "package"):
+        hit = identify.identify(path)
+        ok = {"archive": (".zip", ".7z", ".rar"), "chd": (".chd",), "package": (".nsp", ".nsz", ".xci", ".xcz", ".pkg"),
+              "disc": (".rvz", ".wia", ".gcz", ".ciso", ".wbfs")}[r.item.kind]
+        return hit.ext if hit and hit.ext and ext.lower() not in ok else ext
+    if r.item.kind != "file":
+        return ext
+    known = identify.SYSTEM_EXTS.get(r.found)
+    if known is None:                            # disc images
+        if ext.lower() in STRONG_EXTS - {e for x in identify.SYSTEM_EXTS.values() for e in x} or \
+                ext.lower() in (".bin", ".img"):
+            return ext
+        return r.ident.ext if r.ident is not None and r.ident.ext else ext
+    if ext.lower() in known:
+        return ext
+    rom = Path(r.entries[0].rom).suffix if r.entries and r.entries[0].rom and not r.entries[0].headerless else ""
+    for e in (rom, r.ident.ext if r.ident is not None else ""):
+        if e.lower() in known:
+            return e
+    return known[0]
+
+
+def plan_sorting(results, root: Path, cfg, by_header: bool = True, fix_ext: bool = True) -> tuple[list[Op], list[str]]:
+    """Move ROMs that are loose, or in another system's folder, into their own system's folder (made if there is none).
+    ``by_header``: also files that no DAT knows but whose own header says the system (hacks, translations, no DAT)."""
+    from .library import root_system
+    notes: list[str] = []
+    if root_system(cfg, root):
+        n = sum(r.misplaced for r in results)
+        return [], [f"{n} ROM(s) here belong to other systems: choose the library folder above to sort them"] if n else []
+    homes = system_folders(root, cfg, results)
+    groups: dict[Path, list] = {}
+    for r in results:
+        groups.setdefault(r.item.path, []).append(r)
+    # what else is in each folder: one that holds several files of a single game is kept as that game's folder
+    games: dict[Path, set] = {}
+    count: dict[Path, int] = {}
+    for path, rs in groups.items():
+        count[path.parent] = count.get(path.parent, 0) + 1 + len(rs[0].item.parts)
+        games.setdefault(path.parent, set()).update(
+            (r.found, _DISC_PART.sub("", r.game or r.item.stem).lower()) for r in rs)
+    ops: list[Op] = []
+    mixed = folders = 0
+    for path, rs in groups.items():
+        r = rs[0]
+        if r.item.kind == "folder" or path.is_dir():
+            folders += bool(r.misplaced)
+            continue
+        systems = {x.found for x in rs}
+        if len(systems) > 1:
+            mixed += any(x.misplaced or not x.item.expected for x in rs)
+            continue
+        if not r.found or r.found_by == "header" and not by_header:
+            continue
+        ext = _right_ext(r) if fix_ext else path.suffix
+        name = path.stem + ext if path.suffix and len(path.suffix) <= 6 and " " not in path.suffix else path.name + (
+            ext if ext != path.suffix else "")
+        home = homes.get(r.found) or root / r.found
+        if home in path.parents or not any(x.misplaced for x in rs) and r.item.expected:     # it's in the right place
+            if name != path.name and not r.item.parts:
+                ops.append(Op(path, path.with_name(name), f"Extension: {r.found} ROMs aren't called "
+                                                          f"{path.suffix or 'without one'}", system=r.found))
+            continue
+        dest, parent = home, path.parent
+        from .systems import guess_system
+        if parent != root and count[parent] > 1 and len(games[parent]) == 1 and not guess_system(parent.name):
+            dest = home / parent.name
+        how = {"hash": f"DAT match: {r.dat}", "package": "its own package data"}.get(
+            r.found_by, "its own header" + (f" (“{r.ident.title}”)" if r.ident is not None and r.ident.title else ""))
+        ops.append(Op(path, dest / name, f"Sort: {how}", system=r.found, move=True))
+        for part in r.item.parts:               # a .cue / .gdi keeps its tracks, in the same places around it
+            try:
+                rel = part.relative_to(path.parent)
+            except ValueError:
+                ops.pop()                       # tracks outside the sheet's own folder: leave the set alone
+                ops = [o for o in ops if o.src not in r.item.parts]
+                break
+            ops.append(Op(part, dest / rel, f"Sort: goes with {path.name}", system=r.found, move=True))
+    if mixed:
+        notes.append(f"{mixed} archive(s) hold games of several systems: not sorted")
+    if folders:
+        notes.append(f"{folders} extracted game folder(s) are in another system's folder: not moved")
+    return ops, notes
+
+
+def merge(ops: list[Op], sorting: list[Op]) -> list[Op]:
+    """One change per file. Names come from the first op that has one (DAT, package, rules), the folder from sorting;
+    a package's own game folder is kept inside the system folder."""
+    out: list[Op] = []
+    by_src: dict[Path, Op] = {}
+    for op in ops:
+        if op.src not in by_src:
+            by_src[op.src] = op
+            out.append(op)
+    for so in sorting:
+        op = by_src.get(so.src)
+        if op is None:
+            by_src[so.src] = so
+            out.append(so)
+            continue
+        dest = so.dst.parent
+        if op.move and op.dst.parent != op.src.parent and op.dst.parent.name != dest.name:
+            dest = dest / op.dst.parent.name
+        ext = so.dst.suffix if so.dst.suffix != so.src.suffix else op.dst.suffix
+        stem = op.dst.name[:-len(op.dst.suffix)] if op.dst.suffix else op.dst.name
+        op.dst, op.system = dest / (stem + ext), so.system
+        op.move = op.move or so.move
+        op.reason += " · sort" if so.reason.startswith("Sort: DAT match") and op.reason.startswith("DAT") else \
+            " · " + so.reason
+    for op in list(out):                        # saves and the like
+        if op.kind != FILE or not op.move or op.dst.parent == op.src.parent:
+            continue
+        for ext in SIDECARS:
+            side = op.src.with_suffix(ext)
+            if side not in by_src and side != op.src and side.is_file():
+                by_src[side] = Op(side, op.dst.with_suffix(ext), f"Sort: goes with {op.src.name}", system=op.system,
+                                  move=True)
+                out.append(by_src[side])
+    return out
 
 
 @dataclass
@@ -162,34 +327,37 @@ def add_playlist_ops(ops: list[Op]) -> list[Op]:
                 lines = _m3u_lines(m3u)
             except OSError:
                 continue
-            changed, refs = False, []
+            refs = [m3u.parent / ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+            if not any(r in renames for r in refs):
+                continue
+            # all discs go to one other folder: the playlist goes with them
+            homes = {renames.get(r, r).parent for r in refs}
+            home = homes.pop() if len(homes) == 1 else m3u.parent
             new_lines = []
             for line in lines:
                 ref = line.strip()
                 if ref and not ref.startswith("#"):
-                    target = (m3u.parent / ref)
-                    refs.append(target)
-                    if target in renames:
-                        rel = os.path.relpath(renames[target], m3u.parent)
-                        new_lines.append(line.replace(ref, rel))
-                        changed = True
+                    target = m3u.parent / ref
+                    to = renames.get(target, target)
+                    if to != target or home != m3u.parent:
+                        new_lines.append(line.replace(ref, os.path.relpath(to, home)))
                         continue
                 new_lines.append(line)
-            if not changed:
-                continue
             text = "\n".join(new_lines) + "\n"
-            m3u_dst = m3u
+            m3u_dst = home / m3u.name
             renamed_discs = [renames[r] for r in refs if r in renames]
             if m3u in renames:  # already renamed by a rule: fold it into this single edit op
-                m3u_dst = renames[m3u]
+                m3u_dst = home / renames[m3u].name
                 out = [op for op in out if not (op.kind == FILE and op.src == m3u)]
-            elif renamed_discs and len(renamed_discs) == len(refs):
+            elif renamed_discs and len(renamed_discs) == len(refs) and any(d.name != r.name for d, r in
+                                                                           zip(renamed_discs, refs)):
                 base = re.sub(r"\s*\(Disc \d+[^)]*\)", "", renamed_discs[0].stem).strip()
-                cand = m3u.with_name(base + ".m3u")
+                cand = home / (base + ".m3u")
                 if cand != m3u and cand not in existing_dsts:
                     m3u_dst = cand
-            out.append(Op(m3u, m3u_dst, "update playlist" + (" + rename" if m3u_dst != m3u else ""),
-                          M3U_EDIT, text, system=""))
+            out.append(Op(m3u, m3u_dst, "update playlist" + (" + move" if home != m3u.parent else
+                                                             " + rename" if m3u_dst != m3u else ""),
+                          M3U_EDIT, text, system="", move=home != m3u.parent))
     return out
 
 
@@ -212,7 +380,9 @@ def validate(ops: list[Op]) -> list[Op]:
         elif not op.src.exists():
             op.problem = "source missing"
         else:
-            case_only = op.dst.name.lower() == op.src.name.lower()
+            # only the letter case changes: on Samba / Windows that "exists" already, it's the same file. In another
+            # folder it's somebody else's file, whatever its case.
+            case_only = op.dst.parent == op.src.parent and op.dst.name.lower() == op.src.name.lower()
             if op.dst.exists() and not case_only and op.dst != op.src and op.dst not in srcs:
                 op.problem = "target already exists"
             key = str(op.dst).lower()
@@ -312,13 +482,15 @@ class JournalEntry:
     new_text: str | None = None
     done: bool = False
     made_dir: str | None = None   # folder created for this move (removed again by undo if empty)
+    made_top: str | None = None   # the topmost folder that had to be created for it
     via: str | None = None        # temporary name while renames that depend on each other are done
 
 
 def _rename(src: Path, dst: Path) -> None:
-    if dst.exists() and dst.name.lower() != src.name.lower():
+    case_only = src.parent == dst.parent and src.name.lower() == dst.name.lower()
+    if dst.exists() and not (case_only and os.path.samefile(src, dst)):
         raise FileExistsError(f"{dst.name} already exists")
-    if src.name.lower() == dst.name.lower():  # case-only change: go via a temp name (CIFS is case-insensitive)
+    if case_only:  # case-only change: go via a temp name (CIFS is case-insensitive)
         tmp = src.with_name(f".romtools-{uuid.uuid4().hex[:8]}{src.suffix}")
         os.rename(src, tmp)
         os.rename(tmp, dst)
@@ -388,9 +560,7 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
             if e.kind == FILE:
                 if id(e) in skip:     # couldn't be moved aside (reported above): left as it was
                     continue
-                if not dst.parent.exists():
-                    dst.parent.mkdir(parents=True)
-                    e.made_dir = str(dst.parent)
+                _make_parent(e, dst)
                 try:
                     _rename(Path(e.via) if e.via else src, dst)
                 except OSError:
@@ -405,12 +575,17 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
                 if not src.exists():
                     raise OSError("playlist vanished")
                 missing = [l.strip() for l in (e.new_text or "").splitlines()
-                           if l.strip() and not l.startswith("#") and not (src.parent / l.strip()).exists()]
+                           if l.strip() and not l.startswith("#") and not (dst.parent / l.strip()).exists()]
                 if missing:  # a disc rename failed: leave the playlist as it was
                     raise OSError(f"playlist not updated, missing {missing[0]}")
+                _make_parent(e, dst)
                 _write_text(src, e.new_text)
                 if dst != src:
-                    _rename(src, dst)
+                    try:
+                        _rename(src, dst)
+                    except OSError:
+                        _write_text(src, e.old_text or "")      # as it was
+                        raise
             e.done = True
         except OSError as exc:
             errors.append(f"{Path(e.src).name}: {exc}")
@@ -418,6 +593,16 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
         if progress:
             progress(i + 1, len(entries))
     return jpath, errors
+
+
+def _make_parent(e: JournalEntry, dst: Path) -> None:
+    if dst.parent.exists():
+        return
+    top = dst.parent
+    while not top.parent.exists():
+        top = top.parent
+    dst.parent.mkdir(parents=True)
+    e.made_dir, e.made_top = str(dst.parent), str(top)
 
 
 def list_journals() -> list[tuple[Path, dict]]:
@@ -460,8 +645,12 @@ def undo(jpath: Path, cache=None) -> list[str]:
             errors.append(f"{dst.name}: {exc}")
     for e in entries:                       # folders made for moves: remove them once they're empty again
         if e.made_dir:
+            d = Path(e.made_dir)
             try:
-                Path(e.made_dir).rmdir()
+                d.rmdir()
+                while e.made_top and d != Path(e.made_top):
+                    d = d.parent
+                    d.rmdir()
             except OSError:
                 pass
     data["undone"] = not errors

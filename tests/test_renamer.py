@@ -74,3 +74,23 @@ def test_chains_and_swaps_apply_and_undo(tmp_path):
     assert after == {"b.sfc": b"a", "c.sfc": b"b", "y.sfc": b"x", "x.sfc": b"y"}
     assert not rn.undo(jpath)
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def test_move_never_replaces_a_file_of_the_same_name(tmp_path):
+    """The exception for names that differ only in case is for one folder; in another folder it's another file."""
+    from romtools import renamer as rn
+    a, b = tmp_path / "a" / "Game.pkg", tmp_path / "b" / "Game.pkg"
+    for f, d in ((a, b"new"), (b, b"precious")):
+        f.parent.mkdir()
+        f.write_bytes(d)
+    op = rn.Op(a, b, move=True)
+    assert rn.validate([op])[0].problem == "target already exists"
+    import pytest
+    with pytest.raises(FileExistsError):
+        rn._rename(a, b)
+    with pytest.raises(FileExistsError):
+        rn._rename(a, tmp_path / "b" / "Game.pkg")
+    assert a.read_bytes() == b"new" and b.read_bytes() == b"precious"
+    c = tmp_path / "a" / "game.PKG"
+    rn._rename(a, c)                    # only the case: still works
+    assert c.read_bytes() == b"new"

@@ -37,7 +37,7 @@ _NAME_RULES = [
     ("Undub", r"undub"),
     # not a bare "hack": ".hack//Infection" etc. are real games
     ("Hack", r"\(hack\)|\[h\d*[\] ]|\bhack(ed)?[ _-]+(v\d|by\b)|\brom ?hack|\[hack"),
-    ("Improvement", r"\[f\d*\b|\b(bug ?fix|restoration|improvement|enhanced|qol)\b"),
+    ("Improvement", r"\[f\d*\b|\b(bug ?fix|restoration|improvement|(?<!sgb )(?<!cgb )(?<!gbc )(?<!dsi )(?<!cube )enhanced|qol)\b"),
     ("Trainer", r"\[t\d*\]|\btrainer\b|\(cheat"),
     ("Homebrew", r"\bhomebrew\b|\(pd\)|\(aftermarket\)"),
     ("Prototype", r"\((proto|prototype|beta)\b"),

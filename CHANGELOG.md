@@ -3,6 +3,41 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.13.0
+- **ROM Verifier identifies ROMs by their content**, not by the folder, name or extension:
+  - A file its folder's DAT doesn't know is looked up in all your DATs. New status **Wrong folder** for good dumps that
+    lie in another system's folder ("gb → snes" in the System column).
+  - Recognises ROMs, disc images, archives and packages by their own signature (new `identify.py`, 25+ systems). What no
+    DAT knows still gets its system and internal title; missing DATs for systems found that way are offered.
+  - Folders are searched at any depth, files without or with a wrong extension are found, zips inside zips are opened,
+    a zip called .sfc is read as a zip, and disc tracks without their .cue are checked as one disc.
+  - Copier / iNES headers, .v64 / .n64 byte order and .smd dumps are recognised by content. Trimmed dumps and dumps with
+    extra bytes are named as such instead of "Bad dump".
+  - A matching *name* alone no longer makes a file a "Bad dump" of another system's game of that name.
+  - Folder names people use are understood: "Super Nintendo", "GBA Games", "Nintendo - Game Boy" …
+- **ROM Renamer: Sort into system folders** (off by default): moves loose and misplaced ROMs into their system's folder,
+  with tracks, playlists and saves, and fixes extensions the system doesn't use. Preview, Apply and Undo as usual.
+- **Fixed: a move could replace a file of the same name** in the target folder (Renamer, "One folder per game": the
+  check for names that only differ in case ignored the folder). It's now refused in the preview and when applying.
+- "(SGB Enhanced)" and similar in official names no longer count as a hack tag.
+- The search for Switch keys looks two levels deep, once: without saved keys every start and scan walked the whole
+  library, which froze the windows for minutes on a network share.
+- All DATs are parsed only once, and folders are listed with fewer network requests.
+
+## 1.12.1
+- ROM Optimizer: changing the **output folder** (or any other option) after files were added was silently ignored:
+  queued jobs kept the options from the moment they were added. *Start queue* now notices, shows both folders and
+  asks whether to use the current options or keep them as added.
+- Adding a file that is already queued for the same task updates its job to the current options (it was silently
+  dropped, also when it was queued for a *different* task).
+- "Into this folder:" without a folder chosen now asks for one instead of writing next to the source.
+- The job queue's **Output** column shows the full path, not just the name (shortened in the middle when needed).
+- **Retry failed** works for every task. It only retried chdman jobs: PS4, Switch, RVZ, NSZ, trim, CHD-type and
+  playlist jobs were left alone. Jobs are looked at again with the current options (so a missing key or an
+  "output exists, tick Overwrite" can be put right and retried), and their old log, timing and progress are cleared.
+- One unreadable or cut-off file no longer keeps all the others from being added: it gets its own *Skipped* row with
+  the reason.
+
 ## 1.12.0
 - ROM Optimizer: **PS4 PKG → extracted game folder (BETA - use with care)**, with romtools' own reader for the
   encrypted PS4 package file system (`ps4pkg.py`): no other program to install and no key material. Both key schemes
