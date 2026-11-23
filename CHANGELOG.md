@@ -3,6 +3,17 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.15.0
+- ROM Optimizer, PS4 (beta): **updates are merged into the game's folder**, like for Switch games. A game's newest update
+  (picked with it, or lying next to it) is put on top file by file while extracting, shown as its own row, so there's
+  one finished CUSA… folder. An update on its own goes into the already extracted game in the output folder: it's
+  extracted and checked completely first, everything it replaces is kept in a folder next to the game, and the game is
+  left as it was if anything goes wrong. Can be turned off (then: CUSA…-patch folders as before). Updates that can't be
+  used (official, older) are listed with the reason.
+- **Split packages** (…_0.pkg, …_1.pkg) are read as one, and shown as one item in ROM Verifier; ROM Renamer keeps their
+  pieces' names.
+- Official Sony packages are named as such instead of "or a fake one with another passcode".
+
 ## 1.14.0
 - ROM Renamer: **Check file/folder**, like in ROM Verifier (also Ctrl+O, Ctrl+Shift+O and drag and drop): previews the
   ticked sections for picked files or folders only. Inside the library, sorting uses its system folders; elsewhere the

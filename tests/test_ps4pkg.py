@@ -68,9 +68,12 @@ def pfs(tree, sign_key=None):
     return bytes(head) + bytes(table) + bytes(data) + b"".join(tables)
 
 
-def build_pkg(path, new_crypt=False, passcode="0" * 32, evil=None):
+def build_pkg(path, new_crypt=False, passcode="0" * 32, evil=None, kind="gd", ver="01.00", only=None, extra=None):
     files = {"eboot.bin": b"\x4f\x15\x3d\x1d" + os.urandom(70000), "zero.bin": b"\0" * 200000, "empty.bin": b"",
              "text.txt": b"hello " * 30000}
+    if only is not None:                                   # an update: some of the game's files, and new ones
+        files = {n: os.urandom(90000) for n in only}
+    files.update(extra or {})
     sub = {"data.bin": os.urandom(BS * 14 + 123)}        # more than 12 blocks: needs a signature table
     tree, root = [None, None], []
     for name, body in files.items():
@@ -111,7 +114,7 @@ def build_pkg(path, new_crypt=False, passcode="0" * 32, evil=None):
         enc[s * 0x1000:(s + 1) * 0x1000] = e.update(outer[s * 0x1000:(s + 1) * 0x1000])
     keys, vals = b"", b""
     idx = b""
-    for name, v in (("APP_VER", "01.00"), ("CATEGORY", "gd"), ("CONTENT_ID", CID), ("TITLE", "Test"),
+    for name, v in (("APP_VER", ver), ("CATEGORY", kind), ("CONTENT_ID", CID), ("TITLE", "Test"),
                     ("TITLE_ID", "CUSA11111")):
         raw = v.encode() + b"\0"
         idx += struct.pack("<HHIII", len(keys), 0x204, len(raw), len(raw), len(vals))
@@ -267,3 +270,135 @@ def test_planner_explains_what_it_skips(tmp_path):
     jobs = {j.source.name: j for j in cv.plan(cv.PS4_EXTRACT, sorted(tmp_path.glob("*.pkg")), cv.Options())}
     assert jobs["ok.pkg"].status == "Queued" and "BETA" in jobs["ok.pkg"].detail and not jobs["ok.pkg"].trash
     assert jobs["new.pkg"].status == "Queued" and "official" in jobs["retail.pkg"].message
+
+
+# ---------------------------------------------------------------- a game and its update in one folder
+
+def game_and_update(d, **kw):
+    d.mkdir(parents=True, exist_ok=True)
+    game = build_pkg(d / "game.pkg")
+    upd = build_pkg(d / "upd.pkg", kind="gp", ver="01.05", only=["eboot.bin"], extra={"NEW.bin": b"new" * 999}, **kw)
+    return {**game[0], **game[1]}, {**upd[0], **upd[1]}
+
+
+def run_all(jobs):
+    runner = cv.Runner(jobs, 1, lambda j: None)
+    for j in jobs:
+        if j.status == "Queued" and j.follows is None:
+            runner._run_and_keep_log(j)
+
+
+def test_update_is_merged_into_the_game(tmp_path):
+    game, upd = game_and_update(tmp_path / "in")
+    before = tree_of(tmp_path / "in")
+    for pick in (["game.pkg"], ["upd.pkg"], ["game.pkg", "upd.pkg"]):       # either one finds the other next to it
+        out = tmp_path / "-".join(pick)
+        jobs = cv.plan(cv.PS4_EXTRACT, [tmp_path / "in" / n for n in pick], cv.Options(output_dir=str(out)))
+        assert [(j.status, bool(j.follows)) for j in jobs] == [("Queued", False), ("Queued", True)], [j.title for j in jobs]
+        run_all(jobs)
+        assert [j.status for j in jobs] == ["Done", "Done"], jobs[0].message
+        assert tree_of(out) == {f"CUSA11111/{k}": v for k, v in {**game, **upd}.items()}    # the update wins, file by file
+    assert tree_of(tmp_path / "in") == before
+
+
+def test_merging_can_be_turned_off(tmp_path):
+    game, upd = game_and_update(tmp_path / "in")
+    opts = cv.Options(output_dir=str(tmp_path / "out"), ps4_merge=False)
+    run_all(cv.plan(cv.PS4_EXTRACT, sorted((tmp_path / "in").glob("*.pkg")), opts))
+    assert tree_of(tmp_path / "out") == {**{f"CUSA11111/{k}": v for k, v in game.items()},
+                                         **{f"CUSA11111-patch/{k}": v for k, v in upd.items()}}
+
+
+def test_newest_usable_update_wins(tmp_path):
+    game_and_update(tmp_path)
+    build_pkg(tmp_path / "old.pkg", kind="gp", ver="01.02", only=["eboot.bin"])
+    build_pkg(tmp_path / "official.pkg", kind="gp", ver="01.09", only=["eboot.bin"], passcode="A" * 32)
+    jobs = {j.source.name: j for j in cv.plan(cv.PS4_EXTRACT, [tmp_path / "game.pkg"], cv.Options())}
+    assert jobs["upd.pkg"].follows is jobs["game.pkg"] and jobs["game.pkg"].status == "Queued"
+    assert jobs["old.pkg"].status == "Skipped" and "newer" in jobs["old.pkg"].message
+    assert jobs["official.pkg"].status == "Skipped" and "not applied" in jobs["official.pkg"].message
+
+
+def test_update_goes_into_an_extracted_game_and_keeps_what_it_replaces(tmp_path):
+    game, upd = game_and_update(tmp_path / "in")
+    out = tmp_path / "out"
+    tasks.extract_ps4(tmp_path / "in" / "game.pkg", out / "CUSA11111")(ctx())
+    (out / "CUSA11111" / "mod.txt").write_bytes(b"mine")
+    os.rename(out / "CUSA11111" / "sub", out / "CUSA11111" / "SUB")          # another spelling: the same folder
+    only_update = tmp_path / "elsewhere"
+    only_update.mkdir()
+    os.rename(tmp_path / "in" / "upd.pkg", only_update / "upd.pkg")
+    opts = cv.Options(output_dir=str(out))
+    jobs = cv.plan(cv.PS4_EXTRACT, [only_update / "upd.pkg"], opts)
+    run_all(jobs)
+    assert [j.status for j in jobs] == ["Done"], jobs[0].message
+    got = tree_of(out / "CUSA11111")
+    want = {k.replace("sub/", "SUB/"): v for k, v in {**game, **upd, "mod.txt": b"mine"}.items()}
+    assert got == want
+    kept = tree_of(out / "CUSA11111 (replaced by update v1.05)")
+    assert kept == {k.replace("sub/", "SUB/"): game[k] for k in game if k in upd}
+    again = cv.plan(cv.PS4_EXTRACT, [only_update / "upd.pkg"], opts)
+    assert again[0].status == "Skipped" and "already at v1.05" in again[0].message
+    # picking the game again, with the update next to it, doesn't extract anything twice either
+    again = cv.plan(cv.PS4_EXTRACT, [tmp_path / "in" / "game.pkg", only_update / "upd.pkg"], opts)
+    run_all(again)
+    assert not any(j.status == "Done" for j in again) and tree_of(out / "CUSA11111") == want
+
+
+def test_failed_update_leaves_the_game_as_it_was(tmp_path, monkeypatch):
+    game_and_update(tmp_path / "in")
+    home = tmp_path / "out" / "CUSA11111"
+    tasks.extract_ps4(tmp_path / "in" / "game.pkg", home)(ctx())
+    before = tree_of(tmp_path / "out")
+    real, n = os.rename, [0]
+
+    def flaky(a, b):
+        if ".romtools-ps4-" in str(a):
+            n[0] += 1
+            if n[0] == 3:
+                raise OSError("disk trouble")
+        return real(a, b)
+    monkeypatch.setattr(tasks.os, "rename", flaky)
+    with pytest.raises(OSError):
+        tasks.apply_ps4_update(tmp_path / "in" / "upd.pkg", home, "1.05")(ctx())
+    monkeypatch.undo()
+    assert tree_of(tmp_path / "out") == before and [p.name for p in (tmp_path / "out").iterdir()] == ["CUSA11111"]
+
+
+def test_split_package_is_read_as_one(tmp_path):
+    want, system = build_pkg(tmp_path / "g.pkg")
+    data = bytearray((tmp_path / "g.pkg").read_bytes())
+    struct.pack_into(">Q", data, 0x430, len(data))
+    (tmp_path / "g.pkg").unlink()
+    cut = len(data) // 3 + 5
+    for i in range(3):
+        (tmp_path / f"G-A0100-V0100_{i}.pkg").write_bytes(data[i * cut:(i + 1) * cut])
+    (tmp_path / "other_1.pkg").write_bytes(b"x")                             # not part of anything
+    ps = sorted(tmp_path.glob("G-*.pkg"))
+    assert all(ps4pkg.pieces(p) == ps for p in ps) and ps4pkg.pieces(tmp_path / "other_1.pkg") == []
+    with ps4pkg.PkgReader(ps[0]) as r:
+        assert {f.path: b"".join(r.chunks(f)) for f in r.files()} == want
+    jobs = cv.plan(cv.PS4_EXTRACT, ps, cv.Options(output_dir=str(tmp_path / "out")))
+    assert len(jobs) == 1
+    run_all(jobs)
+    assert tree_of(tmp_path / "out" / "CUSA11111") == {**want, **system}
+    from romtools import renamer, scanner
+    assert [i.parts for i in scanner.enumerate_system("ps4", tmp_path) if i.path == ps[0]] == [ps[1:]]
+    ops, notes = renamer.plan_packages([("ps4", tmp_path)], None)
+    assert not [o for o in ops if o.src in ps] and any("split" in n for n in notes)
+
+
+def test_changed_merge_option_replans_queued_jobs(tmp_path):
+    game_and_update(tmp_path)
+    queue = cv.plan(cv.PS4_EXTRACT, sorted(tmp_path.glob("*.pkg")), cv.Options(ps4_merge=False))
+    assert all(j.follows is None for j in queue)
+    new = cv.Options(ps4_merge=True)
+    assert cv.outdated(queue, new) == queue
+    pairs, extra = cv.replan(queue, new)
+    for j, f in pairs:
+        cv.take_plan(j, f)
+    by = {j.source.name: j for j in queue}
+    assert by["upd.pkg"].follows is by["game.pkg"] and not extra
+    for j, f in cv.replan(queue, cv.Options(ps4_merge=False))[0]:
+        cv.take_plan(j, f)
+    assert all(j.follows is None and j.func for j in queue)

@@ -7,6 +7,7 @@ trash after success" - and even then only after the output was verified.
 from __future__ import annotations
 
 import itertools
+import re
 import shutil
 import subprocess
 import threading
@@ -104,6 +105,7 @@ class Options:
     title_keys: str = ""                                # title.keys (Switch content whose package has no ticket)
     ram: bool = False                                   # CHD type fix: unpack in RAM
     tmp_dir: str = ""
+    ps4_merge: bool = True                              # a PS4 game's update goes into the game's folder
 
 
 @dataclass
@@ -212,27 +214,159 @@ def _skipped(title: str, src: Path, why: str) -> Job:
     return j
 
 
-def _plan_ps4(src: Path, opts: Options) -> Job:
-    """Open the package and list its files first, so anything that can't work is skipped with the reason."""
-    from . import packages, ps4pkg, tasks
-    title = f"extract PKG: {src.name}"
+def _open_ps4(src: Path):
+    """(package info, its files, why it can't be extracted or "")."""
+    from . import packages, ps4pkg
+    info = None
     try:
         info = packages.read_ps4(src)
         with ps4pkg.PkgReader(src) as r:
             if not r.has_files:
-                return _skipped(title, src, "nothing to extract: it only holds a licence (an unlock-only DLC)")
-            files = r.files()
+                return info, [], "nothing to extract: it only holds a licence (an unlock-only DLC)"
+            return info, r.files(), ""
     except (packages.PackageError, ps4pkg.Ps4PkgError, OSError) as exc:
-        return _skipped(title, src, str(exc))
-    base = _out_dir(src, opts)
-    if info.kind == packages.DLC:
-        out = base / "addcont" / info.title_id / info.content_id.split("-")[-1]
-    else:       # the folder names shadPS4 expects
-        out = base / (info.title_id + ("-patch" if info.kind == packages.UPDATE else ""))
+        return info, [], str(exc)
+
+
+def _extracted_ps4(folder: Path) -> tuple[str, int, str] | None:
+    """(title ID, version number, version) of an extracted PS4 game folder."""
+    from . import packages
+    try:
+        d = packages._sfo((folder / "sce_sys" / "param.sfo").read_bytes())
+    except Exception:  # noqa: BLE001 - no game, or not readable
+        return None
+    ver = str(d.get("APP_VER") or "")
+    return str(d.get("TITLE_ID", "")), packages._ps4_version(ver), re.sub(r"^0(\d)", r"\1", ver)
+
+
+def plan_ps4(files: list[Path], opts: Options) -> list[Job]:
+    """One job per game: the game's package with its newest update (picked, or next to it) merged in, in the folder
+    emulators expect. An update whose game's package isn't there goes into the already extracted game, else into its
+    own "CUSA…-patch" folder. With merging off, every package gets its own folder."""
+    from . import packages, ps4pkg, tasks
+    picked: list[Path] = []
+    for f in files:
+        ps = ps4pkg.pieces(f)
+        f = ps[0] if ps else f                  # a split package counts once
+        if f not in picked:
+            picked.append(f)
+    seen: dict[Path, tuple] = {}
+
+    def opened(p: Path):
+        if p not in seen:
+            seen[p] = _open_ps4(p)
+        return seen[p]
+
+    def neighbours(p: Path, title_id: str, kind: str) -> list[Path]:
+        """Packages of the same game in the same folder."""
+        out = []
+        try:
+            others = sorted(x for x in p.parent.iterdir() if x.suffix.lower() == ".pkg" and x.is_file())
+        except OSError:
+            return []
+        for x in others:
+            ps = ps4pkg.pieces(x)
+            if x == p or ps and x != ps[0]:
+                continue
+            try:
+                i = packages.read_ps4(x)
+            except (packages.PackageError, OSError):
+                continue
+            if i.title_id == title_id and i.kind == kind:
+                out.append(x)
+        return out
+
+    def job(title, src, func, out, what, n, size):
+        return _task_job(title, src, func, "Extracting (beta)", [out], [],
+                         detail=f"⚠ BETA - {what}, {n} files, {size / 1e9:.2f} GB → {out.name}/")
+    jobs: list[Job] = []
+    done: set[Path] = set()
+    infos = {p: opened(p) for p in picked}
+    # games first, so an update picked together with its game is merged into that game's job
+    for src in sorted(picked, key=lambda p: infos[p][0] is not None and infos[p][0].kind == packages.UPDATE):
+        if src in done:
+            continue
+        done.add(src)
+        info, fl, why = infos[src]
+        title = f"extract PKG: {src.name}"
+        if why:
+            jobs.append(_skipped(title, src, why))
+            continue
+        base = _out_dir(src, opts)
+        size = sum(f.size for f in fl)
+        if info.kind == packages.DLC:
+            out = base / "addcont" / info.title_id / info.content_id.split("-")[-1]
+            jobs.append(job(title, src, tasks.extract_ps4(src, out), out, info.kind, len(fl), size))
+            continue
+        home = base / info.title_id
+        if info.kind == packages.UPDATE:
+            got = _extracted_ps4(home) if opts.ps4_merge else None
+            games = [g for g in neighbours(src, info.title_id, packages.GAME) if not opened(g)[2]] \
+                if opts.ps4_merge and got is None else []
+            if got and got[0] == info.title_id:
+                done.add(src)
+                jobs.append(_ps4_update_job(src, info, fl, home, got))
+                continue
+            if games:                           # only the update was picked, its game lies next to it: do both
+                src, (info, fl, why) = games[0], opened(games[0])
+                done.add(src)
+                title, size = f"extract PKG: {src.name}", sum(f.size for f in fl)
+            else:
+                out = base / f"{info.title_id}-patch"
+                jobs.append(job(title, src, tasks.extract_ps4(src, out), out, info.kind +
+                                (" (its game isn't next to it)" if opts.ps4_merge else ""), len(fl), size))
+                continue
+        # a game
+        ups: list[Path] = []
+        if opts.ps4_merge:
+            ups = [p for p in picked if infos[p][0] is not None and infos[p][0].kind == packages.UPDATE
+                   and infos[p][0].title_id == info.title_id]
+            ups += [p for p in neighbours(src, info.title_id, packages.UPDATE) if p not in ups]
+            ups.sort(key=lambda p: -opened(p)[0].version)
+        use = next((p for p in ups if not opened(p)[2]), None)
+        rows: list[Job] = []
+        for p in ups:
+            i, _f, bad = opened(p)
+            done.add(p)
+            name = f"  ↳ apply update v{i.version_str}: {p.name}"
+            if p == use:
+                continue
+            rows.append(_skipped(name, p, f"not applied: {bad}" if bad else
+                                 f"not applied: v{opened(use)[0].version_str} is newer"))
+        got = _extracted_ps4(home)
+        if use and got and got[0] == info.title_id and got[1] < opened(use)[0].version:
+            jobs.append(_skipped(title, src, f"{home.name} is already there (v{got[2]}): only the update is applied"))
+            jobs.append(_ps4_update_job(use, *opened(use)[:2], home, got))
+            jobs += rows
+            continue
+        if use is None:
+            jobs.append(job(title, src, tasks.extract_ps4(src, home), home, info.kind, len(fl), size))
+            jobs += rows
+            continue
+        ui, ufl, _ = opened(use)
+        sizes = {f.path.lower(): f.size for f in fl} | {f.path.lower(): f.size for f in ufl}
+        game = job(title, src, tasks.extract_ps4([src, use], home), home,
+                   f"{info.kind} + update v{ui.version_str}" + ("" if ui.content_id == info.content_id else
+                                                              " (⚠ made for another release of the game)"),
+                   len(sizes), sum(sizes.values()))
+        jobs.append(game)
+        upd = Job(next(_ids), f"  ↳ apply update v{ui.version_str}: {use.name}", use, [])
+        upd.follows, upd.func_label = game, "Applying"
+        upd.detail = f"update v{ui.version_str}, {len(ufl)} files - merged in while extracting {src.name}"
+        jobs.append(upd)
+        jobs += rows
+    return jobs
+
+
+def _ps4_update_job(src: Path, info, files, home: Path, got) -> Job:
+    from . import tasks
+    title = f"update {home.name} to v{info.version_str}: {src.name}"
+    if got[1] >= info.version:
+        return _skipped(title, src, f"{home.name} is already at v{got[2]}")
     size = sum(f.size for f in files)
-    j = _task_job(title, src, tasks.extract_ps4(src, out), "Extracting (beta)", [out], [],
-                  detail=f"⚠ BETA - {info.kind}, {len(files)} files, {size / 1e9:.2f} GB → {out.name}/")
-    return j
+    return _task_job(title, src, tasks.apply_ps4_update(src, home, info.version_str), "Updating (beta)", [home], [],
+                     detail=f"⚠ BETA - into the extracted game (v{got[2]}): {len(files)} files, {size / 1e9:.2f} GB → "
+                            f"{home.name}/ (what it replaces is kept)")
 
 
 def _plan_task(preset: str, src: Path, opts: Options) -> Job | None:
@@ -274,8 +408,6 @@ def _plan_task(preset: str, src: Path, opts: Options) -> Job | None:
         out = out_dir / (src.stem + (".rvz" if preset == TO_RVZ else ".iso"))
         return _task_job(f"to {out.suffix[1:].upper()}: {src.name}", src, tasks.convert_disc_nod(src, out),
                          f"Converting to {out.suffix[1:].upper()}", [out], [src], opts)
-    if preset == PS4_EXTRACT:
-        return _plan_ps4(src, opts)
     if preset in (TO_NSZ, FROM_NSZ):
         ext = {".nsp": ".nsz", ".xci": ".xcz", ".nsz": ".nsp", ".xcz": ".xci"}[src.suffix.lower()]
         if preset == TO_NSZ:
@@ -429,6 +561,8 @@ def CIFS_SAFE(name: str) -> str:   # noqa: N802 - folder names that also work on
 def plan(preset: str, files: list[Path], opts: Options) -> list[Job]:
     if preset == SWITCH_FS:
         jobs = plan_switch_fs(files, opts)
+    elif preset == PS4_EXTRACT:
+        jobs = plan_ps4(files, opts)
     else:
         jobs = []
         for src in files:
@@ -462,6 +596,8 @@ def used_options(preset: str, opts: Options) -> dict:
         names.append("switch_keys")
     if preset == SWITCH_FS:
         names.append("title_keys")
+    if preset == PS4_EXTRACT:
+        names.append("ps4_merge")
     out = {n: getattr(opts, n) for n in names}
     if out.get("output_dir"):
         out["output_dir"] = str(Path(out["output_dir"]).expanduser())     # "/x/" and "/x" are the same folder
@@ -486,10 +622,13 @@ def replan(jobs: list[Job], opts: Options) -> tuple[list[tuple[Job, Job | None]]
         fresh = plan(preset, list(dict.fromkeys(j.source for j in old)), replace(opts, **dict(over)))
         pairs = pair(old, fresh)
         match = {f.id: j for j, f in pairs if f is not None}
+        needed = {f.follows.id for f in fresh if f.follows and f.id in match}
         for f in fresh:
-            if f.follows and f.follows.id in match and f.id not in match:
-                f.follows = match[f.follows.id]
+            if f.id not in match and (f.id in needed or f.follows and f.follows.id in match):
                 extra.append(f)
+        for f in fresh:
+            if f.follows:
+                f.follows = match.get(f.follows.id, f.follows)
         res += pairs
     return res, extra
 
@@ -522,10 +661,11 @@ def merge_plan(queue: list[Job], fresh: list[Job]) -> tuple[list[Job], list[Job]
     waiting = [j for j in queue if j.status == "Queued" and j.preset]
     match = {f.id: j for f, j in pair(fresh, waiting) if j is not None}
     for f in fresh:
+        if f.follows:
+            f.follows = match.get(f.follows.id, f.follows)
+    for f in fresh:
         if f.id in match:
             take_plan(match[f.id], f)
-        elif f.follows and f.follows.id in match:
-            f.follows = match[f.follows.id]
     return [f for f in fresh if f.id not in match], list(match.values())
 
 
@@ -535,12 +675,12 @@ def take_plan(job: Job, fresh: Job | None) -> None:
         job.status, job.message = "Skipped", "it can't be done with the current options - add the file again"
         return
     for n in ("title", "steps", "outputs", "sources", "func", "func_label", "detail", "trash", "status", "message",
-              "planned", "log", "log_total"):
+              "planned", "log", "log_total", "follows"):
         setattr(job, n, getattr(fresh, n))
 
 
 def _plan_one(preset: str, src: Path, opts: Options) -> Job | None:
-    if preset in (FIX_CHD, TRIM, UNTRIM, TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ, PS4_EXTRACT):
+    if preset in (FIX_CHD, TRIM, UNTRIM, TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ):
         return _plan_task(preset, src, opts)
     ext = src.suffix.lower()
     out_dir = _out_dir(src, opts)

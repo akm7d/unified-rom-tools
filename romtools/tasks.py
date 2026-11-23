@@ -596,38 +596,148 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
 
 # ====================================================================== PS4 PKG extraction (BETA)
 
-def extract_ps4(src: Path, out: Path) -> Callable[[TaskContext], str]:
-    """Extract a fake / homebrew PS4 package with romtools' own reader (ps4pkg): all data used is checked against the
-    package's signatures and digests, every written file is read back. The package itself is only read."""
+def _ps4_work(ctx: TaskContext, pkgs: list[Path], near: Path) -> tuple[Path, int, int]:
+    """Extract packages (merged) into a work folder next to ``near``: (folder, files, bytes). The caller removes it."""
+    import shutil
+    import time
+    from . import ps4pkg
+    readers = []
+    try:
+        for p in pkgs:
+            readers.append(ps4pkg.PkgReader(p))
+        total = sum(x.size for x in ps4pkg.layers(readers))
+    finally:
+        for r in readers:
+            r.close()
+    base = next(p for p in (near.parent, *near.parent.parents) if p.exists())
+    free = shutil.disk_usage(base).free
+    if free < total + (512 << 20):
+        raise RuntimeError(f"not enough space: needs {total / 1e9:.1f} GB, {free / 1e9:.1f} GB free")
+    work = base / f".romtools-ps4-{uuid.uuid4().hex[:8]}"
+    last = [0.0, ""]
+
+    def prog(done, tot, what):
+        now = time.monotonic()
+        if now - last[0] > 0.5 or what != last[1]:
+            if what != last[1]:
+                ctx.log(f"── {what} ──")
+            last[:] = [now, what]
+            shown = done if what == "Extracting" else done - total
+            ctx.progress(done / max(tot, 1), f"{what} - {shown / 1e9:.2f} of {total / 1e9:.2f} GB")
+    try:
+        work.mkdir()
+        n, size = ps4pkg.extract(pkgs, work, prog, ctx.cancel)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    return work, n, size
+
+
+CHECKED = "all data matched the package's signatures, every file read back"
+
+
+def extract_ps4(src: "Path | list[Path]", out: Path) -> Callable[[TaskContext], str]:
+    """Extract a fake / homebrew PS4 package (or a game with its update on top, merged into one folder) with romtools'
+    own reader (ps4pkg): all data used is checked against the package's signatures and digests, every written file is
+    read back. The packages themselves are only read."""
+    pkgs = list(src) if isinstance(src, (list, tuple)) else [src]
+
     def run(ctx: TaskContext) -> str:
         import shutil
-        import time
-        from . import ps4pkg
         if out.exists():
             raise TaskSkipped(f"{out.name} already exists")
-        with ps4pkg.PkgReader(src) as r:
-            total = sum(f.size for f in r.files())
-        base = next(p for p in (out.parent, *out.parent.parents) if p.exists())
-        free = shutil.disk_usage(base).free
-        if free < total + (512 << 20):
-            raise RuntimeError(f"not enough space: needs {total / 1e9:.1f} GB, {free / 1e9:.1f} GB free")
-        work = base / f".romtools-ps4-{uuid.uuid4().hex[:8]}"
-        last = [0.0, ""]
-
-        def prog(done, tot, what):
-            now = time.monotonic()
-            if now - last[0] > 0.5 or what != last[1]:
-                if what != last[1]:
-                    ctx.log(f"── {what} ──")
-                last[:] = [now, what]
-                shown = done if what == "Extracting" else done - total
-                ctx.progress(done / max(tot, 1), f"{what} - {shown / 1e9:.2f} of {total / 1e9:.2f} GB")
+        for p in pkgs[1:]:
+            ctx.log(f"with the update on top: {p.name}")
+        work, n, size = _ps4_work(ctx, pkgs, out)
         try:
-            work.mkdir()
-            n, size = ps4pkg.extract(src, work, prog, ctx.cancel)
             out.parent.mkdir(parents=True, exist_ok=True)
             os.rename(work, out)
         finally:
             shutil.rmtree(work, ignore_errors=True)
-        return f"{n} files, {size / 1e9:.2f} GB - all data matched the package's signatures, every file read back"
+        return f"{n} files, {size / 1e9:.2f} GB{' with the update merged in' if len(pkgs) > 1 else ''} - {CHECKED}"
     return run
+
+
+def apply_ps4_update(pkg: Path, game: Path, version: str) -> Callable[[TaskContext], str]:
+    """Put an update into an already extracted game. It's extracted and checked completely first; then its files take
+    their places. Everything they replace is kept in a folder next to the game, and put back if anything goes wrong.
+    param.sfo comes last, so the folder only says it's updated once it is."""
+    def run(ctx: TaskContext) -> str:
+        import shutil
+        kept = game.with_name(f"{game.name} (replaced by update v{version})")
+        if kept.exists():
+            raise TaskSkipped(f"“{kept.name}” already exists: remove or rename it first")
+        work, n, size = _ps4_work(ctx, [pkg], game)
+        done: list[tuple[Path, Path | None]] = []        # (file put in place, where the old one is kept)
+        made: list[Path] = []
+        added = replaced = 0
+        try:
+            ctx.log("── Putting the update's files into the game's folder ──")
+            names = _NamesIgnoringCase(game)
+            new = sorted((f for f in work.rglob("*") if f.is_file()),
+                         key=lambda f: (str(f.relative_to(work)).lower().replace("\\", "/") == "sce_sys/param.sfo", f))
+            for f in new:
+                ctx.check()
+                dst = names.find(f.relative_to(work))
+                if dst.is_dir():
+                    raise RuntimeError(f"{dst.name} is a folder in the game and a file in the update")
+                old = None
+                if dst.exists():
+                    old = kept / dst.relative_to(game)
+                    old.parent.mkdir(parents=True, exist_ok=True)
+                    os.rename(dst, old)
+                    replaced += 1
+                else:
+                    top = dst.parent
+                    while not top.exists():
+                        made.append(top)
+                        top = top.parent
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    added += 1
+                done.append((dst, old))
+                os.rename(f, dst)
+        except BaseException:
+            for dst, old in reversed(done):              # as it was
+                dst.unlink(missing_ok=True)
+                if old is not None:
+                    os.rename(old, dst)
+            for d in sorted(set(made), key=lambda d: -len(d.parts)):
+                _rmdir(d)
+            if kept.exists():
+                for d in sorted((x for x in kept.rglob("*") if x.is_dir()), key=lambda d: -len(d.parts)):
+                    _rmdir(d)
+                _rmdir(kept)
+            raise
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return (f"updated to v{version}: {replaced} files replaced, {added} added ({size / 1e9:.2f} GB) - {CHECKED}" +
+                (f". The old files are kept in “{kept.name}”: delete it when the game runs" if replaced else ""))
+    return run
+
+
+def _rmdir(d: Path) -> None:
+    try:
+        d.rmdir()
+    except OSError:
+        pass
+
+
+class _NamesIgnoringCase:
+    """Finds a path in a folder whatever its case (PS4 and Windows ignore it, Linux doesn't)."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.seen: dict[Path, dict[str, str]] = {}
+
+    def find(self, rel: Path) -> Path:
+        cur = self.root
+        for part in rel.parts:
+            if cur not in self.seen:
+                try:
+                    self.seen[cur] = {n.lower(): n for n in sorted(os.listdir(cur))}
+                except OSError:
+                    self.seen[cur] = {}
+            names = self.seen[cur]
+            exact = (cur / part).exists()
+            cur = cur / (part if exact else names.get(part.lower(), part))
+        return cur

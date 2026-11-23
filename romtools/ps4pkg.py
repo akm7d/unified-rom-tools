@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import stat
 import struct
 import zlib
@@ -47,6 +48,66 @@ def _compute_key(content_id: str, passcode: str, index: int) -> bytes:
     return hashlib.sha256(hashlib.sha256(struct.pack(">I", index)).digest()
                           + hashlib.sha256(content_id.encode("ascii").ljust(48, b"\0")).digest()
                           + passcode.encode("ascii")).digest()
+
+
+_PIECE = re.compile(r"^(.*)_(\d{1,2})$")
+
+
+def pieces(path: Path) -> list[Path]:
+    """All pieces of a split package ("…_0.pkg", "…_1.pkg", …), in order, whichever of them is given; [] when it isn't
+    split. Only the first piece has a package header, which says how big the whole package is."""
+    path = Path(path)
+    m = _PIECE.match(path.stem)
+    if not m or path.suffix.lower() != ".pkg":
+        return []
+    first = path.with_name(f"{m[1]}_0{path.suffix}")
+    try:
+        with open(first, "rb") as fh:
+            h = fh.read(0x438)
+        size = first.stat().st_size
+    except OSError:
+        return []
+    if h[:4] != b"\x7fCNT" or len(h) < 0x438 or struct.unpack_from(">Q", h, 0x430)[0] <= size:
+        return []                           # no header, or complete by itself: a name that just ends in a number
+    out = []
+    while (p := path.with_name(f"{m[1]}_{len(out)}{path.suffix}")).is_file():
+        out.append(p)
+    return out if path in out and len(out) > 1 else []
+
+
+class _Joined:
+    """Several files read as one."""
+
+    def __init__(self, paths: list[Path]):
+        self.files = []
+        try:
+            for p in paths:
+                self.files.append((open(p, "rb"), p.stat().st_size))
+        except OSError:
+            self.close()
+            raise
+        self.size = sum(n for _f, n in self.files)
+        self.pos = 0
+
+    def seek(self, pos: int) -> int:
+        self.pos = pos
+        return pos
+
+    def read(self, n: int) -> bytes:
+        out, at = b"", 0
+        for f, size in self.files:
+            if n > 0 and at <= self.pos < at + size:
+                f.seek(self.pos - at)
+                d = f.read(min(n, at + size - self.pos))
+                out += d
+                self.pos += len(d)
+                n -= len(d)
+            at += size
+        return out
+
+    def close(self):
+        for f, _n in self.files:
+            f.close()
 
 
 @dataclass(frozen=True)
@@ -150,7 +211,9 @@ class PkgReader:
         if len(passcode) != 32 or not passcode.isascii():
             raise Ps4PkgError("a passcode has exactly 32 characters")
         self.path = Path(path)
-        self.f = open(path, "rb")
+        parts = pieces(self.path)
+        self.f = _Joined(parts) if parts else open(path, "rb")
+        self.file_size = self.f.size if parts else self.path.stat().st_size
         try:
             self._open(passcode)
         except BaseException:
@@ -171,11 +234,11 @@ class PkgReader:
         h = self.f.read(0x500)
         if h[:4] != b"\x7fCNT" or len(h) < 0x500:
             raise Ps4PkgError("not a PS4 package")
+        self.finalized = bool(h[4] & 0x80)         # set by Sony's own packaging, not by the fake / homebrew tools
         self.content_id = h[0x40:0x64].split(b"\0")[0].decode("ascii", "replace")
         self.pfs_flags = struct.unpack_from(">Q", h, 0x408)[0]
         self.image_offset, self.image_size = struct.unpack_from(">QQ", h, 0x410)
         self.image_digest = h[0x440:0x460]
-        self.file_size = self.path.stat().st_size
         self._table(h)
         self.has_files = self.image_size > 0
         self.new_crypt = bool(self.pfs_flags & NEW_CRYPT)
@@ -275,6 +338,8 @@ class PkgReader:
         # prove the key is right before trusting anything: the first inode must be a directory
         mode, nlink = struct.unpack_from("<HH", self._read_outer(0x10000, 0x1000), 0)
         if not stat.S_ISDIR(mode) or not 0 < nlink < 1000:
+            if self.finalized:
+                raise RetailPackage("this is an official (retail) package: its data is encrypted with Sony's keys")
             raise RetailPackage("this package doesn't open with the default passcode: it's an official (retail) "
                                 "package, or a fake one made with another passcode")
 
@@ -434,45 +499,81 @@ class PkgReader:
             left -= n
 
 
-def extract(pkg: Path, folder: Path, progress=lambda done, total, what: None, cancel=None,
+@dataclass(frozen=True)
+class _Planned:
+    path: str                  # where it goes
+    reader: "PkgReader"
+    file: "PkgFile | None"     # a game file …
+    eid: int = 0               # … or a system entry
+    size: int = 0
+
+
+def layers(readers: list["PkgReader"]) -> list[_Planned]:
+    """What a game folder holds once these packages are put on top of each other (the game first, then its update):
+    file by file, the later one wins - the way the console and emulators see an update. Windows and Samba ignore case,
+    so names that differ only in that are the same file, spelled as in the first package."""
+    out: dict[str, _Planned] = {}
+    spelled: dict[str, str] = {}               # lower-case folder -> its spelling
+
+    def spell(path: str) -> str:
+        done: list[str] = []
+        *dirs, name = path.split("/")
+        for d in dirs:
+            key = "/".join([*done, d]).lower()
+            done.append(spelled.setdefault(key, d))
+        return "/".join([*done, name])
+    for r in readers:
+        files = r.files()
+        have = {f.path.lower() for f in files}
+        mine: set[str] = set()
+        todo = [(f.path, f, 0, f.size) for f in files]
+        todo += [(f"sce_sys/{n}", None, eid, 0) for n, eid in r.system_files() if f"sce_sys/{n}".lower() not in have]
+        for path, f, eid, size in todo:
+            key = path.lower()
+            if key in mine:         # Windows and Samba ignore case: one would overwrite the other
+                raise Ps4PkgError(f"two files in the package have the same name: {path}")
+            mine.add(key)
+            out[key] = _Planned(out[key].path if key in out else spell(path), r, f, eid, size)
+    for key in out:
+        parent = key
+        while "/" in parent:
+            parent = parent.rsplit("/", 1)[0]
+            if parent in out:
+                raise Ps4PkgError(f"{out[parent].path} is a file in one package and a folder in the other")
+    return list(out.values())
+
+
+def extract(pkgs: "Path | list[Path]", folder: Path, progress=lambda done, total, what: None, cancel=None,
             passcode: str = DEFAULT_PASSCODE) -> tuple[int, int]:
-    """Extract every game file and system file into ``folder`` (new or empty). Data is signature-checked as it's read,
-    and every written file is read back and compared. Returns (files, bytes)."""
+    """Extract every game file and system file into ``folder`` (new or empty). Several packages (the game, then its
+    update) are merged: see layers(). Data is signature-checked as it's read, and every written file is read back and
+    compared. Returns (files, bytes)."""
     def stop():
         if cancel is not None and cancel.is_set():
             from .hashing import Cancelled
             raise Cancelled()
-    with PkgReader(pkg, passcode) as r:
-        files = r.files()
-        have = {f.path.lower() for f in files}
-        system = [(f"sce_sys/{n}", eid) for n, eid in r.system_files() if f"sce_sys/{n}".lower() not in have]
-        seen: set[str] = set()
-        for path in [f.path for f in files] + [n for n, _e in system]:
-            if path.lower() in seen:         # Windows and Samba ignore case: one would overwrite the other
-                raise Ps4PkgError(f"two files in the package have the same name: {path}")
-            seen.add(path.lower())
-        total, done = 2 * sum(f.size for f in files), 0          # written once, read back once
+    readers: list[PkgReader] = []
+    try:
+        for p in pkgs if isinstance(pkgs, (list, tuple)) else [pkgs]:
+            readers.append(PkgReader(p, passcode))
+        plan = layers(readers)
+        size = sum(x.size for x in plan)
+        total, done = 2 * size, 0          # written once, read back once
         sums: dict[str, bytes] = {}
-        for f in files:
+        for x in plan:
             stop()
-            out = folder / f.path
+            out = folder / x.path
             out.parent.mkdir(parents=True, exist_ok=True)
             h = hashlib.sha256()
             with open(out, "xb") as fh:
-                for chunk in r.chunks(f):
+                for chunk in x.reader.chunks(x.file) if x.file is not None else [x.reader.entry(x.eid)]:
                     stop()
                     fh.write(chunk)
                     h.update(chunk)
-                    done += len(chunk)
+                    if x.file is not None:
+                        done += len(chunk)
                     progress(done, total, "Extracting")
-            sums[f.path] = h.digest()
-        for name, eid in system:
-            data = r.entry(eid)
-            out = folder / name
-            out.parent.mkdir(parents=True, exist_ok=True)
-            with open(out, "xb") as fh:
-                fh.write(data)
-            sums[name] = hashlib.sha256(data).digest()
+            sums[x.path] = h.digest()
         for name, want in sums.items():
             h = hashlib.sha256()
             with open(folder / name, "rb") as fh:
@@ -483,4 +584,7 @@ def extract(pkg: Path, folder: Path, progress=lambda done, total, what: None, ca
                     progress(min(done, total), total, "Checking what was written")
             if h.digest() != want:
                 raise Ps4PkgError(f"{name} reads back differently from what was written (disk or network problem)")
-        return len(sums), sum(f.size for f in files)
+        return len(sums), size
+    finally:
+        for r in readers:
+            r.close()

@@ -155,6 +155,11 @@ def item_for_file(path: Path, cfg: Config | None = None):
     from .scanner import Item, _cue_parts, _gdi_parts, kind_for
     path = sheet_of(path) or path              # one track of a disc: the whole disc
     ext = path.suffix.lower()
+    if ext == ".pkg":
+        from .ps4pkg import pieces
+        split = pieces(path)                   # one piece of a split package: all of it
+        if split:
+            return Item(OTHER, split[0], "package", split[1:], expected=place_of(cfg or get_config(), split[0]))
     parts = _cue_parts(path) if ext == ".cue" else _gdi_parts(path) if ext == ".gdi" else None
     expected = place_of(cfg or get_config(), path)
     if parts is not None:

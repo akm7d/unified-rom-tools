@@ -287,6 +287,7 @@ def apply_rules(name: str, rules: Rules, is_dir: bool = False) -> str:
 
 def plan_from_rules(folders, rules: Rules) -> list[Op]:
     """folders: {key: folder} or [(key, folder, names to skip)] (see library.rule_folders)."""
+    from .ps4pkg import pieces
     from .scanner import IGNORE_EXTS, _cue_parts, _gdi_parts
     ops = []
     entries = [(k, f, set()) for k, f in folders.items()] if isinstance(folders, dict) else folders
@@ -298,7 +299,8 @@ def plan_from_rules(folders, rules: Rules) -> list[Op]:
         tracks = {t for p in children for t in (_cue_parts(p) if p.suffix.lower() == ".cue" else
                                                 _gdi_parts(p) if p.suffix.lower() == ".gdi" else ())}
         for p in children:
-            if p.name.startswith(".") or p.name in skip or p in tracks:     # (a sheet lists its tracks by name)
+            if p.name.startswith(".") or p.name in skip or p in tracks or p.suffix.lower() == ".pkg" and pieces(p):
+                # (a sheet lists its tracks by name, the pieces of a split package find each other by name)
                 continue
             is_dir = p.is_dir()
             if is_dir and not rules.include_folders:
@@ -314,9 +316,10 @@ def plan_from_rules(folders, rules: Rules) -> list[Op]:
 def plan_rules_for(paths: list[Path], rules: Rules) -> list[Op]:
     """The cleanup rules for picked files only (not a disc's tracks: its .cue / .gdi lists them by name)."""
     from .library import sheet_of
+    from .ps4pkg import pieces
     ops = []
     for p in paths:
-        if sheet_of(p):
+        if sheet_of(p) or pieces(p):
             continue
         new = apply_rules(p.name, rules)
         if new != p.name:
@@ -427,6 +430,11 @@ def plan_packages(folders: list[tuple], keys: Path | None, rename: bool = True,
             continue
         files = [p for p in pk.iter_packages(folder, MAX_DEPTH + 1, skip) if p.is_file() and p not in seen]
         seen.update(files)
+        from .ps4pkg import pieces
+        split = [p for p in files if p.suffix.lower() == ".pkg" and pieces(p)]
+        if split:                       # the pieces find each other by name
+            files = [p for p in files if p not in split]
+            notes.append(f"{key}: {len(split)} piece(s) of split packages keep their names")
         infos: list[tuple[Path, pk.PackageInfo]] = []
         unread = 0
         for f in files:

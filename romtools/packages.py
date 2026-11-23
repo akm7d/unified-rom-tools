@@ -99,6 +99,10 @@ def read_ps4(path: Path) -> PackageInfo:
 
 
 def _read_ps4(path: Path) -> PackageInfo:
+    from .ps4pkg import pieces
+    ps = pieces(path)
+    if ps and path != ps[0]:
+        raise PackageError(f"part {ps.index(path)} of a split package - see {ps[0].name}")
     with open(path, "rb") as f:
         h = f.read(0x40)
         if h[:4] != b"\x7fCNT":
@@ -133,6 +137,8 @@ def _read_ps4(path: Path) -> PackageInfo:
         firmware=f"{(fw >> 24) & 0xff:x}.{(fw >> 16) & 0xff:02x}" if isinstance(fw, int) and fw else "",
         backport=bool(re.search(r"back.?port|\bBP\b", path.name, re.I)))
     info.contents = [Content(kind, tid, info.version, info.version_str)]
+    if ps:
+        info.note = f"split into {len(ps)} files"
     return info
 
 

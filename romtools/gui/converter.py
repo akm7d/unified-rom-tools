@@ -346,12 +346,19 @@ class BatchTab(QWidget):
             "against the package's own signatures and every written file is read back; output that doesn't match is "
             "removed. Your packages are never changed or trashed.")
         self.beta_note.setWordWrap(True)
+        self.ps4_merge = QCheckBox("Merge updates into the game's folder")
+        self.ps4_merge.setToolTip("The newest update picked with a game, or lying next to it, goes into the game's own "
+                                  "folder (CUSA…), like for Switch games. An update on its own goes into the already "
+                                  "extracted game in the output folder; what it replaces is kept in a folder next to "
+                                  "it.\nOff: updates get their own folder (CUSA…-patch), which emulators also accept.")
+        self.ps4_merge.setChecked(saved.get("ps4_merge", True))
         g.addRow(self.beta_note)
+        g.addRow("Updates:", self.ps4_merge)
         g.addRow("Performance:", par)
         self.opts_rows = {"codec": [self.cd_codec, self.dvd_codec, self.custom_codec, self.hunk],
                           "iso": [self.iso_as], "split": [self.split_bin], "verify": [self.verify_after],
                           "trash": [self.trash], "keys": [self.keys_row], "tkeys": [self.tkeys_row],
-                          "beta": [self.beta_note]}
+                          "beta": [self.beta_note, self.ps4_merge]}
         self.opts_form = g
 
         top = QHBoxLayout()
@@ -502,7 +509,7 @@ class BatchTab(QWidget):
             processors=self.procs.value(), verify_after=self.verify_after.isChecked(),
             trash_sources=self.trash.isChecked(), dat_lookup=self._dat_for, all_dats=self._all_dats,
             switch_keys=self.keys.text().strip(), title_keys=self.tkeys.text().strip(),
-            tmp_dir=get_config()["tmp_dir"],
+            tmp_dir=get_config()["tmp_dir"], ps4_merge=self.ps4_merge.isChecked(),
             ram=get_config()["temp_mode"] == "ram")
 
     def _all_dats(self):
@@ -537,7 +544,7 @@ class BatchTab(QWidget):
             "preset": self.preset.currentData(), "output_dir": o.output_dir, "cd_codec": o.cd_codec,
             "dvd_codec": o.dvd_codec, "custom_codec": o.custom_codec, "hunk": o.hunk_size, "iso_mode": o.iso_as,
             "split_bin": o.split_bin, "verify_after": o.verify_after, "parallel": self.parallel.value(),
-            "procs": o.processors, "switch_keys": o.switch_keys}
+            "procs": o.processors, "switch_keys": o.switch_keys, "ps4_merge": o.ps4_merge}
         if o.switch_keys and Path(o.switch_keys).is_file():
             cfg["switch_keys"] = o.switch_keys      # shared with ROM Verifier / Renamer (reading Switch packages)
         if o.title_keys and Path(o.title_keys).is_file():

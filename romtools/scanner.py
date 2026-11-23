@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import chd, identify, nod, packages
+from . import chd, identify, nod, packages, ps4pkg
 from .cache import HashCache
 from .compat import ram_mode_supported
 from .dat import DatIndex, Game
@@ -230,6 +230,12 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
         ext = f.suffix.lower()
         if f in consumed or ext in (".cue", ".gdi"):
             continue
+        if ext == ".pkg":                   # a split package is one item
+            split = ps4pkg.pieces(f)
+            if split:
+                if f == split[0]:
+                    items.append(Item(system, f, "package", split[1:], expected=expected))
+                continue
         sure = _is_rom(f, system != OTHER)
         if sure or ext not in NEVER_ROMS and _maybe_rom(f):
             items.append(Item(system, f, kind_for(ext), expected=expected, maybe=not sure))

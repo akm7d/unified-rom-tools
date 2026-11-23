@@ -186,7 +186,8 @@ smaller or load faster, and convert it right there), **Patches & Translations**,
     Official packages and licence-only DLC are skipped with the reason. All game data is checked against the
     signatures, and all system files against the digests, that the packer stored in the package; every written file
     is read back; output that doesn't match is removed. Packages are only read. Folders are named for shadPS4
-    (`CUSA00000`, `CUSA00000-patch`).
+    (`CUSA00000`). A game's newest update is merged in (or put into the already extracted game, keeping what it
+    replaces); with *Merge updates* off it gets its own `CUSA00000-patch`. Split packages (`…_0.pkg`, `…_1.pkg`) work.
   - **Multi-disc playlists**: writes `Game (Region).m3u` for every set of `(Disc N)` files that lacks one.
   - **Trim / untrim NDS & 3DS** (reversible: only trims when the cut-off part is plain padding, checks that untrim
     gives back the exact file first; untrim picks the padding that matches No-Intro).
