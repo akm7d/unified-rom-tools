@@ -3,6 +3,10 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.11.1
+- ROM Renamer: the DAT-extension option now reads *Change the extension to the one the DAT uses (e.g. .smc → .sfc)*,
+  with a tooltip showing both outcomes and when it never applies.
+
 ## 1.11.0
 - **ROM Renamer redesigned**: the three tabs are one panel with three sections - *Official names from DATs*,
   *Console packages (PS4 / Switch)* and *Cleanup rules* - each switched on by its title, with one combined preview.

@@ -166,7 +166,11 @@ class RenamerWindow(QMainWindow):
         sec_dat.setToolTip("ROMs are identified by hash, so the new name is always the official one. Hashes are shared "
                            "with ROM Verifier, so anything it has checked is instant.")
         dl = QVBoxLayout(sec_dat)
-        self.use_dat_ext = QCheckBox("Use the DAT's file extension (e.g. .smc → .sfc)")
+        self.use_dat_ext = QCheckBox("Change the extension to the one the DAT uses (e.g. .smc → .sfc)")
+        self.use_dat_ext.setToolTip("Off: only the name changes and your extension stays (Super Mario World (USA).smc).\n"
+                                    "On: the extension becomes the DAT's too (Super Mario World (USA).sfc).\n"
+                                    "Never applies to CHDs, archives, .cue sets, or ROMs matched without their "
+                                    "copier header.")
         self.use_dat_ext.setChecked(self.cfg["rename_use_dat_ext"])
         self.skip_uncached = QCheckBox("Skip CHDs ROM Verifier hasn't checked yet (checking unpacks each disc)")
         self.skip_uncached.setChecked(st.get("skip_uncached", True))
