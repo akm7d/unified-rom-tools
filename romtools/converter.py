@@ -41,7 +41,8 @@ PRESETS = {
     FROM_RVZ: ("RVZ → ISO", (".rvz",)),
     TO_NSZ: ("NSP / XCI → NSZ / XCZ (compress)", (".nsp", ".xci")),
     FROM_NSZ: ("NSZ / XCZ → NSP / XCI (decompress)", (".nsz", ".xcz")),
-    SWITCH_FS: ("NSP / XCI → RomFS + ExeFS folders (newest update applied)", (".nsp", ".xci", ".nsz", ".xcz")),
+    SWITCH_FS: ("NSP / XCI → RomFS + ExeFS folders (auto-applies the newest update NSP / XCI)",
+                (".nsp", ".xci", ".nsz", ".xcz")),
     TRIM: ("Trim ROMs (reversible)", (".nds", ".dsi", ".3ds", ".cci")),
     UNTRIM: ("Untrim ROMs back to the full dump", (".nds", ".dsi", ".3ds", ".cci")),
 }
@@ -127,6 +128,7 @@ class Job:
     func: Callable | None = None            # Python task instead of chdman steps: func(ctx) -> message
     func_label: str = ""                    # e.g. "Trimming", "Converting to RVZ"
     log_total: int = 0                      # lines ever logged (the log keeps only the newest ones)
+    follows: "Job | None" = None            # a row that only mirrors another job (e.g. the update it applies)
 
     @property
     def step_name(self) -> str:
@@ -137,6 +139,9 @@ class Job:
         return STEP_NAMES.get(self.steps[min(self.step_index, len(self.steps) - 1)][1], "Running chdman")
 
     def measure(self) -> int:
+        if self.follows is not None:        # done by the job it follows: don't count its size twice
+            self.weight = 0
+            return 0
         if not self.weight:
             try:
                 files = {self.source, *self.sources}
@@ -365,9 +370,15 @@ def plan_switch_fs(files: list[Path], opts: Options) -> list[Job]:
             if rid:
                 jobs.append(_skipped(f"extract: {gp.name}", gp, f"{NEEDS_TITLE_KEY} ({rid})"))
                 continue
-            jobs.append(_task_job(f"extract: {gp.name}", gp, tasks.extract_switch_fs(
+            game_job = _task_job(f"extract: {gp.name}", gp, tasks.extract_switch_fs(
                 out, keys, main, base, tik, {"exefs": 0, "romfs": 1}, tkeys), "Extracting", [out], [],
-                detail=detail))
+                detail=detail)
+            jobs.append(game_job)
+            if up:   # its own row, for visibility: applied by the game's extraction (nstool needs both at once)
+                upd = Job(next(_ids), f"  ↳ apply update v{up[1].version}: {up[0].name}", up[0], [])
+                upd.follows, upd.func_label = game_job, "Applying"
+                upd.detail = f"update {up[1].title_id} v{up[1].version} - applied while extracting {gp.name}"
+                jobs.append(upd)
     return jobs
 
 
@@ -527,7 +538,8 @@ class Runner:
                  trash: Callable[[Path], bool] | None = None) -> None:
         self.jobs = jobs
         self.parallel = max(1, parallel)
-        self.on_update = on_update
+        self._report = on_update
+        self.on_update = self._notify
         self.trash = trash or _gio_trash
         self.cancel = threading.Event()
         self._procs: dict[int, Process] = {}
@@ -541,12 +553,29 @@ class Runner:
 
     def run(self) -> None:
         with ThreadPoolExecutor(max_workers=self.parallel) as ex:
-            list(ex.map(self._run_and_keep_log, [j for j in self.jobs if j.status == "Queued"]))
+            list(ex.map(self._run_and_keep_log,
+                        [j for j in self.jobs if j.status == "Queued" and j.follows is None]))
 
     def _run_and_keep_log(self, job: Job) -> None:
-        self._run_job(job)
+        try:
+            self._run_job(job)
+        finally:
+            self._notify(job)          # final state onto any rows that follow this job
         if job.status == "Failed":
             save_log(job)
+
+    def _notify(self, job: Job) -> None:
+        """Report a job's change, and copy it onto the rows that only mirror it (e.g. the update a Switch
+        extraction applies, shown as its own row)."""
+        self._report(job)
+        for f in self.jobs:
+            if f.follows is job:
+                f.status = job.status
+                f.progress, f.step_progress, f.phase = job.progress, job.step_progress, job.phase
+                f.step_label = "applied during the game's extraction"
+                f.message = {"Done": "applied", "Failed": "not applied: the extraction failed",
+                             "Cancelled": "stopped", "Skipped": "not applied: " + job.message}.get(job.status, "")
+                self._report(f)
 
     def _run_job(self, job: Job) -> None:
         if self.cancel.is_set():

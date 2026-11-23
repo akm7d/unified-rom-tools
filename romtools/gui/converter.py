@@ -675,7 +675,9 @@ class BatchTab(QWidget):
         if self.worker and self.worker.isRunning():
             return
         rows = {i.row() for i in self.table.selectedIndexes()}
-        self.jobs = [j for j in self.jobs if self.rows.get(j.id) not in rows]
+        removed = {j.id for j in self.jobs if self.rows.get(j.id) in rows}
+        # a row that only mirrors another job (the update a Switch extraction applies) goes with it
+        self.jobs = [j for j in self.jobs if j.id not in removed and not (j.follows and j.follows.id in removed)]
         self._rebuild()
 
     def clear_finished(self):

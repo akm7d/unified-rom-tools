@@ -18,6 +18,9 @@ patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after 
   shows "x of y GB". Tool runs (nstool, nsz, nodtool) also no longer reset a job's bar to 0% between its steps.
 - ROM Optimizer's task list starts each task with the systems it's for (`[GC/Wii]`, `[NSW]`, `[NDS/3DS]`,
   `[PS1/PS2/PSP/DC/SAT/SCD/PCE…]`), with the full system names in the tooltip.
+- The Switch RomFS / ExeFS task is now called *NSP / XCI → RomFS + ExeFS folders (auto-applies the newest update
+  NSP / XCI)*, and the update it applies gets **its own row** in the job list ("↳ apply update v…") right under the
+  game, showing queued / running / applied (or why not). It's still applied in the same pass, which nstool needs.
 - Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
 
 ## 1.10.0

@@ -61,3 +61,25 @@ def test_tool_runs_never_move_the_bar_backwards():
     tasks._run_tool([sys.executable, "-c", "print('hi')"], c, "a tool without progress output", span=None)
     tasks._run_tool([sys.executable, "-c", "print('50% complete')"], c, "a tool with progress", span=(0.7, 0.9))
     assert seen == sorted(seen) and min(seen) == 0.6        # never reset to 0, never back down
+
+
+def test_update_row_follows_its_extraction():
+    from pathlib import Path
+    from romtools import converter as cv
+    from romtools.tasks import TaskSkipped
+
+    def work(ctx):
+        ctx.progress(0.5, "Extracting romfs")
+        return "romfs: 3 files"
+
+    def fails(ctx):
+        raise RuntimeError("boom")
+    for func, want_main, want_upd in ((work, "Done", "applied"), (fails, "Failed", "not applied")):
+        main = cv._task_job("extract: game.nsp", Path("/tmp/game.nsp"), func, "Extracting")
+        upd = cv.Job(999, "  ↳ apply update v65536", Path("/tmp/upd.nsp"), [])
+        upd.follows = main
+        seen = []
+        cv.Runner([main, upd], 1, lambda j: seen.append((j.title, j.status))).run()
+        assert main.status == want_main and upd.status == want_main and upd.message.startswith(want_upd)
+        assert ("  ↳ apply update v65536", "Running") in seen          # it shows as running while the game runs
+        assert upd.measure() == 0                                        # not counted twice in the queue progress
