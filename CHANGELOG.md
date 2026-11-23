@@ -27,6 +27,9 @@ patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after 
 - Convert & Extract: the log under the job list is now a **Job log** for any tool, with a summary of the selected job
   (status, source → output, time taken, result or error), errors in red, warnings in orange, commands dimmed, and
   **Copy**, **Save…** and **Logs folder** buttons. The full live output is kept.
+- NSP → NSZ skips NSPs that bundle several titles with their own tickets (e.g. a game plus its update) with a clear
+  reason, and ROM Storage Advisor no longer suggests them: nsz 5.0.0 crashes on those (a known nsz bug, fixed
+  upstream on 2026-10-25 but not in a release yet). The originals were never affected.
 - Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
 
 ## 1.10.0

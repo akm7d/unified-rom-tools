@@ -51,3 +51,23 @@ def test_extracted_switch_folder(tmp_path):
     i = pk.read(d)
     assert (i.title_id, i.title, i.kind) == ("0100AAAA00000000", "Some Game", "Game (extracted)")
     assert list(pk.iter_packages(tmp_path)) == [d]
+
+
+def test_ticket_count_and_nsz_skip(tmp_path):
+    from romtools import converter as cv
+
+    def nsp(path, names):
+        table, entries = b"", b""
+        for n in names:
+            entries += struct.pack("<QQII", 0, 0, len(table), 0)
+            table += n.encode() + b"\0"
+        path.write_bytes(b"PFS0" + struct.pack("<II", len(names), len(table)) + b"\0" * 4 + entries + table)
+        return path
+    one = nsp(tmp_path / "one.nsp", ["a.nca", "0100000000010000000000000000000a.tik"])
+    two = nsp(tmp_path / "two.nsp", ["a.nca", "0100000000010000000000000000000a.tik",
+                                    "0100000000010800000000000000000b.tik"])
+    assert (pk.ticket_count(one), pk.ticket_count(two)) == (1, 2)
+    keys = tmp_path / "prod.keys"
+    keys.write_text("header_key = " + "00" * 32 + "\n")
+    job = cv.plan(cv.TO_NSZ, [two], cv.Options(switch_keys=str(keys)))[0]
+    assert job.status == "Skipped" and "several titles" in job.message

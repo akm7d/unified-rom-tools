@@ -148,7 +148,9 @@ def analyse(cfg, root: Path, progress: Callable[[str], None] = lambda s: None,
                            " can't read CHD: only worth it for archiving (convert back to play)"), sample_ratio)
 
         # 4. Switch -> NSZ / XCZ
-        sw = by_ext.get(".nsp", []) + by_ext.get(".xci", [])
+        from .packages import ticket_count
+        # nsz 5.0.0 can't compress bundles with several tickets (known bug) - don't suggest those
+        sw = [f for f in by_ext.get(".nsp", []) + by_ext.get(".xci", []) if ticket_count(f) <= 1]
         if sw:
             add(Suggestion(f"{folder}:nsz", folder, "Switch NSP / XCI → NSZ / XCZ", cv.TO_NSZ, sw,
                            compat="Ryujinx and its forks, Eden, Citron, sudachi",

@@ -501,6 +501,22 @@ def title_key_known(rights_id: str, tickets_in_package: list[str]) -> bool:
     return rights_id in _Keys(None).titles
 
 
+def ticket_count(path: Path) -> int:
+    """How many title-key tickets an NSP / XCI carries (bundles of base + update + DLC usually have several)."""
+    try:
+        c = _Container(path)
+    except (OSError, PackageError, struct.error, ValueError):
+        return 0
+    try:
+        return sum(1 for n in c.files if n.endswith(".tik"))
+    finally:
+        c.close()
+
+
+NSZ_MULTI_TICKET = ("holds several titles with their own tickets (e.g. a game bundled with its update); nsz 5.0.0 "
+                    "can't compress those - a known nsz bug, fixed upstream but not in a release yet")
+
+
 def nca_part_sizes(container_path: Path, nca: str, keys_path: Path | None) -> dict[int, int]:
     """Bytes each section of an NCA holds once extracted: for a RomFS the data size its integrity header records
     (for an update NCA that is the size of the whole PATCHED RomFS, not of the small update file), for a partition

@@ -247,6 +247,10 @@ def _plan_task(preset: str, src: Path, opts: Options) -> Job | None:
                          f"Converting to {out.suffix[1:].upper()}", [out], [src], opts)
     if preset in (TO_NSZ, FROM_NSZ):
         ext = {".nsp": ".nsz", ".xci": ".xcz", ".nsz": ".nsp", ".xcz": ".xci"}[src.suffix.lower()]
+        if preset == TO_NSZ:
+            from .packages import NSZ_MULTI_TICKET, ticket_count
+            if ticket_count(src) > 1:
+                return _skipped(f"to {ext[1:].upper()}: {src.name}", src, f"not compressed: it {NSZ_MULTI_TICKET}")
         out = out_dir / (src.stem + ext)
         keys = Path(opts.switch_keys) if opts.switch_keys else None
         return _task_job(f"to {ext[1:].upper()}: {src.name}", src, tasks.convert_nsz(src, out, keys),
