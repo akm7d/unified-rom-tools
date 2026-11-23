@@ -172,12 +172,11 @@ smaller or load faster, and convert it right there), **Patches & Translations**,
     `Title [TitleID] (vUpdate)/exefs` and `/romfs`, with the **newest update applied** (found in the same package
     or next to it, e.g. in the game's folder); DLC gets `Title [DLC ID] (DLC)/romfs`. The NCAs are copied out
     of the package into a work folder beside the output and removed afterwards. NSZ / XCZ: convert back first.
-  - **PS4 PKG → extracted game folder (BETA, use with care)**: runs the third-party *ShadPs4Plus PKG Extractor*,
-    which is **not included**: with your OK it's downloaded on first use from its official release and checked
-    against a pinned SHA-256. Only fake / homebrew packages work; official ones, those with the newer key scheme
-    and licence-only DLC are skipped with the reason. The extractor reports success even when it fails, so romtools'
-    own independent reader (`ps4pkg.py`, no key material) then compares **every extracted file byte for byte** with
-    the package; output that doesn't match is removed. Packages are only read. Folders are named for shadPS4
+  - **PS4 PKG → extracted game folder (BETA, use with care)**: romtools' own reader (`ps4pkg.py`), no other program
+    and no key material: the keys of fake / homebrew packages come from their content ID and the default passcode.
+    Official packages and licence-only DLC are skipped with the reason. All game data is checked against the
+    signatures, and all system files against the digests, that the packer stored in the package; every written file
+    is read back; output that doesn't match is removed. Packages are only read. Folders are named for shadPS4
     (`CUSA00000`, `CUSA00000-patch`).
   - **Multi-disc playlists**: writes `Game (Region).m3u` for every set of `(Disc N)` files that lacks one.
   - **Trim / untrim NDS & 3DS** (reversible: only trims when the cut-off part is plain padding, checks that untrim

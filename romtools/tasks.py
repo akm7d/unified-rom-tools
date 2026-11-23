@@ -570,16 +570,12 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
 # ====================================================================== PS4 PKG extraction (BETA)
 
 def extract_ps4(src: Path, out: Path) -> Callable[[TaskContext], str]:
-    """Extract a fake / homebrew PS4 package with the ShadPs4Plus extractor, then check EVERY extracted file against
-    the package with romtools' own reader (ps4pkg). The extractor reports success even when it fails, so only that
-    check decides; output that doesn't match is removed. The package itself is never changed."""
+    """Extract a fake / homebrew PS4 package with romtools' own reader (ps4pkg): all data used is checked against the
+    package's signatures and digests, every written file is read back. The package itself is only read."""
     def run(ctx: TaskContext) -> str:
         import shutil
         import time
-        from . import ps4pkg, ps4tool
-        exe = ps4tool.program()
-        if not exe:
-            raise RuntimeError("the PKG extractor isn't installed (add the file again to be asked)")
+        from . import ps4pkg
         if out.exists():
             raise TaskSkipped(f"{out.name} already exists")
         with ps4pkg.PkgReader(src) as r:
@@ -589,44 +585,22 @@ def extract_ps4(src: Path, out: Path) -> Callable[[TaskContext], str]:
         if free < total + (512 << 20):
             raise RuntimeError(f"not enough space: needs {total / 1e9:.1f} GB, {free / 1e9:.1f} GB free")
         work = base / f".romtools-ps4-{uuid.uuid4().hex[:8]}"
-        stop = threading.Event()
+        last = [0.0, ""]
 
-        def watch():
-            while not stop.wait(5.0):      # the extractor reports no bytes: watch the output grow
-                got = sum(f.stat().st_size for f in work.rglob("*") if f.is_file())
-                ctx.progress(min(0.6, 0.6 * got / max(total, 1)),
-                             f"Extracting - {got / 1e9:.2f} of {total / 1e9:.2f} GB")
+        def prog(done, tot, what):
+            now = time.monotonic()
+            if now - last[0] > 0.5 or what != last[1]:
+                if what != last[1]:
+                    ctx.log(f"── {what} ──")
+                last[:] = [now, what]
+                shown = done if what == "Extracting" else done - total
+                ctx.progress(done / max(tot, 1), f"{what} - {shown / 1e9:.2f} of {total / 1e9:.2f} GB")
         try:
             work.mkdir()
-            ctx.progress(0.0, f"Extracting - 0.00 of {total / 1e9:.2f} GB")
-            threading.Thread(target=watch, daemon=True).start()
-            try:
-                _run_tool([str(exe), str(src), str(work)], ctx, "Extracting", ps4tool.env(), span=None)
-            finally:
-                stop.set()
-            made = [d for d in (*work.glob("*"), *work.glob("*/*")) if (d / "sce_sys").is_dir()]
-            if len(made) != 1:
-                raise RuntimeError("the extractor produced no game folder (its messages are in the log)")
-            ctx.log("── Checking every file against the package (romtools' own reader) ──")
-            last = [0.0]
-
-            def prog(done, tot, _name):
-                now = time.monotonic()
-                if now - last[0] > 0.5:
-                    last[0] = now
-                    ctx.progress(0.6 + 0.4 * done / max(tot, 1),
-                                 f"Checking every byte - {done / 1e9:.2f} of {tot / 1e9:.2f} GB")
-            c = ps4pkg.check_extraction(src, made[0], prog, ctx.cancel)
-            for what, names in (("missing", c.missing), ("DIFFERENT", c.different), ("extra", c.extra)):
-                for n in names[:50]:
-                    ctx.log(f"{what}: {n}")
-            if not c.ok:
-                raise RuntimeError(f"the extraction is wrong, so it was removed: {len(c.missing)} file(s) missing, "
-                                   f"{len(c.different)} different (listed in the log). The package is untouched")
+            n, size = ps4pkg.extract(src, work, prog, ctx.cancel)
             out.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(made[0], out)
+            os.rename(work, out)
         finally:
-            stop.set()
             shutil.rmtree(work, ignore_errors=True)
-        return f"{c.files} files, {c.bytes / 1e9:.2f} GB - every byte checked against the package"
+        return f"{n} files, {size / 1e9:.2f} GB - all data matched the package's signatures, every file read back"
     return run

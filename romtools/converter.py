@@ -210,7 +210,7 @@ def _skipped(title: str, src: Path, why: str) -> Job:
 
 
 def _plan_ps4(src: Path, opts: Options) -> Job:
-    """Check what can be checked before running anything: the beta extractor can't tell us itself."""
+    """Open the package and list its files first, so anything that can't work is skipped with the reason."""
     from . import packages, ps4pkg, tasks
     title = f"extract PKG: {src.name}"
     try:
@@ -218,9 +218,6 @@ def _plan_ps4(src: Path, opts: Options) -> Job:
         with ps4pkg.PkgReader(src) as r:
             if not r.has_files:
                 return _skipped(title, src, "nothing to extract: it only holds a licence (an unlock-only DLC)")
-            if r.new_crypt:
-                return _skipped(title, src, "not supported by the extractor: this package uses the newer key scheme, "
-                                            "which it doesn't implement")
             files = r.files()
     except (packages.PackageError, ps4pkg.Ps4PkgError, OSError) as exc:
         return _skipped(title, src, str(exc))

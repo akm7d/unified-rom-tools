@@ -7,6 +7,7 @@ mkdir -p "$BIN" "$APPS" "$ICONS"
 
 missing=()
 python3 -c 'import PySide6' 2>/dev/null || missing+=(pyside6)
+python3 -c 'import cryptography' 2>/dev/null || missing+=(python-cryptography)
 command -v chdman >/dev/null || missing+=(mame-tools)
 command -v 7z >/dev/null || missing+=(7zip)
 if ((${#missing[@]})); then

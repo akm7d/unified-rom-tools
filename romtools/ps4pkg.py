@@ -1,13 +1,15 @@
-"""Independent reader for the encrypted file system inside PS4 packages (fPKG), used to check extractions.
+"""Reading and extracting the encrypted file system inside PS4 packages (fake / homebrew packages, fPKG).
 
 Layers: PKG -> outer PFS (AES-XTS encrypted, signed) -> pfs_image.dat (PFSC: 64 KB zlib blocks) -> inner PFS -> files.
 
-The file-system key of a fake / homebrew package is derived from its content ID and the packer's passcode (normally
-32 zeros), so no console or Sony key material is needed and none is included. Official retail packages use a key
-this derivation can't produce: they're reported as such. Nothing is ever written; every size and offset read from
-a package is checked before it's used.
+The keys of a fake / homebrew package are derived from its content ID and the packer's passcode (normally 32 zeros),
+so no console or Sony key material is needed and none is included. Official retail packages use keys this derivation
+can't produce: they're reported as such.
 
-It shares no code with the bundled extractor, so a mistake in one doesn't hide in the other.
+Nothing read from a package is trusted: every size and offset is checked before it's used, and every 64 KB block of
+game data is verified against the signature the packer stored in the package (HMAC-SHA256) before it's used, and every
+system entry against the package's digest table - so a damaged package, or a mistake in this reader, is an error
+instead of wrong data.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import hmac
 import stat
 import struct
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator
 
@@ -25,6 +27,7 @@ DEFAULT_PASSCODE = "0" * 32
 PFS_MAGIC = 20130315
 PFSC_MAGIC = b"PFSC"
 SECTOR = 0x1000
+BLOCK = 0x10000
 XTS_FIRST = 16                 # the first 64 KB (the superblock) isn't encrypted
 NEW_CRYPT = 1 << 61            # pfs_flags bit: one more HMAC step in the key derivation
 D32, S32 = 0xA8, 0x2C8         # inode sizes: plain / signed
@@ -51,6 +54,33 @@ class PkgFile:
     path: str                  # relative, "/"-separated
     size: int
     block: int                 # first block in the inner PFS
+
+
+@dataclass(frozen=True)
+class _Entry:
+    eid: int
+    name_at: int
+    offset: int
+    size: int
+    encrypted: bool
+    key_index: int
+    raw: bytes
+    digest: bytes = b""          # SHA-256 the package's digest table gives for it
+
+
+MAX_ENTRY = 256 << 20
+INTERNAL_ENTRIES = {0x1, 0x10, 0x20, 0x80, 0x100, 0x200}      # digests, keys, name table: no use outside the package
+ENTRY_NAMES = {0x400: "license.dat", 0x401: "license.info", 0x402: "nptitle.dat", 0x403: "npbind.dat",
+               0x404: "selfinfo.dat", 0x406: "imageinfo.dat", 0x407: "target-deltainfo.dat",
+               0x408: "origin-deltainfo.dat", 0x409: "psreserved.dat"}
+
+
+def safe_path(name: str) -> str:
+    """A relative path from inside a package, refused if it could land anywhere but under the output folder."""
+    parts = name.split("/")
+    if not name or any(p in ("", ".", "..") or "\\" in p or ":" in p or any(ord(c) < 32 for c in p) for p in parts):
+        raise Ps4PkgError(f"unsafe file name in the package: {name!r}")
+    return name
 
 
 class _Pfs:
@@ -154,34 +184,80 @@ class PkgReader:
         if self.image_offset + self.image_size > self.file_size:
             raise Ps4PkgError("the package is incomplete (smaller than its header says)")
         self._keys(passcode)
+        self._signed: dict[int, bytes] = {}          # outer block -> the signature it must have
+        self._cache: tuple[int, bytes] = (-1, b"")
         self.outer = _Pfs(self._read_outer, "outer file system")
+        if self.outer.bs != BLOCK:
+            raise Ps4PkgError("outer file system: unexpected block size")
         img = next((i for name, i, typ in self.outer.entries(self.outer.user_root())
                     if name == "pfs_image.dat" and typ == T_FILE), None)
         if img is None:
             raise Ps4PkgError("no pfs_image.dat inside")
         ino = self.outer.inode(img)
         self.pfsc_at, self.pfsc_size = ino["block"] * self.outer.bs, ino["blocks"] * self.outer.bs
+        self._signatures(img, ino)
         self._pfsc()
         self.inner = _Pfs(self._read_inner, "inner file system")
 
     def _table(self, h: bytes) -> None:
         n, off = struct.unpack_from(">I", h, 0x10)[0], struct.unpack_from(">I", h, 0x18)[0]
-        self.entries: dict[int, tuple[int, int, bool]] = {}      # id -> (offset, size, encrypted)
+        self.entries: dict[int, _Entry] = {}
         if n > 100000:
             raise Ps4PkgError("damaged package header")
         self.f.seek(off)
         t = self.f.read(32 * n)
         for k in range(len(t) // 32):
-            eid, _fn, flags1, _f2, o, s = struct.unpack_from(">IIIIII", t, 32 * k)
-            self.entries[eid] = (o, s, bool(flags1 & 0x80000000))
+            raw = t[32 * k:32 * k + 32]
+            eid, name_at, flags1, flags2, o, s = struct.unpack_from(">IIIIII", raw, 0)
+            if o + s > self.file_size:
+                raise Ps4PkgError("the package is incomplete (smaller than its header says)")
+            self.entries[eid] = _Entry(eid, name_at, o, s, bool(flags1 & 0x80000000), (flags2 >> 12) & 0xF, raw)
+        # the digest table (entry 1) has one SHA-256 per entry, in table order; its own hash is in the header
+        if 0x1 not in self.entries:
+            raise Ps4PkgError("the package has no digest table (not supported)")
+        d = self.entries[0x1]
+        self.f.seek(d.offset)
+        digests = self.f.read(min(d.size, 32 * n))
+        if hashlib.sha256(digests).digest() != h[0x140:0x160] or len(digests) < 32 * n:
+            raise Ps4PkgError("the package is damaged: its digest table doesn't match the header")
+        for k in range(len(t) // 32):
+            eid = struct.unpack_from(">I", t, 32 * k)[0]
+            self.entries[eid] = replace(self.entries[eid], digest=digests[32 * k:32 * k + 32])
+
+    def _raw(self, e: "_Entry", padded: bool = False) -> bytes:
+        if e.size > MAX_ENTRY:
+            raise Ps4PkgError("damaged package entry")
+        self.f.seek(e.offset)
+        data = self.f.read((e.size + 15) & ~15)       # encrypted entries are hashed with their padding
+        if e.eid != 0x1 and e.digest not in (hashlib.sha256(data[:e.size]).digest(), hashlib.sha256(data).digest()):
+            raise Ps4PkgError(f"the package is damaged: system entry {e.eid:#x} doesn't match its digest")
+        return data if padded else data[:e.size]
 
     def entry(self, eid: int) -> bytes | None:
-        """A plain (unencrypted) package entry, e.g. 0x1000 = param.sfo, 0x1200 = icon0.png."""
-        if eid not in self.entries or self.entries[eid][2]:
+        """A system entry, e.g. 0x1000 = param.sfo, 0x1200 = icon0.png (decrypted if it's stored encrypted)."""
+        e = self.entries.get(eid)
+        if e is None:
             return None
-        o, s, _enc = self.entries[eid]
-        self.f.seek(o)
-        return self.f.read(s)
+        if not e.encrypted:
+            return self._raw(e)
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        k = hashlib.sha256(e.raw + _compute_key(self.content_id, self._passcode, e.key_index)).digest()
+        data = self._raw(e, padded=True)
+        return Cipher(algorithms.AES(k[16:]), modes.CBC(k[:16])).decryptor().update(data)[:e.size]
+
+    def system_files(self) -> list[tuple[str, int]]:
+        """(path under sce_sys/, entry id) of the package's system files (not its internal key and digest tables)."""
+        names = self._raw(self.entries[0x200]) if 0x200 in self.entries else b""
+        out = []
+        for e in self.entries.values():
+            if e.eid in INTERNAL_ENTRIES:
+                continue
+            name = ENTRY_NAMES.get(e.eid, "")
+            if not name and 0 < e.name_at < len(names):
+                name = names[e.name_at:].split(b"\0", 1)[0].decode("utf-8", "replace")
+            if name:
+                out.append((safe_path(name), e.eid))
+        return out
 
     def _keys(self, passcode: str) -> None:
         self.f.seek(self.image_offset)
@@ -194,6 +270,8 @@ class PkgReader:
             ekpfs = hmac.new(ekpfs, seed, hashlib.sha256).digest()
         k = hmac.new(ekpfs, struct.pack("<I", 1) + seed, hashlib.sha256).digest()
         self._xts = k[16:] + k[:16]                # data key, tweak key
+        self._sign_key = hmac.new(ekpfs, struct.pack("<I", 2) + seed, hashlib.sha256).digest()
+        self._passcode = passcode
         # prove the key is right before trusting anything: the first inode must be a directory
         mode, nlink = struct.unpack_from("<HH", self._read_outer(0x10000, 0x1000), 0)
         if not stat.S_ISDIR(mode) or not 0 < nlink < 1000:
@@ -201,22 +279,79 @@ class PkgReader:
                                 "package, or a fake one made with another passcode")
 
     # -- layers ------------------------------------------------------------
-    def _read_outer(self, off: int, n: int) -> bytes:
+    def _decrypt(self, first: int, count: int) -> bytes:
+        """``count`` 4 KB sectors of the image, decrypted."""
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        if off < 0 or n < 0 or off + n > self.image_size:
-            raise Ps4PkgError("read outside the package's file system")
-        first, last = off // SECTOR, (off + n + SECTOR - 1) // SECTOR
         self.f.seek(self.image_offset + first * SECTOR)
-        raw = self.f.read((last - first) * SECTOR)
-        out = bytearray()
-        key = algorithms.AES(self._xts)
-        for k in range(last - first):
+        raw = self.f.read(min(count * SECTOR, self.image_size - first * SECTOR))
+        out, key = bytearray(), algorithms.AES(self._xts)
+        for k in range(count):
             s = raw[k * SECTOR:(k + 1) * SECTOR]
             if first + k >= XTS_FIRST and len(s) == SECTOR:
                 s = Cipher(key, modes.XTS((first + k).to_bytes(16, "little"))).decryptor().update(s)
             out += s
-        d = off - first * SECTOR
-        return bytes(out[d:d + n])
+        return bytes(out)
+
+    def _mac(self, data: bytes) -> bytes:
+        return hmac.new(self._sign_key, data, hashlib.sha256).digest()
+
+    def _read_outer(self, off: int, n: int) -> bytes:
+        if off < 0 or n < 0 or off + n > self.image_size:
+            raise Ps4PkgError("read outside the package's file system")
+        out = bytearray()
+        while n > 0:
+            b, d = divmod(off, BLOCK)
+            want = getattr(self, "_signed", {}).get(b)
+            if want is None:                          # not game data (headers, tables): just the sectors needed
+                first, last = off // SECTOR, min(off + n, (b + 1) * BLOCK)
+                last = (last + SECTOR - 1) // SECTOR
+                part = self._decrypt(first, last - first)[off - first * SECTOR:][:min(n, BLOCK - d)]
+            else:
+                if self._cache[0] != b:
+                    data = self._decrypt(b * (BLOCK // SECTOR), BLOCK // SECTOR)
+                    if not hmac.compare_digest(self._mac(data), want):
+                        raise Ps4PkgError(f"the package is damaged: block {b} doesn't match its signature")
+                    self._cache = (b, data)
+                part = self._cache[1][d:d + n]
+            if not part:
+                raise Ps4PkgError("the package ends too early")
+            out += part
+            off += len(part)
+            n -= len(part)
+        return bytes(out)
+
+    def _signatures(self, img: int, ino: dict) -> None:
+        """The signature of every block of pfs_image.dat (in its inode and the signed tables it points to)."""
+        o, total = self.outer, ino["blocks"]
+        if o.isize != S32:
+            raise Ps4PkgError("the package's file system isn't signed (not supported)")
+        raw = o.read((1 + img // o.per_block) * BLOCK + (img % o.per_block) * S32, S32)[0x64:]
+        found: dict[int, bytes] = {}
+
+        def entry(table: bytes, k: int) -> tuple[bytes, int]:
+            return table[36 * k:36 * k + 32], struct.unpack_from("<i", table, 36 * k + 32)[0]
+
+        def add(sig: bytes, block: int) -> None:
+            if block != ino["block"] + len(found):
+                raise Ps4PkgError("the package's game data isn't stored in one piece (not supported)")
+            found[block] = sig
+
+        def table(sig: bytes, block: int, depth: int) -> None:
+            data = o.read(block * BLOCK, BLOCK)
+            if not hmac.compare_digest(self._mac(data), sig):
+                raise Ps4PkgError("the package is damaged: a signature table doesn't match its own signature")
+            for k in range(BLOCK // 36):
+                if len(found) >= total:
+                    return
+                (table(*entry(data, k), depth - 1) if depth else add(*entry(data, k)))
+        for k in range(min(12, total)):
+            add(*entry(raw, k))
+        for level in range(5):
+            if len(found) < total:
+                table(*entry(raw, 12 + level), level)
+        if len(found) != total:
+            raise Ps4PkgError("the package's signature tables are incomplete")
+        self._signed = found
 
     def _pfsc(self) -> None:
         h = self._read_outer(self.pfsc_at, 0x30)
@@ -277,8 +412,9 @@ class PkgReader:
                 raise Ps4PkgError("inner file system: directory loop")
             seen.add(n)
             for name, i, typ in self.inner.entries(n):
-                if name in ("", ".", "..") or "/" in name or "\\" in name or "\0" in name:
+                if "/" in name:
                     raise Ps4PkgError(f"unsafe file name in the package: {name!r}")
+                safe_path(name)
                 if typ == T_DIR:
                     walk(i, prefix + name + "/", depth + 1)
                 else:
@@ -298,53 +434,53 @@ class PkgReader:
             left -= n
 
 
-@dataclass
-class Check:
-    files: int = 0
-    bytes: int = 0
-    missing: list[str] = None            # in the package, not on disk
-    different: list[str] = None          # content differs
-    extra: list[str] = None              # on disk, not in the package (sce_sys entries are expected, not counted)
-
-    @property
-    def ok(self) -> bool:
-        return not (self.missing or self.different)
-
-
-def check_extraction(pkg: Path, folder: Path, progress=lambda done, total, name: None, cancel=None,
-                     passcode: str = DEFAULT_PASSCODE) -> Check:
-    """Compare an extracted folder with the package, byte for byte, reading the package with this module."""
-    c = Check(missing=[], different=[], extra=[])
+def extract(pkg: Path, folder: Path, progress=lambda done, total, what: None, cancel=None,
+            passcode: str = DEFAULT_PASSCODE) -> tuple[int, int]:
+    """Extract every game file and system file into ``folder`` (new or empty). Data is signature-checked as it's read,
+    and every written file is read back and compared. Returns (files, bytes)."""
+    def stop():
+        if cancel is not None and cancel.is_set():
+            from .hashing import Cancelled
+            raise Cancelled()
     with PkgReader(pkg, passcode) as r:
-        want = r.files()
-        total, done = sum(f.size for f in want), 0
-        for f in want:
-            p = folder / f.path
-            if not p.is_file():
-                c.missing.append(f.path)
-                done += f.size
-                continue
-            same = p.stat().st_size == f.size
-            if same:
-                with open(p, "rb") as fh:
-                    for chunk in r.chunks(f):
-                        if cancel is not None and cancel.is_set():
-                            raise Ps4PkgError("cancelled")
-                        if fh.read(len(chunk)) != chunk:
-                            same = False
-                            break
-                        done += len(chunk)
-                        progress(done, total, f.path)
-            if not same:
-                c.different.append(f.path)
-            c.files += 1
-            c.bytes += f.size
-        sfo = r.entry(0x1000)
-        disk_sfo = folder / "sce_sys" / "param.sfo"
-        if sfo is not None and (not disk_sfo.is_file() or disk_sfo.read_bytes() != sfo):
-            (c.different if disk_sfo.is_file() else c.missing).append("sce_sys/param.sfo")
-        names = {f.path for f in want}
-        c.extra = sorted(str(p.relative_to(folder)).replace("\\", "/") for p in folder.rglob("*") if p.is_file()
-                         and str(p.relative_to(folder)).replace("\\", "/") not in names
-                         and not str(p.relative_to(folder)).replace("\\", "/").startswith("sce_sys/"))
-    return c
+        files = r.files()
+        have = {f.path.lower() for f in files}
+        system = [(f"sce_sys/{n}", eid) for n, eid in r.system_files() if f"sce_sys/{n}".lower() not in have]
+        seen: set[str] = set()
+        for path in [f.path for f in files] + [n for n, _e in system]:
+            if path.lower() in seen:         # Windows and Samba ignore case: one would overwrite the other
+                raise Ps4PkgError(f"two files in the package have the same name: {path}")
+            seen.add(path.lower())
+        total, done = 2 * sum(f.size for f in files), 0          # written once, read back once
+        sums: dict[str, bytes] = {}
+        for f in files:
+            stop()
+            out = folder / f.path
+            out.parent.mkdir(parents=True, exist_ok=True)
+            h = hashlib.sha256()
+            with open(out, "xb") as fh:
+                for chunk in r.chunks(f):
+                    stop()
+                    fh.write(chunk)
+                    h.update(chunk)
+                    done += len(chunk)
+                    progress(done, total, "Extracting")
+            sums[f.path] = h.digest()
+        for name, eid in system:
+            data = r.entry(eid)
+            out = folder / name
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with open(out, "xb") as fh:
+                fh.write(data)
+            sums[name] = hashlib.sha256(data).digest()
+        for name, want in sums.items():
+            h = hashlib.sha256()
+            with open(folder / name, "rb") as fh:
+                while chunk := fh.read(4 << 20):
+                    stop()
+                    h.update(chunk)
+                    done += len(chunk)
+                    progress(min(done, total), total, "Checking what was written")
+            if h.digest() != want:
+                raise Ps4PkgError(f"{name} reads back differently from what was written (disk or network problem)")
+        return len(sums), sum(f.size for f in files)

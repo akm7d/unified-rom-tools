@@ -4,13 +4,13 @@ The version lives in `romtools/__init__.py` (`__version__`) and is bumped for ev
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
 ## 1.12.0
-- ROM Optimizer: **PS4 PKG → extracted game folder (BETA - use with care)**, using the ShadPs4Plus PKG Extractor 1.1.
-  A warning is shown when the task is used (until turned off) and in its options. The extractor isn't included in
-  romtools: it's downloaded on first use, with your OK, and checked against a pinned SHA-256.
-- New independent reader for the encrypted PS4 package file system (`ps4pkg.py`, no key material). Every extracted
-  file is compared byte for byte with the package, because the extractor reports success even when it fails; output
-  that doesn't match is removed and the package is never changed. Official packages, packages with the newer key
-  scheme (which the extractor doesn't implement) and licence-only DLC are skipped with the reason.
+- ROM Optimizer: **PS4 PKG → extracted game folder (BETA - use with care)**, with romtools' own reader for the
+  encrypted PS4 package file system (`ps4pkg.py`): no other program to install and no key material. Both key schemes
+  are supported. All game data is checked against the packer's signatures and all system files against the package's
+  digests while reading, every written file is read back, and output that doesn't match is removed; the package is
+  never changed. Official packages and licence-only DLC are skipped with the reason. A warning is shown when the task
+  is used (until turned off) and in its options.
+- `./install.sh` (running from source) also checks for the Python `cryptography` package.
 
 ## 1.11.4
 - ROM Renamer's preview makes moves obvious: a new **Action** column says *Rename*, *Move into ‹folder›/* or

@@ -324,11 +324,10 @@ class BatchTab(QWidget):
         par.addWidget(self.procs)
         par.addStretch(1)
         self.beta_note = QLabel(
-            "<b style='color:#d49a1b'>⚠ BETA - use with care.</b> Extracts PS4 packages with the <i>ShadPs4Plus PKG "
-            "Extractor</i>, a young third-party program. Only fake / homebrew packages work, and not those with the "
-            "newer key scheme. It copies the whole game out (as large as the package or larger). Every extracted "
-            "file is checked byte for byte against the package by romtools' own reader; output that doesn't match "
-            "is removed. Your packages are never changed or trashed.")
+            "<b style='color:#d49a1b'>⚠ BETA - use with care.</b> Only fake / homebrew packages work; official ones "
+            "are skipped. It copies the whole game out (as large as the package or larger). All data is checked "
+            "against the package's own signatures and every written file is read back; output that doesn't match is "
+            "removed. Your packages are never changed or trashed.")
         self.beta_note.setWordWrap(True)
         g.addRow(self.beta_note)
         g.addRow("Performance:", par)
@@ -560,23 +559,22 @@ class BatchTab(QWidget):
         if preset in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS) and not Path(self.keys.text().strip()).is_file():
             if not self.ask_for_keys("prod"):
                 return
-        if preset == cv.PS4_EXTRACT and not self.ps4_beta_ok(paths):
+        if preset == cv.PS4_EXTRACT and not self.ps4_beta_ok():
             return
         self._plan_in_background(preset, paths, self.options(), first=True)
 
-    def ps4_beta_ok(self, paths: list[Path]) -> bool:
-        """The beta warning, every time the task is used (until it's turned off), then the extractor's download."""
-        from .. import ps4tool
+    def ps4_beta_ok(self) -> bool:
+        """The beta warning, every time the task is used (until it's turned off)."""
         cfg = get_config()
         if not cfg["window_state"].get("ps4_beta_accepted"):
             box = QMessageBox(QMessageBox.Icon.Warning, "Beta feature - use with care",
                               "<b>Extracting PS4 packages is a beta feature.</b>", parent=self)
             box.setInformativeText(
-                "• It runs the <i>ShadPs4Plus PKG Extractor</i>, a young third-party program that isn't part of "
-                "romtools.<br>• Only fake / homebrew packages work; official ones, and those with the newer key "
-                "scheme, are skipped.<br>• It needs as much free space as the whole game.<br>• Every extracted file "
-                "is checked byte for byte against the package afterwards, and output that doesn't match is removed. "
-                "That proves the files are right, not that a game runs.<br><br>Your packages are only read.")
+                "• Only fake / homebrew packages work; official ones are skipped.<br>• It needs as much free space "
+                "as the whole game.<br>• All data is checked against the package's own signatures and every "
+                "written file is read back; if anything doesn't match, the output is removed. That proves the files "
+                "are right, not that a game runs.<br>• It has been tested on a small number of packages so far."
+                "<br><br>Your packages are only read.")
             go = box.addButton("I understand, continue", QMessageBox.ButtonRole.AcceptRole)
             stop = box.addButton(QMessageBox.StandardButton.Cancel)
             box.setDefaultButton(stop)
@@ -588,22 +586,7 @@ class BatchTab(QWidget):
             if again.isChecked():
                 cfg["window_state"]["ps4_beta_accepted"] = True
                 cfg.save()
-        if ps4tool.program():
-            return True
-        if QMessageBox.question(
-                self, "Download the PKG extractor?",
-                f"The ShadPs4Plus PKG Extractor {ps4tool.VERSION} isn't included with romtools. Download it now "
-                f"(about 2 MB) from its official GitHub release?\n\n{ps4tool.PAGE}\n\nThe download is checked "
-                f"against a fixed checksum.") != QMessageBox.StandardButton.Yes:
-            return False
-        self.win.statusBar().showMessage("Downloading the PKG extractor…")
-        w = Worker(lambda _w: ps4tool.install(), parent=self)
-        w.done.connect(lambda _p: (self.win.statusBar().showMessage("PKG extractor installed.", 5000),
-                                   self._plan_in_background(cv.PS4_EXTRACT, paths, self.options(), first=True)))
-        w.failed.connect(lambda e: QMessageBox.warning(self, "PKG extractor", f"Couldn't install it: {e}"))
-        self._ps4_dl = w
-        w.start()
-        return False            # planning starts when the download is done
+        return True
 
     def _plan_in_background(self, preset: str, paths: list[Path], opts: cv.Options, first: bool):
         """Find the files and plan the jobs off the GUI thread: planning reads headers (CD/DVD detection, Switch
