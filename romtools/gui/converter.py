@@ -18,7 +18,7 @@ from .. import converter as cv
 from .. import updater as up
 from ..config import get_config
 from ..compat import FROZEN, IS_WIN, find_tool, launch_app, resource_dir
-from .common import ThemeButton, Worker, human, is_dark, make_app, restore_geometry, save_geometry
+from .common import ThemeButton, UpdateButton, startup_update_check, Worker, human, is_dark, make_app, restore_geometry, save_geometry
 
 STATUS_COLOR = {"Queued": "#7f8790", "Running": "#2f7fd1", "Done": "#2e9d53", "Failed": "#d1452f",
                 "Skipped": "#d49a1b", "Cancelled": "#8a6fc9"}
@@ -1997,6 +1997,7 @@ class ConverterWindow(QMainWindow):
             tb.addAction(act)
         tb.addSeparator()
         tb.addWidget(ThemeButton(self))
+        tb.addWidget(UpdateButton(self, "converter"))
 
         self.tabs = QTabWidget()
         self.batch = BatchTab(self)
@@ -2095,6 +2096,7 @@ def main():
     app.setApplicationVersion(__version__)
     w = ConverterWindow()
     w.show()
+    startup_update_check(w, "converter")
     sys.exit(app.exec())
 
 

@@ -510,7 +510,22 @@ def main() -> int:
         print(f"   {m}")
     for platform in [p for p, t in (("linux", "linux"), ("windows", "windows")) if args.target in (t, "all")]:
         prune_old_builds(platform)
+    write_release_files()
     return 0
+
+
+def write_release_files() -> None:
+    """dist/SHA256SUMS (the in-app updater only installs archives listed there) and dist/RELEASE_NOTES.md
+    (this version's CHANGELOG.md section), ready to attach to a GitHub release."""
+    archives = sorted(DIST.glob(f"romtools-{VERSION}-*.tar.gz")) + sorted(DIST.glob(f"romtools-{VERSION}-*.zip"))
+    if not archives:
+        return
+    (DIST / "SHA256SUMS").write_text("".join(f"{sha256(a)}  {a.name}\n" for a in archives))
+    log = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    m = re.search(rf"^## {re.escape(VERSION)}\s*$(.*?)(?=^## |\Z)", log, re.M | re.S)
+    (DIST / "RELEASE_NOTES.md").write_text((m.group(1).strip() if m else f"romtools {VERSION}") + "\n",
+                                           encoding="utf-8")
+    print(f"   {DIST / 'SHA256SUMS'}\n   {DIST / 'RELEASE_NOTES.md'}")
 
 
 def prune_old_builds(platform: str) -> None:

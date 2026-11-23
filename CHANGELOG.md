@@ -3,6 +3,14 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.8.0
+- **Updates**: an *Updates* button in all three apps (*Check for updates now*, *Check for updates when an app starts*
+  (on by default, at most twice a day), *About*). Packaged builds download the new release, check it against the
+  release's SHA256SUMS and unpack it next to the current folder, bringing a portable build's settings and DATs
+  along (the old version stays). A git checkout updates with `git pull --ff-only`. *Skip this version* is
+  remembered.
+- Builds also write `dist/SHA256SUMS` and `dist/RELEASE_NOTES.md` for publishing a release.
+
 ## 1.7.0
 - **Title keys**: a `title.keys` setting (ROM Verifier → Settings, ROM Optimizer → Options), shared by all apps. Used
   to read Switch packages without a ticket and passed to nstool for RomFS / ExeFS extraction.

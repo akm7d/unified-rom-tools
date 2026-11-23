@@ -19,7 +19,7 @@ from .. import tags as tg
 from ..cache import HashCache
 from ..config import get_config
 from ..datmanager import IndexCache
-from .common import (STATUS_COLORS, STATUS_HELP, LibraryPicker, SystemList, TempModeCombo, ThemeButton, Worker,
+from .common import (STATUS_COLORS, STATUS_HELP, LibraryPicker, SystemList, TempModeCombo, ThemeButton, UpdateButton, startup_update_check, Worker,
                      human, make_app,
                      restore_geometry, save_geometry)
 from .datdialog import DatDialog
@@ -370,6 +370,7 @@ class VerifierWindow(QMainWindow):
         for a in (self.act_fix, self.act_updates, act_dats, act_export, act_rename, act_settings):
             tb.addAction(a)
         tb.addWidget(ThemeButton(self))
+        tb.addWidget(UpdateButton(self, "verifier"))
 
         # ---- left: library + systems
         self.picker = LibraryPicker()
@@ -1116,6 +1117,7 @@ def main():
     app.setApplicationVersion(__version__)
     w = VerifierWindow()
     w.show()
+    startup_update_check(w, "verifier")
     sys.exit(app.exec())
 
 

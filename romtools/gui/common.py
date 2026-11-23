@@ -397,3 +397,145 @@ def save_geometry(win, key: str) -> None:
     if hasattr(win, "saveState"):
         s.setValue("state", win.saveState())
 
+
+
+# ---------------------------------------------------------------- updates (romtools itself)
+
+class UpdateButton(QToolButton):
+    """Toolbar button: Updates ▸ Check for updates now / Check at launch / About. ``module`` is the app this window
+    is (verifier / renamer / converter), so it can be restarted into the new version."""
+
+    def __init__(self, parent, module: str):
+        super().__init__(parent)
+        from .. import __version__
+        self.win, self.module = parent, module
+        self.setText("Updates")
+        self.setIcon(QIcon.fromTheme("system-software-update"))
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setToolTip(f"romtools {__version__}: check for a newer version (shared by all three apps)")
+        menu = QMenu(self)
+        menu.addAction(QIcon.fromTheme("view-refresh"), "Check for updates now", lambda: check_updates(self.win,
+                                                                                                    module, True))
+        self.auto = menu.addAction("Check for updates when an app starts")
+        self.auto.setCheckable(True)
+        self.auto.setChecked(bool(get_config()["check_updates_at_launch"]))
+        self.auto.toggled.connect(self._toggle)
+        menu.addSeparator()
+        menu.addAction(QIcon.fromTheme("help-about"), f"About romtools {__version__}", self._about)
+        self.setMenu(menu)
+
+    def _toggle(self, on: bool):
+        cfg = get_config()
+        cfg["check_updates_at_launch"] = on
+        cfg.save()
+
+    def _about(self):
+        from .. import __version__
+        from .. import selfupdate as su
+        where = f"<br>Updates: <a href='https://github.com/{su.GITHUB_REPO}/releases'>github.com/{su.GITHUB_REPO}" \
+                f"</a>" if su.GITHUB_REPO else ""
+        QMessageBox.about(self.win, "About romtools",
+                          f"<b>romtools {__version__}</b><br>ROM Verifier, ROM Renamer and ROM Optimizer.{where}")
+
+
+def startup_update_check(win, module: str) -> None:
+    """Called once a window is shown: quietly check for a newer release (if enabled and not checked recently)."""
+    from PySide6.QtCore import QTimer
+    from .. import selfupdate as su
+    if su.GITHUB_REPO and su.due(get_config()):
+        QTimer.singleShot(2500, lambda: check_updates(win, module, False))
+
+
+def check_updates(win, module: str, manual: bool) -> None:
+    """Look for a newer release in the background. ``manual``: also report "up to date" and errors."""
+    from .. import __version__
+    from .. import selfupdate as su
+
+    def job(_w):
+        return su.latest()
+
+    def done(rel):
+        cfg = get_config()
+        su.mark_checked(cfg)
+        skipped = cfg["window_state"].get("update_skip_version", "")
+        if not su.newer(rel.version):
+            if manual:
+                QMessageBox.information(win, "Updates", f"romtools {__version__} is the newest version.")
+            return
+        if not manual and rel.version == skipped:
+            return
+        _offer(win, module, rel)
+
+    def failed(err):
+        su.mark_checked(get_config())
+        if manual:
+            QMessageBox.warning(win, "Updates", f"Couldn't check for updates:\n{err.split(': ', 1)[-1]}")
+
+    w = Worker(job, parent=win)
+    w.done.connect(done)
+    w.failed.connect(failed)
+    win._update_worker = w
+    w.start()
+
+
+def _offer(win, module: str, rel) -> None:
+    from PySide6.QtWidgets import QProgressDialog
+    from .. import __version__
+    from .. import selfupdate as su
+    kind = su.install_kind()
+    box = QMessageBox(QMessageBox.Icon.Information, "Update available",
+                      f"<b>romtools {rel.version}</b> is available (you have {__version__}).", parent=win)
+    how = {"build": "It's downloaded, checked against its published checksum and unpacked next to this folder; "
+                    "your settings and DATs come along, and this version stays where it is.",
+           "git": "Your copy is updated with git (git pull), then the bundled tools are fetched again.",
+           "source": "This copy has no git history: open the release page to download it."}[kind]
+    box.setInformativeText(how)
+    if rel.notes:
+        box.setDetailedText(rel.notes)
+    upd = box.addButton("Update now" if kind != "source" else "Open release page", QMessageBox.ButtonRole.AcceptRole)
+    later = box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+    skip = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
+    box.setDefaultButton(upd)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is skip:
+        cfg = get_config()
+        cfg["window_state"]["update_skip_version"] = rel.version
+        cfg.save()
+        return
+    if clicked is later or clicked is None:
+        return
+    if kind == "source":
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(rel.page))
+        return
+    dlg = QProgressDialog("Starting…", None, 0, 1000, win)
+    dlg.setWindowTitle(f"Updating to {rel.version}")
+    dlg.setMinimumDuration(0)
+    dlg.setValue(0)
+
+    w = Worker(lambda wk: su.apply(rel, lambda s, f: wk.progress.emit(int(f * 1000), 1000, s, f)), parent=win)
+    w.progress.connect(lambda d, _t, s, _f: (dlg.setLabelText(s), dlg.setValue(d)))
+
+    def finished(res):
+        dlg.close()
+        folder, msg = res
+        if QMessageBox.question(win, "Updated", msg + "\n\nRestart now with the new version?") != \
+                QMessageBox.StandardButton.Yes:
+            return
+        import subprocess
+        import sys
+        if folder is not None:
+            subprocess.Popen(su.launcher(folder, module), cwd=str(folder))
+        else:
+            from ..compat import app_dir
+            subprocess.Popen([sys.executable, "-m", f"romtools.gui.{module}"], cwd=str(app_dir()))
+        win.close()
+
+    w.done.connect(finished)
+    w.failed.connect(lambda e: (dlg.close(), QMessageBox.warning(win, "Update failed",
+                                                                 e.split(": ", 1)[-1] + "\n\nNothing was changed.")))
+    win._update_worker = w
+    w.start()
