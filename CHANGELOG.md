@@ -3,6 +3,14 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.8.2
+- Fix: **untrim** read the whole ROM into memory plus a full-size block of padding (4-8 GB for a large 3DS game);
+  trim's reversibility check built the padding in memory too. Both are streamed in 8 MB blocks now.
+- Safer in-place replacement (trim / untrim in place, Fix CHD types): the original steps aside as
+  "Name (original).ext", the new file is put in place, and only then is the original trashed. Before, the original
+  was trashed first, so a failed final rename (e.g. a network share hiccup) could leave the game only in the trash.
+  In the trash it now has a readable name.
+
 ## 1.8.1
 - Fix: the packaged builds were missing the `cryptography` library, so Switch packages couldn't be read there
   (running from source was fine). It's now pinned and the self-test decrypts with it.

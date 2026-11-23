@@ -43,16 +43,34 @@ def _tmp_beside(path: Path, suffix: str) -> Path:
     return path.with_name(f".romtools-{uuid.uuid4().hex[:8]}{suffix}")
 
 
+def park_name(source: Path) -> Path:
+    """Where an original waits while its replacement is put in place: "Name (original).ext" (readable if it is
+    ever restored from the trash), with a number added if that's taken."""
+    cand = source.with_name(f"{source.stem} (original){source.suffix}")
+    n = 2
+    while cand.exists():
+        cand = source.with_name(f"{source.stem} (original {n}){source.suffix}")
+        n += 1
+    return cand
+
+
 def _finish_new_file(ctx: TaskContext, tmp: Path, final: Path, source: Path | None) -> str:
     """Rename a verified temp file into place; optionally trash the source. Never overwrites."""
     if final.exists() and final != source:
         raise RuntimeError(f"{final.name} already exists")
     if source is not None and final == source:
-        # in-place replacement (same name): the original must go to the trash first
-        if not ctx.trash(source):
-            raise RuntimeError("couldn't move the original to the trash, so it was left as it was")
-        os.rename(tmp, final)
-        return "original moved to the trash"
+        # in-place replacement (same name): park the original under a temporary name, put the new file in place,
+        # and only then trash the original - so a failure at any step leaves a complete file under the real name
+        parked = park_name(source)
+        os.rename(source, parked)
+        try:
+            os.rename(tmp, final)
+        except OSError:
+            os.rename(parked, source)            # put the original back
+            raise
+        if ctx.trash(parked):
+            return "original moved to the trash"
+        return f"couldn't trash the original; it was kept as {parked.name}"
     os.rename(tmp, final)
     if source is not None and ctx.trash_sources:
         return "original moved to the trash" if ctx.trash(source) else "couldn't trash the original"
@@ -222,7 +240,11 @@ def trim(path: Path, out: Path) -> Callable[[TaskContext], str]:
             with open(tmp, "rb") as fh:
                 while chunk := fh.read(8 << 20):
                     h.update(chunk)
-            h.update(bytes([pad]) * (full - used))
+            block, left = bytes([pad]) * (8 << 20), full - used    # streamed: 3DS padding can be gigabytes
+            while left:
+                n = min(left, len(block))
+                h.update(block[:n])
+                left -= n
             ctx.progress(0.9, "Checking")
             if h.hexdigest() != want:
                 raise RuntimeError("trim check failed - nothing changed")
@@ -244,21 +266,25 @@ def untrim(path: Path, out: Path, dat_index=None) -> Callable[[TaskContext], str
         pads = [0xFF, 0x00]
         chosen, note_dat = 0xFF, ""
         if dat_index is not None:
-            base = hashlib.sha1()
-            crc = 0
+            # hash the file once (streamed - 3DS games are up to 4 GB), then each candidate padding in 8 MB blocks
+            base, crc = hashlib.sha1(), 0
             with open(path, "rb") as fh:
-                data_all = fh.read()
-            base.update(data_all)
+                while chunk := fh.read(8 << 20):
+                    ctx.check()
+                    base.update(chunk)
+                    crc = zlib.crc32(chunk, crc)
             for b in pads:
-                h = base.copy()
-                tail = bytes([b]) * (full - size)
-                h.update(tail)
-                c = zlib.crc32(tail, zlib.crc32(data_all)) & 0xFFFFFFFF
-                hits = dat_index.lookup(full, f"{c:08x}", None, h.hexdigest())
+                h, c = base.copy(), crc
+                block, left = bytes([b]) * (8 << 20), full - size
+                while left:
+                    n = min(left, len(block))
+                    h.update(block[:n])
+                    c = zlib.crc32(block[:n], c)
+                    left -= n
+                hits = dat_index.lookup(full, f"{c & 0xFFFFFFFF:08x}", None, h.hexdigest())
                 if hits:
                     chosen, note_dat = b, f"matches No-Intro: {hits[0][0].name}"
                     break
-            del data_all
         tmp = _tmp_beside(out, path.suffix)
         try:
             with open(path, "rb") as fi, open(tmp, "wb") as fo:

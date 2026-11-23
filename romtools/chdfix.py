@@ -160,10 +160,17 @@ def fix(path: Path, target: str, ram_mode: bool, ssd_dir: Path, cancel: threadin
         # 6. swap
         if cancel.is_set():
             raise Cancelled()
-        log("== Identical. Moving the original to the trash and putting the new CHD in its place")
-        if not _trash(path):
-            raise RuntimeError("couldn't move the original to the trash, so it was left in place")
-        os.rename(tmp_chd, path)
+        log("== Identical. Putting the new CHD in place and moving the original to the trash")
+        from .tasks import park_name
+        parked = park_name(path)          # original steps aside first, so the real name always holds a full CHD
+        os.rename(path, parked)
+        try:
+            os.rename(tmp_chd, path)
+        except OSError:
+            os.rename(parked, path)
+            raise RuntimeError("couldn't put the new CHD in place, so the original was left as it was")
+        if not _trash(parked):
+            log(f"== Couldn't move the original to the trash; it was kept as {parked.name}")
         progress(1.0, "done")
         log(f"== Done: {path.name} is now a {target.upper()} CHD (original is in the trash)")
         entries[0].name = "ISO.iso" if target == "dvd" else "BIN.bin"
