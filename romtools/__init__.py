@@ -1,6 +1,6 @@
 """romtools - Linux-native ROM verification and renaming tools."""
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 APP_ORG = "romtools"
 
 from .compat import hide_console_windows as _hide  # noqa: E402

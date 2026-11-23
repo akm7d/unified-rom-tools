@@ -422,7 +422,9 @@ class UpdateButton(QToolButton):
         self.auto.setChecked(bool(get_config()["check_updates_at_launch"]))
         self.auto.toggled.connect(self._toggle)
         menu.addSeparator()
-        menu.addAction(QIcon.fromTheme("help-about"), f"About romtools {__version__}", self._about)
+        menu.addAction(QIcon.fromTheme("help-about"), f"About Unified Rom Tools {__version__}", self._about)
+        menu.addAction(QIcon.fromTheme("help-contents"), "Credits (tools, libraries, databases)",
+                       lambda: show_credits(self.win))
         self.setMenu(menu)
 
     def _toggle(self, on: bool):
@@ -437,7 +439,11 @@ class UpdateButton(QToolButton):
                 f"</a>" if su.GITHUB_REPO else ""
         QMessageBox.about(self.win, "About Unified Rom Tools",
                           f"<b>Unified Rom Tools (URT) {__version__}</b><br>ROM Verifier, ROM Renamer and ROM "
-                          f"Optimizer.<br>Free software under the GNU GPL v3.0.{where}")
+                          f"Optimizer.<br>Free software under the GNU GPL v3.0, without any warranty.{where}"
+                          f"<br><br><b>Written by AI:</b> this software was written by Claude, an AI model made by "
+                          f"Anthropic, directed and tested by its maintainer. Keep backups of anything you can't "
+                          f"replace and check previews before applying changes.<br><br>Built on many open-source "
+                          f"tools and databases: Updates ▸ <i>Credits</i>.")
 
 
 def startup_update_check(win, module: str) -> None:
@@ -540,3 +546,24 @@ def _offer(win, module: str, rel) -> None:
                                                                  e.split(": ", 1)[-1] + "\n\nNothing was changed.")))
     win._update_worker = w
     w.start()
+
+
+def show_credits(parent) -> None:
+    """The bundled CREDITS.md (tools, libraries, databases, the AI note) in a window."""
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser, QVBoxLayout
+    from ..compat import app_dir, resource_dir
+    text = next((p.read_text(encoding="utf-8") for p in (resource_dir() / "CREDITS.md", app_dir() / "CREDITS.md")
+                 if p.is_file()), "CREDITS.md is missing from this copy - see the project page on GitHub.")
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Credits - Unified Rom Tools")
+    dlg.resize(900, 640)
+    view = QTextBrowser()
+    view.setOpenExternalLinks(True)
+    view.setMarkdown(text)
+    bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    bb.rejected.connect(dlg.reject)
+    lay = QVBoxLayout(dlg)
+    lay.addWidget(view)
+    lay.addWidget(bb)
+    dlg.exec()
+

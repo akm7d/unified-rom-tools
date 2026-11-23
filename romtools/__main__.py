@@ -153,6 +153,10 @@ def selftest(report: str | None) -> int:
     def disc_tools():
         from romtools.compat import FROZEN, find_tool
         found = {t: find_tool(t) for t in ("nodtool", "nsz", "nstool")}
+        # the Switch package reader needs the cryptography library (AES-XTS / CTR / ECB): prove it's bundled
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        blk = Cipher(algorithms.AES(bytes(range(32))), modes.XTS(bytes(16))).encryptor().update(bytes(512))
+        assert len(blk) == 512 and Cipher(algorithms.AES(bytes(16)), modes.CTR(bytes(16))).decryptor().update(b"x")
         from romtools.nod import parse_verify
         got = parse_verify(["Title: X", "Game ID: GZ2E01", "Redump: X ✅", "CRC32 : 0ab54d43 ✅",
                             "SHA-1 : 75EDD3DDFF41F125D1B4CE1A40378F1B565519E7 ✅", "XXH64 : 0123456789abcdef"])
@@ -162,7 +166,7 @@ def selftest(report: str | None) -> int:
         if missing and FROZEN:
             raise RuntimeError("bundled tool(s) missing: " + ", ".join(missing))
         return ", ".join(f"{t}: {'bundled' if p and 'tools' in p else (p or 'not installed (bundled in builds)')}"
-                         for t, p in found.items())
+                         for t, p in found.items()) + ", cryptography OK"
 
     def console_packages():
         import struct

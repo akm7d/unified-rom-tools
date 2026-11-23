@@ -3,6 +3,14 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.8.1
+- Fix: the packaged builds were missing the `cryptography` library, so Switch packages couldn't be read there
+  (running from source was fine). It's now pinned and the self-test decrypts with it.
+- **AI disclaimer** in the README and the About box: this software was written by Claude (Anthropic's AI model),
+  directed and tested by its maintainer.
+- **Credits**: `CREDITS.md` lists every bundled tool, library and database used, with links and licenses; it ships
+  in the builds and opens from *Updates ▸ Credits* in every app.
+
 ## 1.8.0
 - **Updates**: an *Updates* button in all three apps (*Check for updates now*, *Check for updates when an app starts*
   (on by default, at most twice a day), *About*). Packaged builds download the new release, check it against the

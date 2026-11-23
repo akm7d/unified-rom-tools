@@ -2,6 +2,12 @@
 
 **ROM Verifier, ROM Renamer & ROM Optimizer** (the code and settings folders are named `romtools`).
 
+> **Disclaimer: written by AI.** This software was written by **Claude**, an AI model made by Anthropic, directed
+> and tested by its maintainer. It's provided as is, without warranty (see the GPL). It only renames, moves,
+> converts or deletes files when you tell it to, always with a preview, a check or an undo, but **keep backups of
+> anything you can't replace** and review what it proposes before applying it.
+> Thanks to the open-source tools and databases it builds on: see **[CREDITS.md](CREDITS.md)**.
+
 Three Linux-native Qt (PySide6) desktop apps for a RomM-style library (`roms/<system>/…`).
 
 ## Install
@@ -217,6 +223,14 @@ The old folder is left as it was, so you can go back. A copy cloned with git is 
 | `~/.local/share/romtools/marks.json` | your hack / translation tags |
 | `~/.cache/romtools/hashes.sqlite` | hash cache |
 | `~/.local/share/romtools/chdman/` | chdman builds made by the updater |
+
+## Disclaimer
+
+Unified Rom Tools was written by Claude (Anthropic's AI model) with its maintainer, who directs the work, tests it
+on a real library and publishes it. AI-written code can contain mistakes: it comes **without any warranty**, so
+keep backups and check previews before applying changes. It is not affiliated with Nintendo, Sony, Sega,
+Microsoft or any of the projects it uses, and it includes no keys, BIOS, firmware or games. Credits for every
+bundled tool, library and database: **[CREDITS.md](CREDITS.md)**.
 
 ## License
 
