@@ -3,6 +3,10 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.15.1
+- ROM Optimizer, PS4: a game that gets its update merged in is listed as "Game v1.00; update v1.02 (next row) is merged
+  in → CUSA…/" instead of "Game + update v1.02", which read as if the package itself held both.
+
 ## 1.15.0
 - ROM Optimizer, PS4 (beta): **updates are merged into the game's folder**, like for Switch games. A game's newest update
   (picked with it, or lying next to it) is put on top file by file while extracting, shown as its own row, so there's

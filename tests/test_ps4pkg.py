@@ -295,6 +295,7 @@ def test_update_is_merged_into_the_game(tmp_path):
         out = tmp_path / "-".join(pick)
         jobs = cv.plan(cv.PS4_EXTRACT, [tmp_path / "in" / n for n in pick], cv.Options(output_dir=str(out)))
         assert [(j.status, bool(j.follows)) for j in jobs] == [("Queued", False), ("Queued", True)], [j.title for j in jobs]
+        assert "Game v1.00; update v1.05 (next row) is merged in → CUSA11111/" in jobs[0].detail
         run_all(jobs)
         assert [j.status for j in jobs] == ["Done", "Done"], jobs[0].message
         assert tree_of(out) == {f"CUSA11111/{k}": v for k, v in {**game, **upd}.items()}    # the update wins, file by file

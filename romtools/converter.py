@@ -345,10 +345,12 @@ def plan_ps4(files: list[Path], opts: Options) -> list[Job]:
             continue
         ui, ufl, _ = opened(use)
         sizes = {f.path.lower(): f.size for f in fl} | {f.path.lower(): f.size for f in ufl}
-        game = job(title, src, tasks.extract_ps4([src, use], home), home,
-                   f"{info.kind} + update v{ui.version_str}" + ("" if ui.content_id == info.content_id else
-                                                              " (⚠ made for another release of the game)"),
-                   len(sizes), sum(sizes.values()))
+        # what's in this package, and what comes out of the job: the update is the other package, in the next row
+        what = f"{info.kind} v{info.version_str}; update v{ui.version_str} (next row) is merged in" + (
+            "" if ui.content_id == info.content_id else " (⚠ made for another release of the game)")
+        game = _task_job(title, src, tasks.extract_ps4([src, use], home), "Extracting (beta)", [home], [],
+                         detail=f"⚠ BETA - {what} → {home.name}/, {len(sizes)} files, {sum(sizes.values()) / 1e9:.2f} GB "
+                                f"in total")
         jobs.append(game)
         upd = Job(next(_ids), f"  ↳ apply update v{ui.version_str}: {use.name}", use, [])
         upd.follows, upd.func_label = game, "Applying"
