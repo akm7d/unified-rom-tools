@@ -3,6 +3,10 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.11.3
+- Every app has buttons to open the other two, in the same order and place (next to Theme / Updates) with the
+  apps' own icons. ROM Verifier and ROM Renamer couldn't open ROM Optimizer before.
+
 ## 1.11.2
 - ROM Verifier and ROM Renamer: the "CHD temp: RAM / SSD" switch now reads *Unpack CHDs in RAM (slower, spares the
   SSD)* / *Unpack CHDs on the SSD (faster)*, with a plain explanation of the trade-off in its tooltip.

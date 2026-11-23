@@ -19,7 +19,7 @@ from .. import tags as tg
 from ..cache import HashCache
 from ..config import get_config
 from ..datmanager import IndexCache
-from .common import (STATUS_COLORS, STATUS_HELP, LibraryPicker, SystemList, TempModeCombo, ThemeButton, UpdateButton, startup_update_check, Worker,
+from .common import (add_app_buttons, STATUS_COLORS, STATUS_HELP, LibraryPicker, SystemList, TempModeCombo, ThemeButton, UpdateButton, startup_update_check, Worker,
                      human, make_app,
                      restore_geometry, save_geometry)
 from .datdialog import DatDialog
@@ -330,8 +330,6 @@ class VerifierWindow(QMainWindow):
         act_dats.triggered.connect(self.manage_dats)
         act_export = QAction(QIcon.fromTheme("document-export"), "Export report…", self)
         act_export.triggered.connect(self.export)
-        act_rename = QAction(QIcon.fromTheme("edit-rename"), "Open ROM Renamer", self)
-        act_rename.triggered.connect(self.open_renamer)
         act_settings = QAction(QIcon.fromTheme("configure"), "Settings…", self)
         act_settings.triggered.connect(lambda: (SettingsDialog(self, self.cache).exec(), self.mode.sync()))
         for a in (self.act_scan, self.act_full):
@@ -367,8 +365,9 @@ class VerifierWindow(QMainWindow):
                                     "database, downloaded once a day).\nPS4: right-click a package → Look up "
                                     "updates online.")
         self.act_updates.triggered.connect(self.check_updates)
-        for a in (self.act_fix, self.act_updates, act_dats, act_export, act_rename, act_settings):
+        for a in (self.act_fix, self.act_updates, act_dats, act_export, act_settings):
             tb.addAction(a)
+        add_app_buttons(tb, self, "verifier")
         tb.addWidget(ThemeButton(self))
         tb.addWidget(UpdateButton(self, "verifier"))
 

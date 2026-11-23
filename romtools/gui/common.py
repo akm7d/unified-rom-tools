@@ -574,3 +574,22 @@ def show_credits(parent) -> None:
     lay.addWidget(bb)
     dlg.exec()
 
+
+APPS = (("verifier", "ROM Verifier", "rom-verifier"), ("renamer", "ROM Renamer", "rom-renamer"),
+        ("converter", "ROM Optimizer", "rom-optimizer"))
+
+
+def add_app_buttons(tb, win, current: str) -> None:
+    """'Open ROM …' buttons for the other two apps, in the same order and place in every app's toolbar."""
+    from PySide6.QtGui import QAction
+    from ..compat import launch_app, resource_dir
+    tb.addSeparator()
+    for module, name, icon in APPS:
+        if module == current:
+            continue
+        act = QAction(QIcon.fromTheme(icon, QIcon(str(resource_dir() / "icons" / f"{icon}.svg"))), f"Open {name}", win)
+        act.setToolTip(f"Start {name} (opens in its own window)")
+        act.triggered.connect(lambda _=False, m=module: launch_app(m))
+        tb.addAction(act)
+    tb.addSeparator()
+

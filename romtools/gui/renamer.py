@@ -19,7 +19,7 @@ from .. import scanner as sc
 from ..cache import HashCache
 from ..config import get_config
 from ..datmanager import IndexCache
-from .common import LibraryPicker, SystemList, TempModeCombo, ThemeButton, UpdateButton, startup_update_check, Worker, is_dark, make_app, restore_geometry, save_geometry
+from .common import add_app_buttons, LibraryPicker, SystemList, TempModeCombo, ThemeButton, UpdateButton, startup_update_check, Worker, is_dark, make_app, restore_geometry, save_geometry
 from .datdialog import DatDialog
 
 C_ON, C_SYS, C_OLD, C_NEW, C_WHY, C_PROBLEM = range(6)
@@ -128,13 +128,12 @@ class RenamerWindow(QMainWindow):
         act_hist.triggered.connect(lambda: HistoryDialog(self, self.cache).exec())
         act_dats = QAction(QIcon.fromTheme("view-list-details"), "Manage DATs…", self)
         act_dats.triggered.connect(self.manage_dats)
-        act_ver = QAction(QIcon.fromTheme("security-high"), "Open ROM Verifier", self)
-        act_ver.triggered.connect(lambda: __import__("romtools.compat", fromlist=["x"]).launch_app("verifier"))
         for a in (self.act_preview, self.act_stop, self.act_apply):
             tb.addAction(a)
         tb.addSeparator()
-        for a in (act_hist, act_dats, act_ver):
+        for a in (act_hist, act_dats):
             tb.addAction(a)
+        add_app_buttons(tb, self, "renamer")
         tb.addWidget(ThemeButton(self))
         tb.addWidget(UpdateButton(self, "renamer"))
 
