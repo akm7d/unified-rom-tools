@@ -227,6 +227,11 @@ class RenamerWindow(QMainWindow):
         self.r_space.setChecked(True)
         self.r_ext = QCheckBox("Lower-case extensions (.ISO → .iso)")
         self.r_dirs = QCheckBox("Also rename folders")
+        self._rule_boxes = {"dup": self.r_dup, "us": self.r_us, "dots": self.r_dots, "the": self.r_the,
+                            "safe": self.r_safe, "space": self.r_space, "ext": self.r_ext, "dirs": self.r_dirs}
+        for k, box in self._rule_boxes.items():          # remembered like the other choices
+            if k in st.get("rule_boxes", {}):
+                box.setChecked(st["rule_boxes"][k])
         grid = QHBoxLayout()
         c1, c2 = QVBoxLayout(), QVBoxLayout()
         for i, w in enumerate((self.r_dup, self.r_us, self.r_dots, self.r_the, self.r_safe, self.r_space, self.r_ext,
@@ -334,7 +339,8 @@ class RenamerWindow(QMainWindow):
         self.cfg["window_state"]["renamer_sections"] = {
             "dat": self.sec_dat.isChecked(), "pkg": self.sec_pkg.isChecked(), "rules": self.sec_rules.isChecked(),
             "skip_uncached": self.skip_uncached.isChecked(), "p_rename": self.p_rename.isChecked(),
-            "p_org": self.p_org.isChecked(), "p_multi": self.p_multi.isChecked()}
+            "p_org": self.p_org.isChecked(), "p_multi": self.p_multi.isChecked(),
+            "rule_boxes": {k: b.isChecked() for k, b in self._rule_boxes.items()}}
         self.cfg.save()
 
     def _sections_changed(self):
