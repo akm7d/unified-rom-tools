@@ -1,4 +1,4 @@
-"""ROM Renamer - preview-first renaming from DAT matches or cleanup rules, with undo."""
+"""ROM Renamer - preview-first renaming from DAT matches, console package data and cleanup rules, with undo."""
 
 from __future__ import annotations
 
@@ -133,10 +133,6 @@ class RenamerWindow(QMainWindow):
         for a in (self.act_preview, self.act_stop, self.act_apply):
             tb.addAction(a)
         tb.addSeparator()
-        self.mode = TempModeCombo(lambda: bool(self.worker and self.worker.isRunning()),
-                                  lambda m: self.statusBar().showMessage(m, 8000))
-        tb.addWidget(self.mode)
-        tb.addSeparator()
         for a in (act_hist, act_dats, act_ver):
             tb.addAction(a)
         tb.addWidget(ThemeButton(self))
@@ -161,72 +157,109 @@ class RenamerWindow(QMainWindow):
         ll.addLayout(row)
         ll.addWidget(self.systems, 1)
 
-        # ---- mode tabs
-        self.tabs = QTabWidget()
-        dat_tab = QWidget()
-        dl = QVBoxLayout(dat_tab)
-        info = QLabel("Renames <b>verified-good</b> ROMs whose file name differs from the No-Intro / Redump DAT. "
-                      "Files are identified by hash, so the result is always the official name. Hashes are shared "
-                      "with ROM Verifier, so anything already verified is instant.")
-        info.setWordWrap(True)
+        # ---- what to rename: one panel, a section per kind of renaming (each switched on/off by its title)
+        st = self.cfg["window_state"].get("renamer_sections", {})
+
+        sec_dat = QGroupBox("Official names from DATs (No-Intro / Redump)")
+        sec_dat.setCheckable(True)
+        sec_dat.setChecked(st.get("dat", True))
+        sec_dat.setToolTip("ROMs are identified by hash, so the new name is always the official one. Hashes are shared "
+                           "with ROM Verifier, so anything it has checked is instant.")
+        dl = QVBoxLayout(sec_dat)
         self.use_dat_ext = QCheckBox("Use the DAT's file extension (e.g. .smc → .sfc)")
         self.use_dat_ext.setChecked(self.cfg["rename_use_dat_ext"])
-        self.skip_uncached = QCheckBox("Skip CHDs that haven't been verified yet (avoids long extractions)")
-        self.skip_uncached.setChecked(True)
-        dl.addWidget(info)
-        dl.addWidget(self.use_dat_ext)
-        dl.addWidget(self.skip_uncached)
+        self.skip_uncached = QCheckBox("Skip CHDs ROM Verifier hasn't checked yet (checking unpacks each disc)")
+        self.skip_uncached.setChecked(st.get("skip_uncached", True))
+        # where unpacked CHDs go while being checked: only matters when unchecked CHDs are included
+        self.mode = TempModeCombo(lambda: bool(self.worker and self.worker.isRunning()),
+                                  lambda m: self.statusBar().showMessage(m, 8000))
+        self.mode.setToolTip("Where CHDs are unpacked while they're checked: RAM (no SSD writes, slower) or SSD")
+        mrow = QHBoxLayout()
+        mrow.setContentsMargins(22, 0, 0, 0)
+        mrow.addWidget(QLabel("Unpack them in:"))
+        mrow.addWidget(self.mode)
+        mrow.addStretch(1)
+        self.skip_uncached.toggled.connect(lambda on: self.mode.setEnabled(not on))
+        self.mode.setEnabled(not self.skip_uncached.isChecked())
+        for w in (self.use_dat_ext, self.skip_uncached):
+            dl.addWidget(w)
+        dl.addLayout(mrow)
         dl.addStretch(1)
-        self.tabs.addTab(dat_tab, QIcon.fromTheme("checkmark"), "Match DAT names")
 
-        rules_tab = QWidget()
-        rg = QHBoxLayout(rules_tab)
-        box = QGroupBox("Rules")
-        bl = QVBoxLayout(box)
-        self.r_dup = QCheckBox("Remove duplicate markers:  “Game (USA) (1).sfc” → “Game (USA).sfc”")
+        sec_pkg = QGroupBox("Console packages (PS4 / Switch)")
+        sec_pkg.setCheckable(True)
+        sec_pkg.setChecked(st.get("pkg", True))
+        sec_pkg.setToolTip("PS4 PKG and Switch NSP / NSZ / XCI / XCZ named from their own data: “Title [CUSA00000] "
+                           "(Update v1.09)”, “Title [0100…][v0]”. Titles you already use for a game are kept. Switch "
+                           "packages need your prod.keys (ROM Verifier → Settings).")
+        pl = QVBoxLayout(sec_pkg)
+        self.p_rename = QCheckBox("Name them from the package data")
+        self.p_rename.setChecked(st.get("p_rename", True))
+        self.p_org = QCheckBox("One folder per game (base game, updates, DLC)")
+        self.p_org.setToolTip("Uses the game's existing folder if it has one")
+        self.p_org.setChecked(st.get("p_org", False))
+        self.p_multi = QCheckBox("…only for games with more than one file")
+        self.p_multi.setChecked(st.get("p_multi", True))
+        self.p_org.toggled.connect(self.p_multi.setEnabled)
+        self.p_multi.setEnabled(self.p_org.isChecked())
+        mi = QHBoxLayout()
+        mi.setContentsMargins(22, 0, 0, 0)
+        mi.addWidget(self.p_multi)
+        for w in (self.p_rename, self.p_org):
+            pl.addWidget(w)
+        pl.addLayout(mi)
+        pl.addStretch(1)
+
+        sec_rules = QGroupBox("Cleanup rules (any file)")
+        sec_rules.setCheckable(True)
+        sec_rules.setChecked(st.get("rules", False))
+        sec_rules.setToolTip("Tidy names that no DAT or package can name: duplicate markers, underscores, characters "
+                             "that break Samba / Windows, and your own find & replace")
+        rg = QVBoxLayout(sec_rules)
+        self.r_dup = QCheckBox("Remove duplicate markers: “Game (1)” → “Game”")
         self.r_dup.setChecked(True)
-        self.r_us = QCheckBox("Underscores to spaces:  “Bayonetta_3” → “Bayonetta 3”")
-        self.r_dots = QCheckBox("Dots between words to spaces:  “Some.Game” → “Some Game”")
-        self.r_the = QCheckBox("Move leading “The”:  “The Legend of X - Y” → “Legend of X, The - Y”")
-        self.r_safe = QCheckBox("Remove characters that break SMB/Windows ( : ? * \" < > | \\ )")
+        self.r_us = QCheckBox("Underscores → spaces")
+        self.r_dots = QCheckBox("Dots between words → spaces")
+        self.r_the = QCheckBox("Leading “The” → “…, The”")
+        self.r_safe = QCheckBox("Remove characters that break Samba / Windows ( : ? * \" < > | \\ )")
         self.r_safe.setChecked(True)
-        self.r_space = QCheckBox("Collapse repeated spaces / trim")
+        self.r_space = QCheckBox("Collapse repeated spaces")
         self.r_space.setChecked(True)
         self.r_ext = QCheckBox("Lower-case extensions (.ISO → .iso)")
-        self.r_dirs = QCheckBox("Also rename folders (Switch / PS3 / extracted games)")
-        for w in (self.r_dup, self.r_us, self.r_dots, self.r_the, self.r_safe, self.r_space, self.r_ext, self.r_dirs):
-            bl.addWidget(w)
-        fbox = QGroupBox("Find && replace")
-        fl = QFormLayout(fbox)
+        self.r_dirs = QCheckBox("Also rename folders")
+        grid = QHBoxLayout()
+        c1, c2 = QVBoxLayout(), QVBoxLayout()
+        for i, w in enumerate((self.r_dup, self.r_us, self.r_dots, self.r_the, self.r_safe, self.r_space, self.r_ext,
+                               self.r_dirs)):
+            (c1 if i < 4 else c2).addWidget(w)
+        grid.addLayout(c1)
+        grid.addLayout(c2)
+        rg.addLayout(grid)
         self.r_find = QLineEdit()
+        self.r_find.setPlaceholderText("find")
         self.r_repl = QLineEdit()
-        self.r_regex = QCheckBox("Regular expression (Python syntax, \\1 for groups)")
-        fl.addRow("Find:", self.r_find)
-        fl.addRow("Replace with:", self.r_repl)
-        fl.addRow("", self.r_regex)
-        rg.addWidget(box, 1)
-        rg.addWidget(fbox, 1)
-        self.tabs.addTab(rules_tab, QIcon.fromTheme("tools"), "Cleanup rules")
+        self.r_repl.setPlaceholderText("replace with")
+        self.r_regex = QCheckBox("Regex")
+        self.r_regex.setToolTip("Regular expression (Python syntax, \\1 for groups)")
+        fr = QHBoxLayout()
+        fr.addWidget(QLabel("Find & replace:"))
+        fr.addWidget(self.r_find, 1)
+        fr.addWidget(self.r_repl, 1)
+        fr.addWidget(self.r_regex)
+        rg.addLayout(fr)
 
-        pkg_tab = QWidget()
-        pl = QVBoxLayout(pkg_tab)
-        pinfo = QLabel("Names <b>PS4 PKGs</b> and <b>Switch NSP / NSZ / XCI / XCZ</b> from their own data: "
-                       "“Title [CUSA00000]”, “… (Update v1.09)”, “… (DLC - Name)”, and for Switch "
-                       "“Title [0100…][v0]”. Titles you already use for a game are kept. Switch packages need "
-                       "your prod.keys (ROM Verifier → Settings).")
-        pinfo.setWordWrap(True)
-        self.p_rename = QCheckBox("Rename from the package data")
-        self.p_rename.setChecked(True)
-        self.p_org = QCheckBox("Put each game's base game, updates and DLC into one folder (your existing game "
-                               "folder if there is one)")
-        self.p_multi = QCheckBox("…only for games with more than one file")
-        self.p_multi.setChecked(True)
-        self.p_org.toggled.connect(self.p_multi.setEnabled)
-        self.p_multi.setEnabled(False)
-        for w in (pinfo, self.p_rename, self.p_org, self.p_multi):
-            pl.addWidget(w)
-        pl.addStretch(1)
-        self.tabs.addTab(pkg_tab, QIcon.fromTheme("package-x-generic"), "Console packages")
+        self.sec_dat, self.sec_pkg, self.sec_rules = sec_dat, sec_pkg, sec_rules
+        for g in (sec_dat, sec_pkg, sec_rules):
+            g.toggled.connect(lambda _on: self._sections_changed())
+        self.sections = QWidget()
+        secl = QHBoxLayout(self.sections)
+        secl.setContentsMargins(0, 0, 0, 0)
+        secl.addWidget(sec_dat, 3)
+        secl.addWidget(sec_pkg, 3)
+        secl.addWidget(sec_rules, 5)
+        self.order_note = QLabel("<small>One preview for all ticked sections. If two would rename the same file, the "
+                                 "DAT name wins, then the package name, then the cleanup rules.</small>")
+        self.order_note.setWordWrap(True)
 
         # ---- preview table
         self.table = QTableWidget(0, 6)
@@ -265,8 +298,9 @@ class RenamerWindow(QMainWindow):
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
-        self.tabs.setSizePolicy(self.tabs.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Maximum)
-        rl.addWidget(self.tabs)
+        self.sections.setSizePolicy(self.sections.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Maximum)
+        rl.addWidget(self.sections)
+        rl.addWidget(self.order_note)
         rl.addWidget(self.table, 1)
         rl.addLayout(bottom)
 
@@ -296,6 +330,18 @@ class RenamerWindow(QMainWindow):
         DatDialog(self.picker.path(), self).exec()
         self.systems.load(self.picker.path())
 
+    def _save_sections(self):
+        self.cfg["window_state"]["renamer_sections"] = {
+            "dat": self.sec_dat.isChecked(), "pkg": self.sec_pkg.isChecked(), "rules": self.sec_rules.isChecked(),
+            "skip_uncached": self.skip_uncached.isChecked(), "p_rename": self.p_rename.isChecked(),
+            "p_org": self.p_org.isChecked(), "p_multi": self.p_multi.isChecked()}
+        self.cfg.save()
+
+    def _sections_changed(self):
+        on = self.sec_dat.isChecked() or self.sec_pkg.isChecked() or self.sec_rules.isChecked()
+        self.act_preview.setEnabled(on and not (self.worker and self.worker.isRunning()))
+        self._save_sections()
+
     def _rules(self) -> rn.Rules:
         return rn.Rules(strip_dup_suffix=self.r_dup.isChecked(), underscores=self.r_us.isChecked(),
                         dots_to_spaces=self.r_dots.isChecked(), collapse_spaces=self.r_space.isChecked(),
@@ -312,8 +358,12 @@ class RenamerWindow(QMainWindow):
             QMessageBox.information(self, "Preview", "Tick at least one system on the left.")
             return
         self.systems.remember()
-        mode_dat = self.tabs.currentIndex() == 0
-        mode_pkg = self.tabs.currentIndex() == 2
+        do_dat, do_pkg, do_rules = (self.sec_dat.isChecked(), self.sec_pkg.isChecked(), self.sec_rules.isChecked())
+        if not (do_dat or do_pkg or do_rules):
+            QMessageBox.information(self, "Preview", "Tick at least one section: official names, console packages "
+                                                     "or cleanup rules.")
+            return
+        self._save_sections()
         p_opts = (self.p_rename.isChecked(), self.p_org.isChecked(), self.p_multi.isChecked())
         self.cfg["rename_use_dat_ext"] = self.use_dat_ext.isChecked()
         self.cfg.save()
@@ -323,39 +373,58 @@ class RenamerWindow(QMainWindow):
 
         def job(w: Worker):
             from .. import library
-            if mode_pkg:
-                from .. import packages as pk
-                folders = library.rule_folders(cfg, root, systems)
-                return rn.plan_packages(folders, pk.switch_keys(cfg), *p_opts,
-                                        progress=lambda m: w.progress.emit(0, 0, m, 0))
-            if not mode_dat:
-                return rn.plan_from_rules(library.rule_folders(cfg, root, systems), rules), []
-            results, skipped = [], []
-            items = []
-            listed, indexes = library.collect(cfg, root, systems, idxc, lambda m: w.progress.emit(0, 0, m, 0))
-            nodat = sorted({it.system for it in listed if indexes.get(it.system) is None})
-            for it in listed:
-                if indexes.get(it.system) is None or it.kind == "folder":
-                    continue
-                if skip_unc and it.kind == "chd":
-                    try:
-                        st = it.path.stat()
-                        if not cache.get(it.path, st.st_size, st.st_mtime):
-                            skipped.append(it)
-                            continue
-                    except OSError:
+            from .. import packages as pk
+            from ..datmanager import system_for
+            say = lambda m: w.progress.emit(0, 0, m, 0)       # noqa: E731
+            ops: list[rn.Op] = []
+            notes: list[str] = []
+            if do_dat:
+                results, skipped, items = [], [], []
+                listed, indexes = library.collect(cfg, root, systems, idxc, say)
+                pkg_sys = {s for s in systems if (system_for(cfg, s) or None) and system_for(cfg, s).source == "package"}
+                nodat = sorted({it.system for it in listed if indexes.get(it.system) is None} - pkg_sys
+                               - {library.OTHER})
+                for it in listed:
+                    if indexes.get(it.system) is None or it.kind in ("folder", "package"):
                         continue
-                items.append(it)
-            scanner = sc.make_scanner(cfg, cache, sc.QUICK)
-            scanner.cancel = w.cancel
-            scanner.run(items, indexes, results.append, lambda d, t, m, f: w.progress.emit(d, t, m, f))
-            notes = []
-            if nodat:
-                notes.append(f"No DAT for: {', '.join(nodat)} (use Manage DATs, or the Cleanup rules tab)")
-            if skipped:
-                notes.append(f"{len(skipped)} unverified CHD(s) skipped — run ROM Verifier on them first, "
-                             f"or untick the skip option")
-            return rn.plan_from_results(results, use_ext), notes
+                    if skip_unc and it.kind == "chd":
+                        try:
+                            st = it.path.stat()
+                            if not cache.get(it.path, st.st_size, st.st_mtime):
+                                skipped.append(it)
+                                continue
+                        except OSError:
+                            continue
+                    items.append(it)
+                scanner = sc.make_scanner(cfg, cache, sc.QUICK)
+                scanner.cancel = w.cancel
+                scanner.run(items, indexes, results.append, lambda d, t, m, f: w.progress.emit(d, t, m, f))
+                for op in rn.plan_from_results(results, use_ext):
+                    op.reason = op.reason if op.reason.startswith("DAT") else "DAT: " + op.reason
+                    ops.append(op)
+                if nodat:
+                    notes.append(f"No DAT for: {', '.join(nodat)} (Manage DATs, or use the cleanup rules)")
+                if skipped:
+                    notes.append(f"{len(skipped)} CHD(s) not checked yet were skipped (check them in ROM Verifier, "
+                                 f"or untick “Skip CHDs…”)")
+            if do_pkg and not w.cancel.is_set():
+                pops, pnotes = rn.plan_packages(library.rule_folders(cfg, root, systems), pk.switch_keys(cfg),
+                                                *p_opts, progress=say)
+                for op in pops:
+                    op.reason = "Package: " + op.reason
+                ops += pops
+                notes += pnotes
+            if do_rules and not w.cancel.is_set():
+                for op in rn.plan_from_rules(library.rule_folders(cfg, root, systems), rules):
+                    op.reason = "Cleanup: " + op.reason if op.reason else "Cleanup"
+                    ops.append(op)
+            # one change per file: DAT name, then package name, then cleanup rules (that's the order added above)
+            seen, merged = set(), []
+            for op in ops:
+                if op.src not in seen:
+                    seen.add(op.src)
+                    merged.append(op)
+            return merged, notes
 
         self.worker = Worker(job, parent=self)
         self.worker.progress.connect(self._on_progress)

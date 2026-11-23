@@ -710,6 +710,11 @@ def suggested_name(info: PackageInfo, base_title: str = "", base_sfo_title: str 
     if info.platform == "ps4":
         if info.kind == UPDATE:
             return f"{title} [{info.title_id}] (Update v{info.version_str})"
+        if info.kind == DLC and not base_title:
+            # no game next to it, but PS4 DLC titles usually name it: "Dark Angel (GRAVITY RUSH 2)"
+            m = re.match(r"(.+?)\s*\(([^()]{3,})\)\s*$", info.title or "")
+            if m:
+                return f"{clean_title(m.group(2))} [{info.title_id}] (DLC - {clean_title(m.group(1))})"
         if info.kind == DLC:
             name = _dlc_name(info.title, base_sfo_title or base_title)
             if base_sfo_title and name == clean_title(info.title):

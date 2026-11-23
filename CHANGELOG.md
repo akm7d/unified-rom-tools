@@ -3,6 +3,16 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.11.0
+- **ROM Renamer redesigned**: the three tabs are one panel with three sections - *Official names from DATs*,
+  *Console packages (PS4 / Switch)* and *Cleanup rules* - each switched on by its title, with one combined preview.
+  When two would rename the same file, the DAT name wins, then the package name, then the cleanup rules; the
+  *Reason* column shows the section. Choices are remembered.
+- The RAM / SSD choice left the Renamer's toolbar: it only matters when checking CHDs ROM Verifier hasn't checked
+  yet, so it's now next to that option (and greyed out while those CHDs are skipped).
+- A PS4 DLC without its game nearby is named from the game its own title mentions:
+  "Gravity Rush 2 [CUSA03694] (DLC - Dark Angel)" instead of "Dark Angel(GRAVITY RUSH 2) [CUSA03694] (DLC)".
+
 ## 1.10.1
 - Fix: NSP → NSZ (and back) showed no progress, so long runs looked stuck. nsz prints no readable progress outside a
   terminal, so ROM Optimizer now shows how much has been written, then *Verifying* while nsz reads the result back.

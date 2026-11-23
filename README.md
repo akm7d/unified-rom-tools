@@ -123,10 +123,15 @@ Right-click rows for: open folder, copy paths / SHA-1s / DAT names, re-check. **
 
 ## ROM Renamer (preview first, undoable)
 
-- **Match DAT names**: renames verified-good ROMs to their exact DAT name (identified by hash, shares the
-  Verifier's cache). By default it skips CHDs that haven't been verified yet, so it doesn't start long
-  extractions.
-- **Cleanup rules**: for systems without DATs (Switch, PS4…): strip ` (1)` duplicate markers,
+One panel with three sections; tick the ones you want and press **Build preview** (F5) for one combined preview.
+If two sections would rename the same file, the DAT name wins, then the package name, then the cleanup rules; the
+*Reason* column says which section each change comes from.
+
+- **Official names from DATs (No-Intro / Redump)**: renames verified-good ROMs to their exact DAT name (identified
+  by hash, shares the Verifier's cache). By default it skips CHDs ROM Verifier hasn't checked yet; untick that to
+  check them now, and choose whether they're unpacked in RAM or on the SSD.
+- **Console packages (PS4 / Switch)**: see below.
+- **Cleanup rules (any file)**: for names no DAT or package can give: strip ` (1)` duplicate markers,
   underscores → spaces, move leading "The", remove SMB-unsafe characters, find & replace / regex,
   optionally folders too.
 
@@ -136,7 +141,7 @@ discs are renamed (and renamed themselves when all of their discs are). Nothing 
 existing files are never overwritten. Every batch is journaled in `~/.local/share/romtools/rename-journal/`
 and can be reverted from **History / Undo**.
 
-**Console packages** tab: names PS4 PKGs and Switch packages from their own data, in the library's style:
+**Console packages** section: names PS4 PKGs and Switch packages from their own data, in the library's style:
 `Title [CUSA00000]`, `Title [CUSA00000] (Update v1.09)`, `Title [CUSA00000] (DLC - Name)`, and for Switch
 `Title [0100…][v0]` (bundles add `(+Update v…)` / `(+2 DLC)`). The title you already use for a game is kept,
 release-group prefixes, ™ and full-width colons go, and names that only differ in punctuation are left alone.
