@@ -112,7 +112,7 @@ How formats are checked:
 flagged (e.g. a PS2 DVD game packed with `createcd`), using: a "CD" bigger than any CD can hold, the Redump
 DAT (.iso = DVD, .bin/.cue = CD), or the system (PS1 = CD, PSP = DVD, Dreamcast = GD-ROM). The *Wrong CHD
 type* chip filters to them. **Fix CHD types…** (toolbar, or right-click) converts them: the disc image is
-unpacked to RAM or the SSD temp folder (per the CHD temp switch), a new CHD is created next to the original,
+unpacked to RAM or the SSD temp folder (per the *Unpack CHDs in RAM / on the SSD* choice), a new CHD is created next to the original,
 `chdman verify`'d and read back to prove its data SHA-1 is identical; only then is the original moved to the
 trash and the new CHD given its name. Any failure leaves the original untouched. Single-track 2048-byte CD
 CHDs (made from an .iso) convert to DVD losslessly; DVD → CD is also supported. GD-ROM mismatches are reported

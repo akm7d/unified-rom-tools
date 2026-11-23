@@ -177,10 +177,8 @@ class RenamerWindow(QMainWindow):
         # where unpacked CHDs go while being checked: only matters when unchecked CHDs are included
         self.mode = TempModeCombo(lambda: bool(self.worker and self.worker.isRunning()),
                                   lambda m: self.statusBar().showMessage(m, 8000))
-        self.mode.setToolTip("Where CHDs are unpacked while they're checked: RAM (no SSD writes, slower) or SSD")
         mrow = QHBoxLayout()
         mrow.setContentsMargins(22, 0, 0, 0)
-        mrow.addWidget(QLabel("Unpack them in:"))
         mrow.addWidget(self.mode)
         mrow.addStretch(1)
         self.skip_uncached.toggled.connect(lambda on: self.mode.setEnabled(not on))

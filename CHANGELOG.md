@@ -3,6 +3,10 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.11.2
+- ROM Verifier and ROM Renamer: the "CHD temp: RAM / SSD" switch now reads *Unpack CHDs in RAM (slower, spares the
+  SSD)* / *Unpack CHDs on the SSD (faster)*, with a plain explanation of the trade-off in its tooltip.
+
 ## 1.11.1
 - ROM Renamer: the DAT-extension option now reads *Change the extension to the one the DAT uses (e.g. .smc → .sfc)*,
   with a tooltip showing both outcomes and when it never applies.

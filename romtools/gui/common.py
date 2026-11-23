@@ -232,23 +232,25 @@ class Worker(QThread):
 
 
 class TempModeCombo(QComboBox):
-    """CHD temp-storage switch. A scan already running keeps its mode; the new one applies to the next run."""
+    """Where CHDs are unpacked while they're checked (RAM or SSD). A run already going keeps its choice; a change
+    applies to the next run."""
 
     def __init__(self, is_running=lambda: False, notify=lambda msg: None, parent=None):
         super().__init__(parent)
         self.is_running, self.notify = is_running, notify
-        self.addItem(QIcon.fromTheme("media-flash"), "CHD temp: RAM (no SSD writes)", "ram")
-        self.addItem(QIcon.fromTheme("drive-harddisk-solidstate"), "CHD temp: SSD (temp files on disk)", "ssd")
-        self.setToolTip("RAM: CHDs are unpacked into /dev/shm and hashed as they stream; each chunk is freed as "
-                        "soon as it is hashed (~35 MB RAM per CHD). Nothing is written to your SSD.\n"
-                        "SSD: CHDs are unpacked to the temp folder in Settings, hashed, then deleted. "
-                        "Writes up to a full disc image to disk per CHD.\n\n"
-                        "Changing this during a run takes effect when the current run finishes.")
+        self.addItem(QIcon.fromTheme("media-flash"), "Unpack CHDs in RAM (slower, spares the SSD)", "ram")
+        self.addItem(QIcon.fromTheme("drive-harddisk-solidstate"), "Unpack CHDs on the SSD (faster)", "ssd")
+        self.setToolTip("To check a CHD, its disc has to be unpacked. This picks where:\n\n"
+                        "RAM: unpacked a piece at a time and hashed as it goes (about 35 MB of RAM per CHD). Nothing "
+                        "is written to your SSD, so it doesn't wear it; a bit slower.\n"
+                        "SSD: the whole disc is unpacked to the temp folder (Settings), hashed, then deleted. "
+                        "Faster, but writes up to a full disc image (up to ~9 GB for a PS2 DVD) per CHD.\n\n"
+                        "Also used by Fix CHD types. A change during a run applies to the next run.")
         self.setCurrentIndex(max(0, self.findData(get_config()["temp_mode"])))
         from ..compat import ram_mode_supported
         if not ram_mode_supported():  # Windows: no tmpfs streaming; temp files only
             self.model().item(0).setEnabled(False)
-            self.setItemText(0, "CHD temp: RAM (Linux only)")
+            self.setItemText(0, "Unpack CHDs in RAM (Linux only)")
             self.setCurrentIndex(1)
         self.currentIndexChanged.connect(self._changed)
 
@@ -256,11 +258,11 @@ class TempModeCombo(QComboBox):
         cfg = get_config()
         cfg["temp_mode"] = self.currentData()
         cfg.save()
-        label = "RAM" if self.currentData() == "ram" else "SSD"
+        where = "in RAM" if self.currentData() == "ram" else "on the SSD"
         if self.is_running():
-            self.notify(f"{label} mode will be used from the next run (the current run keeps its mode).")
+            self.notify(f"CHDs will be unpacked {where} from the next run (the current run keeps its choice).")
         else:
-            self.notify(f"{label} mode selected.")
+            self.notify(f"CHDs will be unpacked {where}.")
 
     def sync(self):
         self.blockSignals(True)

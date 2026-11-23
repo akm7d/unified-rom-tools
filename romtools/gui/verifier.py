@@ -256,7 +256,7 @@ class SettingsDialog(QDialog):
         form.addRow("Parallel CHD extractions:", self.chd)
         form.addRow("SSD-mode temp folder:", tmprow)
         from ..compat import ram_mode_supported
-        form.addRow("", QLabel("<small>" + ("Only used in SSD mode (RAM mode streams through /dev/shm). "
+        form.addRow("", QLabel("<small>" + ("Only used when CHDs are unpacked on the SSD (in RAM they stream through /dev/shm). "
                                              if ram_mode_supported() else "Used for unpacking CHDs. ") +
                                "PS2 DVDs need up to ~9 GB each here.</small>"))
         form.addRow("Switch prod.keys:", keyrow)
@@ -988,7 +988,7 @@ class VerifierWindow(QMainWindow):
             f"(largest: {human(biggest)}), a new CHD is created next to the original, verified, and read back "
             f"to prove its data is identical. Only then is the original moved to the trash (restorable) and the "
             f"new CHD given its name. Any failure leaves the original untouched.\n\n"
-            f"Takes about 1–3 minutes per GB. The CHD temp switch on the toolbar picks RAM or SSD.")
+            f"Takes about 1–3 minutes per GB. The "Unpack CHDs in RAM / on the SSD" choice on the toolbar applies.")
         box.setDetailedText("\n".join(f"• {r.item.path.name}: {r.media.actual.upper()} → {r.media.expected.upper()}"
                                       f" ({r.media.reason})" for r in res))
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
