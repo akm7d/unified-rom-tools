@@ -649,10 +649,18 @@ class BatchTab(QWidget):
         j = next((x for x in self.jobs if self.rows.get(x.id) == r), None)
         if not j:
             return
-        text = "\n".join(j.log)
-        if keep and self.log.toPlainText() == text:
+        # append only what's new since the last refresh of the same job (rebuilding tens of thousands of lines on
+        # every update froze the window); jobs that log a lot only keep their newest lines
+        shown_id, shown_total = getattr(self, "_log_shown", (None, 0))
+        total = j.log_total or len(j.log)
+        if keep and shown_id == j.id and total == shown_total:
             return
-        self.log.setPlainText(text)
+        new = total - shown_total
+        if keep and shown_id == j.id and 0 < new <= len(j.log):
+            self.log.appendPlainText("\n".join(j.log[-new:]))
+        else:
+            self.log.setPlainText("\n".join(j.log[-self.log.maximumBlockCount():]))
+        self._log_shown = (j.id, total)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
     def _rebuild(self):

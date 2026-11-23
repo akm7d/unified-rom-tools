@@ -8,6 +8,10 @@ patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after 
   terminal, so ROM Optimizer now shows how much has been written, then *Verifying* while nsz reads the result back.
 - When nsz's own check finds that the NSZ wouldn't give back the identical file (common with non-standard dumps,
   e.g. NSPs whose content was decrypted), the job now says so plainly; nothing is made and the original is untouched.
+- Fix: ROM Optimizer stopped responding during big Switch extractions. nstool prints a line per extracted file
+  (tens of thousands for a large game) and the window rebuilt the whole log on every line. Log lines are now picked
+  up on the twice-a-second refresh and appended, jobs keep their newest 20,000 lines, and the extraction progress
+  counts the output only every 10 s.
 - Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
 
 ## 1.10.0

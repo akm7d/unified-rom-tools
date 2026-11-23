@@ -104,6 +104,7 @@ class Job:
     weight: int = 0                         # bytes of input, for an overall size-weighted progress
     func: Callable | None = None            # Python task instead of chdman steps: func(ctx) -> message
     func_label: str = ""                    # e.g. "Trimming", "Converting to RVZ"
+    log_total: int = 0                      # lines ever logged (the log keeps only the newest ones)
 
     @property
     def step_name(self) -> str:
@@ -387,7 +388,7 @@ def _plan_one(preset: str, src: Path, opts: Options) -> Job | None:
         parts = _cue_parts(src) if ext == ".cue" else _gdi_parts(src) if ext == ".gdi" else []
         j = Job(next(_ids), f"{cmd}: {src.name}", src, steps, [out], [src] + parts)
         j.detail = note
-        j.log.append(f"Detected: {note}")
+        _log_line(j, f"Detected: {note}")
         j.trash = opts.trash_sources and opts.verify_after  # only ever after a verified output
         return j
     if preset == FROM_CHD:
@@ -470,6 +471,18 @@ def collect(paths: list[Path], preset: str, recursive: bool = True) -> list[Path
 
 # ------------------------------------------------------------------ running
 
+LOG_KEEP = 20000        # lines kept per job (nstool prints one per extracted file - tens of thousands)
+
+
+def _log_line(job: Job, s: str) -> None:
+    """Add a line to a job's log without flooding the window: no update per line, and only the newest
+    LOG_KEEP lines are kept."""
+    job.log.append(s)
+    job.log_total += 1
+    if len(job.log) > LOG_KEEP + 2000:
+        del job.log[:len(job.log) - LOG_KEEP]
+
+
 def save_log(job: Job) -> Path | None:
     """Keep a failed job's full log in <data>/logs/ (the window only holds it while it's open)."""
     import re as _re
@@ -481,7 +494,7 @@ def save_log(job: Job) -> Path | None:
         f = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{name}.log"
         f.write_text(f"{job.title}\nsource: {job.source}\nstatus: {job.status}: {job.message}\n"
                      f"detail: {job.detail}\n\n" + "\n".join(job.log) + "\n", encoding="utf-8")
-        job.log.append(f"(log saved to {f})")
+        _log_line(job, f"(log saved to {f})")
         return f
     except OSError:
         return None
@@ -535,7 +548,7 @@ class Runner:
             job.step_index = i
             job.step_label = f"Step {i + 1}/{n} · {job.step_name}"
             job.step_progress, job.step_started, job.phase = 0.0, time.time(), "starting chdman…"
-            job.log.append(f"── {job.step_label} ──")
+            _log_line(job, f"── {job.step_label} ──")
 
             def prog(f, i=i):
                 job.step_progress = f
@@ -546,10 +559,9 @@ class Runner:
                 job.phase = pretty_phase(s)
 
             def line(s):
-                job.log.append(s)
+                _log_line(job, s)          # the window picks new lines up on its twice-a-second refresh
                 if s.startswith("Error") or "error" in s.lower():
                     job.message = s
-                self.on_update(job)
 
             p = Process(argv, line, prog, status)
             with self._lock:
@@ -593,7 +605,7 @@ class Runner:
         job.status, job.started = "Running", time.time()
         job.step_label = f"Step 1/1 · {job.step_name}"
         job.step_started, job.phase = time.time(), ""
-        job.log.append(f"── {job.step_name}: {job.source} ──")
+        _log_line(job, f"── {job.step_name}: {job.source} ──")
         self.on_update(job)
 
         def progress(f: float, phase: str = ""):
@@ -603,8 +615,7 @@ class Runner:
             self.on_update(job)
 
         def log(s: str):
-            job.log.append(s)
-            self.on_update(job)
+            _log_line(job, s)
 
         ctx = TaskContext(log, progress, self.cancel, self.trash, job.trash)
         try:

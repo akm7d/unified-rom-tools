@@ -515,7 +515,8 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
 
                 def watch(lo=lo, hi=hi, part=part):
                     expect = sizes[0] * (0.05 if part == "exefs" else 0.95) or 1
-                    while not stop.wait(1.0):
+                    # counting tens of thousands of files over a network share is slow: only every 10 s
+                    while not stop.wait(10.0):
                         got = sum(f.stat().st_size for f in (dest / part).rglob("*") if f.is_file()) \
                             if (dest / part).exists() else 0
                         ctx.progress(lo + (hi - lo) * min(0.99, got / expect), f"Extracting {part}")
