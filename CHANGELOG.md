@@ -12,6 +12,10 @@ patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after 
   (tens of thousands for a large game) and the window rebuilt the whole log on every line. Log lines are now picked
   up on the twice-a-second refresh and appended, jobs keep their newest 20,000 lines, and the extraction progress
   counts the output only every 10 s.
+- Fix: the progress bar of a RomFS / ExeFS extraction **with an update** reached 100% long before it was done: it
+  estimated the size from the small update file (1 GB for Breath of the Wild) instead of the whole patched game
+  (15 GB). It now uses the exact size recorded in the game data, counts the copy and the extraction by bytes, and
+  shows "x of y GB". Tool runs (nstool, nsz, nodtool) also no longer reset a job's bar to 0% between its steps.
 - Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
 
 ## 1.10.0

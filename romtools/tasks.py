@@ -308,7 +308,10 @@ def untrim(path: Path, out: Path, dat_index=None) -> Callable[[TaskContext], str
 
 # ====================================================================== external tools (RVZ via nodtool, NSZ via nsz)
 
-def _run_tool(argv: list[str], ctx: TaskContext, phase: str, env: dict | None = None) -> list[str]:
+def _run_tool(argv: list[str], ctx: TaskContext, phase: str, env: dict | None = None,
+              span: tuple[float, float] | None = (0.0, 1.0)) -> list[str]:
+    """Run a bundled tool, logging its output. ``span``: the part of the job's progress bar its own percentages
+    map to; None = it reports none, so leave the bar to the caller (don't reset it to 0)."""
     from .chdman_tool import Process
     lines: list[str] = []
 
@@ -316,10 +319,12 @@ def _run_tool(argv: list[str], ctx: TaskContext, phase: str, env: dict | None = 
         lines.append(s)
         ctx.log(s)
 
-    p = Process(argv, line, lambda f: ctx.progress(f, phase), env=env)
+    lo, hi = span or (0.0, 1.0)
+    p = Process(argv, line, (lambda f: ctx.progress(lo + (hi - lo) * f, phase)) if span else None, env=env)
     watcher = threading.Thread(target=lambda: (ctx.cancel.wait(), p.cancel()), daemon=True)
     watcher.start()
-    ctx.progress(0.0, phase)
+    if span:
+        ctx.progress(lo, phase)      # never back to 0: start where this step's share of the bar begins
     rc = p.run()
     ctx.check()
     if rc != 0:
@@ -328,9 +333,10 @@ def _run_tool(argv: list[str], ctx: TaskContext, phase: str, env: dict | None = 
     return lines
 
 
-def _nod_sha1(path: Path, ctx: TaskContext) -> str:
+def _nod_sha1(path: Path, ctx: TaskContext, span: tuple[float, float] = (0.0, 1.0)) -> str:
     from .compat import find_tool
-    out = _run_tool([find_tool("nodtool"), "verify", str(path)], ctx, "Verifying")
+    ctx.progress(span[0], "Verifying")
+    out = _run_tool([find_tool("nodtool"), "verify", str(path)], ctx, "Verifying", span=span)
     for ln in out:
         m = re.match(r"\s*SHA-?1\s*:\s*([0-9a-fA-F]{40})", ln)
         if m:
@@ -353,10 +359,12 @@ def convert_disc_nod(src: Path, out: Path) -> Callable[[TaskContext], str]:
         tmp = _tmp_beside(out, out.suffix)
         try:
             src_sha = (sha1_file(src, ctx, (0.0, 0.25), "Hashing the original")
-                       if src.suffix.lower() in (".iso", ".gcm") else _nod_sha1(src, ctx))
-            _run_tool([exe, "convert", str(src), str(tmp)], ctx, f"Converting to {out.suffix[1:].upper()}")
+                       if src.suffix.lower() in (".iso", ".gcm") else _nod_sha1(src, ctx, (0.0, 0.25)))
+            ctx.progress(0.25, f"Converting to {out.suffix[1:].upper()}")
+            _run_tool([exe, "convert", str(src), str(tmp)], ctx, f"Converting to {out.suffix[1:].upper()}",
+                      span=(0.25, 0.8))
             new_sha = (sha1_file(tmp, ctx, (0.8, 1.0), "Checking") if out.suffix.lower() in (".iso", ".gcm")
-                       else _nod_sha1(tmp, ctx))
+                       else _nod_sha1(tmp, ctx, (0.8, 1.0)))
             if new_sha != src_sha:
                 raise RuntimeError("the converted disc doesn't match the original - nothing changed")
             note = _finish_new_file(ctx, tmp, out, src)
@@ -421,7 +429,7 @@ def convert_nsz(src: Path, out: Path, keys: Path | None) -> Callable[[TaskContex
                         ctx.progress(min(0.85, 0.85 * size / total), f"{word} - {size / 2**30:.2f} GiB written")
             threading.Thread(target=watch, daemon=True).start()
             try:
-                _run_tool(argv + [str(src)], ctx, f"{word} (NSZ)" if compress else word)
+                _run_tool(argv + [str(src)], ctx, f"{word} (NSZ)" if compress else word, span=None)
             except RuntimeError as exc:
                 if "hash mismatch" in str(exc).lower():
                     raise RuntimeError("nsz couldn't reproduce this file exactly when checking its result (common "
@@ -487,14 +495,24 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
                     sizes.append(c.files[name][1])
                 finally:
                     c.close()
-            total = sum(sizes) or 1
+            # progress by bytes: copying the NCA(s) out, then each extracted part. The RomFS size comes from the
+            # NCA's own header - for an update that's the whole patched game (e.g. 15 GB), not the 1 GB update file
+            try:
+                part_size = pk.nca_part_sizes(main[0], main[1], keys)
+            except Exception:  # noqa: BLE001
+                part_size = {}
+            expect = {part: part_size.get(idx) or max(sizes) for part, idx in parts.items()}
+            copy_total = sum(sizes)
+            grand = (copy_total + sum(expect.values())) or 1
+            total = copy_total or 1
             done_before = 0
             local: list[Path] = []
             for (cont, name), size in zip(todo, sizes):
                 target = work / "nca" / f"{len(local)}-{name}"
                 ctx.log(f"copying {name} out of {cont.name} ({size / 2**30:.2f} GiB)")
                 pk.copy_member(cont, name, target,
-                               lambda d, _t, b=done_before: ctx.progress(0.4 * (b + d) / total, "Copying NCA"),
+                               lambda d, _t, b=done_before: ctx.progress(
+                                   (b + d) / grand, f"Copying NCA - {(b + d) / 1e9:.2f} of {total / 1e9:.2f} GB"),
                                ctx.cancel)
                 done_before += size
                 local.append(target)
@@ -507,29 +525,32 @@ def extract_switch_fs(out: Path, keys: Path | None, main: tuple[Path, str], base
             ctx.check()
             base_args = ["--basenca", str(local[1])] if base else []
             dest.mkdir(parents=True, exist_ok=True)
-            for i, (part, idx) in enumerate(parts.items()):
+            before = copy_total
+            for part, idx in parts.items():
                 # "/N/" with the trailing slash: the form nstool's own --partN shortcuts use for a partition folder
                 argv = [exe, "-k", str(keys), *tiks, *base_args, "-x", f"/{idx}/", str(dest / part), str(local[0])]
-                lo, hi = 0.4 + 0.6 * i / len(parts), 0.4 + 0.6 * (i + 1) / len(parts)
                 stop = threading.Event()
+                want = expect[part] or 1
+                ctx.progress(before / grand, f"Extracting {part} - 0.00 of {want / 1e9:.2f} GB")
 
-                def watch(lo=lo, hi=hi, part=part):
-                    expect = sizes[0] * (0.05 if part == "exefs" else 0.95) or 1
+                def watch(part=part, want=want, before=before):
                     # counting tens of thousands of files over a network share is slow: only every 10 s
                     while not stop.wait(10.0):
                         got = sum(f.stat().st_size for f in (dest / part).rglob("*") if f.is_file()) \
                             if (dest / part).exists() else 0
-                        ctx.progress(lo + (hi - lo) * min(0.99, got / expect), f"Extracting {part}")
+                        ctx.progress(min(0.99, (before + min(got, want)) / grand),
+                                     f"Extracting {part} - {got / 1e9:.2f} of {want / 1e9:.2f} GB")
                 threading.Thread(target=watch, daemon=True).start()
                 try:
-                    _run_tool(argv, ctx, f"Extracting {part}", env)
+                    _run_tool(argv, ctx, f"Extracting {part}", env, span=None)
                 finally:
                     stop.set()
+                before += want
                 if not (dest / part).is_dir() or not any((dest / part).rglob("*")):
                     # show what nstool sees inside the NCA, so the log says why
                     try:
                         _run_tool([exe, "-k", str(keys), *tiks, *base_args, "--fstree", str(local[0])], ctx,
-                                  "Listing the NCA", env)
+                                  "Listing the NCA", env, span=None)
                     except Exception as exc:  # noqa: BLE001
                         ctx.log(f"(listing failed: {exc})")
                     raise RuntimeError(f"nstool produced no {part} - see the NCA listing above in the log")

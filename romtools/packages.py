@@ -501,6 +501,28 @@ def title_key_known(rights_id: str, tickets_in_package: list[str]) -> bool:
     return rights_id in _Keys(None).titles
 
 
+def nca_part_sizes(container_path: Path, nca: str, keys_path: Path | None) -> dict[int, int]:
+    """Bytes each section of an NCA holds once extracted: for a RomFS the data size its integrity header records
+    (for an update NCA that is the size of the whole PATCHED RomFS, not of the small update file), for a partition
+    FS (ExeFS, logo) its stored size."""
+    c = _Container(container_path)
+    try:
+        n = _Nca(c, nca, _Keys(keys_path))
+        out = {}
+        for i in range(4):
+            start, end, fsh = n.section(i)
+            if end <= start:
+                continue
+            if fsh[2] == 0 and fsh[8:12] == b"IVFC":
+                lvl = 0x8 + 0x10 + 5 * 0x18
+                out[i] = struct.unpack("<Q", fsh[lvl + 8:lvl + 16])[0]
+            else:
+                out[i] = end - start
+        return out
+    finally:
+        c.close()
+
+
 def nca_sections(container_path: Path, nca: str, keys_path: Path | None) -> list[tuple[int, int, int]]:
     """(index, fs type 0=RomFS 1=PartitionFS, encryption type) for each section of an NCA inside a package."""
     keys = _Keys(keys_path)

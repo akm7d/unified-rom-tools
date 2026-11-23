@@ -51,3 +51,13 @@ def test_inplace_replace_keeps_original_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(tasks.os, "rename", real)
     assert hashlib.sha1(f.read_bytes()).hexdigest() == orig
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Game (USA).nds"]
+
+
+def test_tool_runs_never_move_the_bar_backwards():
+    import sys
+    seen = []
+    c = tasks.TaskContext(lambda s: None, lambda f, phase="": seen.append(f), threading.Event(), lambda p: True)
+    c.progress(0.6, "earlier step")
+    tasks._run_tool([sys.executable, "-c", "print('hi')"], c, "a tool without progress output", span=None)
+    tasks._run_tool([sys.executable, "-c", "print('50% complete')"], c, "a tool with progress", span=(0.7, 0.9))
+    assert seen == sorted(seen) and min(seen) == 0.6        # never reset to 0, never back down
