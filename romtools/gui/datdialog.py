@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout,
                                QHeaderView, QLabel, QMessageBox, QProgressBar, QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout)
 
@@ -97,6 +97,21 @@ class DatDialog(QDialog):
 
     def _refresh_row(self, r: int, f: str):
         s = self.cfg.system(f)
+        sysdef = system_for(self.cfg, f)
+        self.table.removeCellWidget(r, COL_INFO)
+        if sysdef and sysdef.source == "package":
+            it = QTableWidgetItem("No DAT needed: each package is identified from its own data (title, ID, "
+                                  "Game / Update / DLC, version, region)")
+            it.setToolTip(UNVERIFIABLE_HINT.get(f, "") or it.text())
+            self.table.setItem(r, COL_DAT, it)
+            box = QCheckBox("Read package data")
+            box.setToolTip("On: ROM Verifier identifies PS4 PKG / Switch NSP / XCI files from their own data.\n"
+                           "Off: they're listed without being read (shown as No DAT).")
+            box.setChecked(s.get("read_packages", True) is not False)
+            box.toggled.connect(lambda on, f=f: self._set_read_packages(f, on))
+            self.table.setItem(r, COL_INFO, QTableWidgetItem())
+            self.table.setCellWidget(r, COL_INFO, box)
+            return
         dats = [d for d in s["dats"] if Path(d).is_file()]
         text = "; ".join(Path(d).name for d in dats) if dats else UNVERIFIABLE_HINT.get(f, "— missing —")
         it = QTableWidgetItem(text)
@@ -110,6 +125,10 @@ class DatDialog(QDialog):
                 games = f"error: {exc}"
         self.table.setItem(r, COL_INFO, QTableWidgetItem(games))
 
+    def _set_read_packages(self, folder: str, on: bool):
+        self.cfg.system(folder)["read_packages"] = on
+        self.cfg.save()
+
     def _row_of(self, folder: str) -> int:
         for r in range(self.table.rowCount()):
             if self.table.item(r, COL_FOLDER).text() == folder:
@@ -119,6 +138,10 @@ class DatDialog(QDialog):
     def _set_system(self, folder: str, sysid: str):
         s = self.cfg.system(folder)
         s["system"] = sysid
+        if sysid:
+            s.pop("_none", None)
+        else:
+            s["_none"] = True            # "— none —" chosen on purpose: don't map it automatically again
         sysdef = BY_ID.get(sysid)
         auto = [d for d in s["dats"] if Path(d).parent == DAT_DIR]
         manual = [d for d in s["dats"] if d not in auto]
@@ -133,7 +156,8 @@ class DatDialog(QDialog):
         return [self.table.item(r, COL_FOLDER).text() for r in rows]
 
     def _mapped(self) -> list[str]:
-        return [f for f in library_folders(self.root) if system_for(self.cfg, f)]
+        return [f for f in library_folders(self.root)
+                if system_for(self.cfg, f) and system_for(self.cfg, f).source != "package"]
 
     def _missing(self) -> list[str]:
         return [f for f in self._mapped() if not any(Path(d).is_file() for d in self.cfg.system(f)["dats"])]
@@ -143,10 +167,11 @@ class DatDialog(QDialog):
         targets = {}
         for f in folders:
             sysdef = system_for(self.cfg, f)
-            if sysdef:
+            if sysdef and sysdef.source != "package":
                 targets.setdefault(sysdef.id, []).append(f)
         if not targets:
-            QMessageBox.information(self, "Download DATs", "Select folders that have a system chosen.")
+            QMessageBox.information(self, "Download DATs", "Select folders that have a system with a DAT chosen "
+                                    "(PS4 and Switch need none: they're read from the packages).")
             return
         self._busy(True, len(targets))
 

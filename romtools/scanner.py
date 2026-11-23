@@ -310,6 +310,7 @@ class Scanner:
         self.mode = QUICK
         self.marks = None          # tags.MarkStore; set by the caller to apply your hack marks
         self.switch_keys: Path | None = None   # prod.keys for reading Switch packages (make_scanner sets it)
+        self.packages_off: set[str] = set()    # system folders where reading package data is turned off
         self.stats = {"remembered": 0, "hashed": 0, "not_scanned": 0}
         self._stats_lock = threading.Lock()
 
@@ -383,6 +384,8 @@ class Scanner:
         if item.kind == "folder":
             return Result(item, SKIPPED, note="Folder (extracted game / installed title) - not checked")
         if item.kind == "package":
+            if item.system in self.packages_off:
+                return Result(item, NODAT, note="Reading package data is turned off for this folder (Manage DATs)")
             return self.check_package(item)
         if index is None:
             from .systems import UNVERIFIABLE_HINT
@@ -494,6 +497,7 @@ def make_scanner(cfg, cache=None, mode: str = QUICK) -> "Scanner":
     s = Scanner(Path(cfg["tmp_dir"]), cfg["workers"], cfg["chd_workers"], cache,
                 ram_mode=cfg["temp_mode"] == "ram" and ram_mode_supported())
     s.mode = mode
+    s.packages_off = {f for f, st in (cfg["systems"] or {}).items() if (st or {}).get("read_packages") is False}
     try:
         s.switch_keys = packages.switch_keys(cfg)
     except Exception:  # noqa: BLE001
@@ -534,7 +538,7 @@ def _package_scope(item: Item) -> Path:
 
 
 # folder names that hold one console's packages (they have no DAT, so they're scanned as "other" folders)
-PACKAGE_FOLDERS = {"ps4", "switch", "switch-2", "switch2", "nsw", "ns"}
+PACKAGE_FOLDERS = {"ps4", "playstation4", "switch", "switch-2", "switch2", "nsw", "ns", "nsw2"}
 
 
 _SCOPE_CACHE: dict[tuple, tuple[float, dict]] = {}

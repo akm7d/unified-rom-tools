@@ -25,13 +25,15 @@ class System:
 
     @property
     def url(self) -> str:
+        if self.source == "package":
+            return ""                 # no DAT: identified from the packages' own data
         if self.source == "redump":
             return REDUMP.format(self.ref)
         return LIBRETRO_NOINTRO + quote(self.ref + ".dat")
 
     @property
     def label(self) -> str:
-        tag = "Redump" if self.source == "redump" else "No-Intro"
+        tag = {"redump": "Redump", "package": "package data, no DAT"}.get(self.source, "No-Intro")
         return f"{self.name}  [{tag}]"
 
 
@@ -41,6 +43,11 @@ def _ni(id_, ref, *folders):
 
 def _rd(id_, name, code, *folders):
     return System(id_, name, "redump", code, (id_,) + folders)
+
+
+def _pk(id_, name, *folders):
+    """A console whose dumps are packages identified from their own metadata (no DAT exists)."""
+    return System(id_, name, "package", "", (id_,) + folders)
 
 
 CATALOG: list[System] = [
@@ -90,6 +97,10 @@ CATALOG: list[System] = [
     _rd("3do", "Panasonic - 3DO", "3do"),
     _rd("cdi", "Philips - CD-i", "cdi", "philips-cd-i"),
     _rd("neogeocd", "SNK - Neo Geo CD", "ngcd", "neo-geo-cd"),
+    # --- Packages (no DAT; read from the PS4 PKG / Switch NSP / XCI metadata) ---
+    _pk("ps4", "Sony - PlayStation 4", "playstation4"),
+    _pk("switch", "Nintendo - Switch", "nsw", "ns"),
+    _pk("switch2", "Nintendo - Switch 2", "switch-2", "nsw2"),
 ]
 
 BY_ID = {s.id: s for s in CATALOG}

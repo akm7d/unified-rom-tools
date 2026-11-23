@@ -3,6 +3,13 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.9.0
+- **PS4, Switch and Switch 2 are systems** now (folders `ps4`, `switch`, `switch-2`, …) instead of "Other folders &
+  loose files". They need no DAT: Manage DATs shows *No DAT needed* and a **Read package data** toggle per folder
+  (on by default; off lists the packages without reading them).
+- ROM Verifier's system list shows the short system name ("Game Boy Color") instead of the DAT file name, which
+  was cut off to "Nintendo - Gam…" for Game Boy, Game Boy Color and Game Boy Advance alike.
+
 ## 1.8.2
 - Fix: **untrim** read the whole ROM into memory plus a full-size block of padding (4-8 GB for a large 3DS game);
   trim's reversibility check built the padding in memory too. Both are streamed in 8 MB blocks now.

@@ -69,6 +69,11 @@ def ensure_mapping(cfg: Config, folders: list[str]) -> None:
     changed = False
     for f in folders:
         s = cfg.system(f)
+        g = guess_system(f)
+        # console-package systems were added later: map folders set up before (unless "none" was chosen)
+        if s.get("_guessed") and not s["system"] and not s.get("_none") and g and g.source == "package":
+            s["system"] = g.id
+            changed = True
         if not s.get("_guessed"):
             g = guess_system(f)
             if g and not s["system"]:

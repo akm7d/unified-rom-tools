@@ -340,10 +340,15 @@ class SystemList(QTreeWidget):
             s = cfg.system(f)
             sysdef = system_for(cfg, f)
             dats = [d for d in s["dats"] if Path(d).is_file()]
-            if dats:
-                label, icon = ", ".join(Path(d).stem for d in dats), "emblem-ok-symbolic"
-            elif f in ("ps4", "switch") or (sysdef and sysdef.id in ("ps4", "switch")):
-                label, icon = "identified from package data", "dialog-information"
+            if sysdef and sysdef.source == "package":
+                on = s.get("read_packages", True) is not False
+                label, icon = ("package data" if on else "package data: off"), "dialog-information"
+            elif dats:
+                # the short system name ("Game Boy Color"), not the DAT file name that all start "Nintendo - …"
+                label = sysdef.name if sysdef else ", ".join(Path(d).stem for d in dats)
+                if len(dats) > 1:
+                    label += f" + {len(dats) - 1} more DAT(s)"
+                icon = "emblem-ok-symbolic"
             elif f in UNVERIFIABLE_HINT:
                 label, icon = "no public DAT", "dialog-information"
             elif sysdef:
@@ -353,11 +358,11 @@ class SystemList(QTreeWidget):
             it = QTreeWidgetItem([f, label])
             it.setData(0, Qt.ItemDataRole.UserRole, f)
             it.setIcon(1, QIcon.fromTheme(icon))
-            tip = UNVERIFIABLE_HINT.get(f, "")
+            tip = UNVERIFIABLE_HINT.get(f, "") or "\n".join(Path(d).name for d in dats)
             it.setToolTip(1, tip or label)
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(0, Qt.CheckState.Checked if f in checked else Qt.CheckState.Unchecked)
-            if not dats:
+            if not dats and not (sysdef and sysdef.source == "package"):
                 it.setForeground(1, QColor("#9a7b2f" if not is_dark() else "#e0b050"))
             self.addTopLevelItem(it)
         self.resizeColumnToContents(0)
