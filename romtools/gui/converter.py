@@ -212,7 +212,9 @@ class BatchTab(QWidget):
             if gi:
                 self.preset.insertSeparator(self.preset.count())
             for key in group:
-                self.preset.addItem(cv.PRESETS[key][0], key)
+                self.preset.addItem(cv.preset_label(key), key)
+                self.preset.setItemData(self.preset.count() - 1, "For: " + cv.PRESET_SYSTEMS[key][1],
+                                        Qt.ItemDataRole.ToolTipRole)
         self.preset.setCurrentIndex(max(0, self.preset.findData(saved.get("preset", cv.TO_CHD))))
         self.preset.currentIndexChanged.connect(self._preset_changed)
 

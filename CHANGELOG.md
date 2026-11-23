@@ -16,6 +16,8 @@ patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after 
   estimated the size from the small update file (1 GB for Breath of the Wild) instead of the whole patched game
   (15 GB). It now uses the exact size recorded in the game data, counts the copy and the extraction by bytes, and
   shows "x of y GB". Tool runs (nstool, nsz, nodtool) also no longer reset a job's bar to 0% between its steps.
+- ROM Optimizer's task list starts each task with the systems it's for (`[GC/Wii]`, `[NSW]`, `[NDS/3DS]`,
+  `[PS1/PS2/PSP/DC/SAT/SCD/PCE…]`), with the full system names in the tooltip.
 - Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
 
 ## 1.10.0

@@ -37,14 +37,36 @@ PRESETS = {
     INFO: ("Show CHD info", (".chd",)),
     FIX_CHD: ("Fix CHD types (CD ↔ DVD, lossless)", (".chd",)),
     M3U: ("Create .m3u playlists for multi-disc games", DISC_EXTS),
-    TO_RVZ: ("GameCube / Wii → RVZ (Dolphin)", (".iso", ".gcm", ".gcz", ".wia", ".ciso", ".wbfs")),
+    TO_RVZ: ("ISO / GCZ / WIA / WBFS → RVZ (Dolphin)", (".iso", ".gcm", ".gcz", ".wia", ".ciso", ".wbfs")),
     FROM_RVZ: ("RVZ → ISO", (".rvz",)),
-    TO_NSZ: ("Switch NSP / XCI → NSZ / XCZ", (".nsp", ".xci")),
-    FROM_NSZ: ("Switch NSZ / XCZ → NSP / XCI", (".nsz", ".xcz")),
-    SWITCH_FS: ("Switch NSP / XCI → RomFS + ExeFS folders (newest update applied)", (".nsp", ".xci", ".nsz", ".xcz")),
-    TRIM: ("Trim NDS / 3DS ROMs (reversible)", (".nds", ".dsi", ".3ds", ".cci")),
-    UNTRIM: ("Untrim NDS / 3DS ROMs back to the full dump", (".nds", ".dsi", ".3ds", ".cci")),
+    TO_NSZ: ("NSP / XCI → NSZ / XCZ (compress)", (".nsp", ".xci")),
+    FROM_NSZ: ("NSZ / XCZ → NSP / XCI (decompress)", (".nsz", ".xcz")),
+    SWITCH_FS: ("NSP / XCI → RomFS + ExeFS folders (newest update applied)", (".nsp", ".xci", ".nsz", ".xcz")),
+    TRIM: ("Trim ROMs (reversible)", (".nds", ".dsi", ".3ds", ".cci")),
+    UNTRIM: ("Untrim ROMs back to the full dump", (".nds", ".dsi", ".3ds", ".cci")),
 }
+
+# Which systems each task is for: (abbreviations shown in front of the task, full names for its tooltip)
+_CHD_SYS = ("PS1/PS2/PSP/DC/SAT/SCD/PCE…",
+            "PlayStation, PlayStation 2, PSP, Dreamcast, Saturn, Sega CD / Mega-CD, PC Engine CD / TurboGrafx-CD, "
+            "3DO, Philips CD-i, Neo Geo CD (and Xbox / Xbox 360 ISOs, for archiving)")
+PRESET_SYSTEMS = {
+    TO_CHD: _CHD_SYS, FROM_CHD: _CHD_SYS, RECOMPRESS: _CHD_SYS, VERIFY: _CHD_SYS, INFO: _CHD_SYS,
+    FIX_CHD: ("PS1/PS2/PSP/…", "Any CHD made as the wrong type - most often PlayStation 2 and PSP discs stored as "
+                              "CD instead of DVD (or the reverse)"),
+    M3U: ("PS1/PS2/DC/SAT/SCD/PCE…", "Multi-disc games: PlayStation, PlayStation 2, Dreamcast, Saturn, Sega CD, "
+                                       "PC Engine CD and any other disc system"),
+    TO_RVZ: ("GC/Wii", "Nintendo GameCube and Wii"), FROM_RVZ: ("GC/Wii", "Nintendo GameCube and Wii"),
+    TO_NSZ: ("NSW", "Nintendo Switch"), FROM_NSZ: ("NSW", "Nintendo Switch"), SWITCH_FS: ("NSW", "Nintendo Switch"),
+    TRIM: ("NDS/3DS", "Nintendo DS (and DSi) and Nintendo 3DS"), UNTRIM: ("NDS/3DS", "Nintendo DS (and DSi) and 3DS"),
+}
+
+
+def preset_label(key: str) -> str:
+    """'[GC/Wii]  RVZ → ISO' - the systems first, so the list reads at a glance (full names in the tooltip)."""
+    short = PRESET_SYSTEMS.get(key, ("", ""))[0]
+    return f"[{short}]  {PRESETS[key][0]}" if short else PRESETS[key][0]
+
 
 CD_CODECS = {
     "default": ("chdman default (cdlz,cdzl,cdfl) — best compatibility", ""),
