@@ -23,6 +23,10 @@ patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after 
   game, showing queued / running / applied (or why not). It's still applied in the same pass, which nstool needs.
 - ROM Optimizer tabs renamed to say what they do: **Convert & Extract** (was Tasks), **ROM Storage Advisor** (was
   Save space), **Patches & Translations** (was Patch).
+- ROM Optimizer's window title is just "ROM Optimizer" (the chdman version stays on the chdman tab).
+- Convert & Extract: the log under the job list is now a **Job log** for any tool, with a summary of the selected job
+  (status, source → output, time taken, result or error), errors in red, warnings in orange, commands dimmed, and
+  **Copy**, **Save…** and **Logs folder** buttons. The full live output is kept.
 - Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
 
 ## 1.10.0

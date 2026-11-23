@@ -3,13 +3,14 @@ the ROM Storage Advisor, and advanced chdman tools (every command, version & upd
 
 from __future__ import annotations
 
+import html
 import os
 import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QGuiApplication
+from PySide6.QtCore import QModelIndex, QRect, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QGuiApplication, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleOptionProgressBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QDialog)
 
 from .. import __version__
@@ -23,6 +24,22 @@ from .common import ThemeButton, UpdateButton, startup_update_check, Worker, hum
 STATUS_COLOR = {"Queued": "#7f8790", "Running": "#2f7fd1", "Done": "#2e9d53", "Failed": "#d1452f",
                 "Skipped": "#d49a1b", "Cancelled": "#8a6fc9"}
 Q_TITLE, Q_SOURCE, Q_OUTPUT, Q_DETECT, Q_STATUS, Q_PROGRESS, Q_NOTE = range(7)
+
+
+def _log_html(line: str) -> str:
+    """One log line as HTML: errors red, warnings orange, the tool command dimmed, step headers bold."""
+    import html as _h
+    t = _h.escape(line)
+    low = line.lower()
+    if line.startswith("── "):
+        return f"<b>{t}</b>"
+    if line.startswith("$ "):
+        return f"<span style='color:#8a8f98'>{t}</span>"
+    if "warning" in low or "[warn" in low:            # before errors: "[WARNING] Failed to load …" is a warning
+        return f"<span style='color:#d49a1b'>{t}</span>"
+    if any(w in low for w in ("error", "failed", "mismatch", "[bad", "not found", "cannot", "can't")):
+        return f"<span style='color:#d1452f'>{t}</span>"
+    return t
 
 
 def mono() -> QFont:
@@ -353,7 +370,7 @@ class BatchTab(QWidget):
         btn_retry.clicked.connect(self.retry_failed)
         self.summary = QLabel("Queue is empty — add files or a folder, or drop them here.")
         self.follow = QCheckBox("Follow running job")
-        self.follow.setToolTip("Keep the running job selected so its live chdman output shows below")
+        self.follow.setToolTip("Keep the running job selected so its live output shows in the job log below")
         self.follow.setChecked(True)
         qrow = QHBoxLayout()
         for b in (self.btn_start, self.btn_stop, btn_remove, btn_clear, btn_retry):
@@ -370,8 +387,32 @@ class BatchTab(QWidget):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setFont(mono())
-        self.log.setPlaceholderText("Select a job to see its chdman output.")
+        self.log.setPlaceholderText("Select a job to see what it's doing: the live output of chdman, nstool, nsz or "
+                                    "nodtool, and romtools' own steps.")
         self.log.setMaximumBlockCount(5000)
+        # summary of the selected job above its log, and buttons to keep a copy
+        self.log_head = QLabel("<b>Job log</b> <span style='color:#888'>— select a job</span>")
+        self.log_head.setTextFormat(Qt.TextFormat.RichText)
+        self.log_head.setWordWrap(True)
+        self.log_head.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        b_copy = QPushButton(QIcon.fromTheme("edit-copy"), "Copy")
+        b_copy.setToolTip("Copy the selected job's summary and log")
+        b_copy.clicked.connect(self._copy_log)
+        b_save = QPushButton(QIcon.fromTheme("document-save"), "Save…")
+        b_save.setToolTip("Save the selected job's summary and log to a text file")
+        b_save.clicked.connect(self._save_log)
+        b_dir = QPushButton(QIcon.fromTheme("folder-open"), "Logs folder")
+        b_dir.setToolTip("Open the folder where failed jobs' full logs are kept automatically")
+        b_dir.clicked.connect(self._open_logs)
+        log_box = QWidget()
+        lbl = QVBoxLayout(log_box)
+        lbl.setContentsMargins(0, 0, 0, 0)
+        hrow = QHBoxLayout()
+        hrow.addWidget(self.log_head, 1)
+        for b in (b_copy, b_save, b_dir):
+            hrow.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
+        lbl.addLayout(hrow)
+        lbl.addWidget(self.log, 1)
 
         left = QWidget()
         ll = QVBoxLayout(left)
@@ -391,8 +432,8 @@ class BatchTab(QWidget):
         ql.addLayout(qrow)
         right.addWidget(qw)
         right.addWidget(self.now)
-        right.addWidget(self.log)
-        right.setSizes([430, 130, 170])
+        right.addWidget(log_box)
+        right.setSizes([430, 130, 200])
 
         split = QSplitter()
         split.addWidget(left)
@@ -651,6 +692,7 @@ class BatchTab(QWidget):
         j = next((x for x in self.jobs if self.rows.get(x.id) == r), None)
         if not j:
             return
+        self._set_log_head(j)
         # append only what's new since the last refresh of the same job (rebuilding tens of thousands of lines on
         # every update froze the window); jobs that log a lot only keep their newest lines
         shown_id, shown_total = getattr(self, "_log_shown", (None, 0))
@@ -659,11 +701,62 @@ class BatchTab(QWidget):
             return
         new = total - shown_total
         if keep and shown_id == j.id and 0 < new <= len(j.log):
-            self.log.appendPlainText("\n".join(j.log[-new:]))
+            lines = j.log[-new:]
         else:
-            self.log.setPlainText("\n".join(j.log[-self.log.maximumBlockCount():]))
+            self.log.clear()
+            lines = j.log[-self.log.maximumBlockCount():]
+        for ln in lines:
+            self.log.appendHtml(_log_html(ln))
         self._log_shown = (j.id, total)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    def _selected_job(self):
+        r = self.table.currentRow()
+        return next((x for x in self.jobs if self.rows.get(x.id) == r), None)
+
+    def _set_log_head(self, j: cv.Job):
+        e = html.escape
+        col = STATUS_COLOR.get(j.status, "#888")
+        took = ""
+        if j.started:
+            end = j.finished or time.time()
+            took = f" · {'took' if j.finished else 'running for'} {fmt_dur(end - j.started)}"
+        outs = ", ".join(o.name for o in j.outputs) or "—"
+        res = j.message or (j.step_label if j.status == "Running" else "")
+        res_col = STATUS_COLOR["Failed"] if j.status == "Failed" else "inherit"
+        self.log_head.setText(
+            f"<b>Job log</b> — {e(j.title.strip())} · <b style='color:{col}'>{e(j.status)}</b>{e(took)}<br>"
+            f"<small>{e(j.source.name)} → {e(outs)}</small>"
+            + (f"<br><span style='color:{res_col}'>{e(res)}</span>" if res else ""))
+
+    def _job_report(self, j: cv.Job) -> str:
+        took = f"\ntook: {fmt_dur((j.finished or time.time()) - j.started)}" if j.started else ""
+        return (f"{j.title.strip()}\nstatus: {j.status}{(': ' + j.message) if j.message else ''}\n"
+                f"source: {j.source}\noutput: {', '.join(map(str, j.outputs)) or '-'}\n"
+                f"detail: {j.detail or '-'}{took}\n\n" + "\n".join(j.log) + "\n")
+
+    def _copy_log(self):
+        j = self._selected_job()
+        if j:
+            QGuiApplication.clipboard().setText(self._job_report(j))
+            self.win.statusBar().showMessage("Job log copied.", 4000)
+
+    def _save_log(self):
+        j = self._selected_job()
+        if not j:
+            return
+        import re
+        name = re.sub(r"[^\w.-]+", "_", j.title.strip())[:80] + ".log"
+        f, _ = QFileDialog.getSaveFileName(self, "Save job log", str(Path.home() / name), "Log (*.log *.txt)")
+        if f:
+            Path(f).write_text(self._job_report(j), encoding="utf-8")
+            self.win.statusBar().showMessage(f"Saved {f}", 6000)
+
+    def _open_logs(self):
+        from ..config import DATA_DIR
+        d = DATA_DIR / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
 
     def _rebuild(self):
         keep = list(self.jobs)
@@ -1864,8 +1957,7 @@ class ChdmanTab(QWidget):
         exe = ct.chdman_bin()
         v = ct.version(exe) if exe else None
         self.using.setText(f"{exe or 'none'}" + (f" — {v.raw.replace('manager ', 'version ')}" if v else ""))
-        self.win.base_title = f"ROM Optimizer — chdman {v.number if v else 'missing'}"
-        self.win.setWindowTitle(self.win.base_title)
+        self.win.base_title = "ROM Optimizer"       # the chdman version is shown on the chdman (advanced) tab
         self._verdict()
 
     def _choose(self, i):
