@@ -1019,7 +1019,7 @@ class VerifierWindow(QMainWindow):
 
     def check_folder(self):
         start = self.cfg["window_state"].get("last_check_dir") or self.picker.path_str()
-        d = QFileDialog.getExistingDirectory(self, "Check a folder (searched 3 levels deep)", start)
+        d = QFileDialog.getExistingDirectory(self, "Check a folder (with everything in it)", start)
         if d:
             self.check_paths([Path(d)])
 

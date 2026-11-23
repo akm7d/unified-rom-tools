@@ -129,7 +129,8 @@ Right-click rows for: open folder, copy paths / SHA-1s / DAT names, re-check. **
 
 ## ROM Renamer (preview first, undoable)
 
-One panel with four sections; tick the ones you want and press **Build preview** (F5) for one combined preview.
+One panel with four sections; tick the ones you want and press **Build preview** (F5) for one combined preview, or
+**Check file/folder** (or drag and drop) to preview them for picked files or folders only.
 If two sections would rename the same file, the DAT name wins, then the package name, then the cleanup rules; the
 *Reason* column says which section each change comes from.
 

@@ -287,7 +287,7 @@ def apply_rules(name: str, rules: Rules, is_dir: bool = False) -> str:
 
 def plan_from_rules(folders, rules: Rules) -> list[Op]:
     """folders: {key: folder} or [(key, folder, names to skip)] (see library.rule_folders)."""
-    from .scanner import IGNORE_EXTS
+    from .scanner import IGNORE_EXTS, _cue_parts, _gdi_parts
     ops = []
     entries = [(k, f, set()) for k, f in folders.items()] if isinstance(folders, dict) else folders
     for system, folder, skip in entries:
@@ -295,8 +295,10 @@ def plan_from_rules(folders, rules: Rules) -> list[Op]:
             children = sorted(folder.iterdir(), key=lambda p: p.name.lower())
         except OSError:
             continue
+        tracks = {t for p in children for t in (_cue_parts(p) if p.suffix.lower() == ".cue" else
+                                                _gdi_parts(p) if p.suffix.lower() == ".gdi" else ())}
         for p in children:
-            if p.name.startswith(".") or p.name in skip:
+            if p.name.startswith(".") or p.name in skip or p in tracks:     # (a sheet lists its tracks by name)
                 continue
             is_dir = p.is_dir()
             if is_dir and not rules.include_folders:
@@ -306,6 +308,19 @@ def plan_from_rules(folders, rules: Rules) -> list[Op]:
             new = apply_rules(p.name, rules, is_dir)
             if new != p.name:
                 ops.append(Op(p, p.with_name(new), "cleanup rules", system=system))
+    return ops
+
+
+def plan_rules_for(paths: list[Path], rules: Rules) -> list[Op]:
+    """The cleanup rules for picked files only (not a disc's tracks: its .cue / .gdi lists them by name)."""
+    from .library import sheet_of
+    ops = []
+    for p in paths:
+        if sheet_of(p):
+            continue
+        new = apply_rules(p.name, rules)
+        if new != p.name:
+            ops.append(Op(p, p.with_name(new), "cleanup rules", system=p.parent.name))
     return ops
 
 

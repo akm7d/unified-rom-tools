@@ -3,6 +3,15 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.14.0
+- ROM Renamer: **Check file/folder**, like in ROM Verifier (also Ctrl+O, Ctrl+Shift+O and drag and drop): previews the
+  ticked sections for picked files or folders only. Inside the library, sorting uses its system folders; elsewhere the
+  folders are made right there. CHDs picked by hand are checked even if "Skip CHDs…" is on, and packages are still
+  named with the rest of their game in mind.
+- Picking one track of a disc (in ROM Verifier too) checks the whole disc, and picked folders inside a system folder
+  know which system they are in.
+- The cleanup rules no longer rename the tracks a .cue / .gdi lists (the sheet couldn't find them afterwards).
+
 ## 1.13.0
 - **ROM Verifier identifies ROMs by their content**, not by the folder, name or extension:
   - A file its folder's DAT doesn't know is looked up in all your DATs. New status **Wrong folder** for good dumps that

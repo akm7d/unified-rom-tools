@@ -341,3 +341,40 @@ def test_key_search_is_shallow(tmp_path):
     assert tasks._search_keys(tmp_path) is None
     k = put(tmp_path / "switch" / "prod.keys", b"x")
     assert tasks._search_keys(tmp_path) == k
+
+
+def test_picked_files_know_their_place(lib):
+    cfg = get_config()
+    a = put(lib / "snes" / "sub" / "deep" / GAMES["gba"][0], GAMES["gba"][1])
+    b = put(lib / "Downloads" / GAMES["gba"][0], GAMES["gba"][1])
+    assert library.place_of(cfg, a) == "snes" and library.place_of(cfg, b) == ""
+    for pick in (a, a.parent):                          # the file, or the folder it's in
+        items, idx = library.collect_paths(cfg, [pick], IndexCache())
+        out = []
+        scanner.make_scanner(cfg).run(items, idx, out.append)
+        assert [(r.status, r.found, r.misplaced) for r in out] == [(scanner.MISPLACED, "gba", True)]
+
+
+def test_one_track_stands_for_its_disc(lib):
+    cue = put(lib / "d" / "x.cue", b'FILE "Disc Game (USA) (Track 1).bin" BINARY\nFILE "Disc Game (USA) (Track 2).bin" BINARY')
+    for n, d in TRACKS.items():
+        put(lib / "d" / n, d)
+    items, _idx = library.collect_paths(get_config(), [lib / "d" / n for n in TRACKS], IndexCache())
+    assert [(i.path, i.kind, len(i.parts)) for i in items] == [(cue, "cueset", 2)]
+
+
+def test_cleanup_rules_leave_disc_tracks_alone(lib):
+    put(lib / "d" / "My_Disc.cue", b'FILE "My_Disc_1.bin" BINARY')
+    t = put(lib / "d" / "My_Disc_1.bin", b"x")
+    o = put(lib / "d" / "My_Rom.bin", b"x")
+    rules = renamer.Rules(underscores=True)
+    assert sorted(op.src.name for op in renamer.plan_from_rules({"d": lib / "d"}, rules)) == ["My_Disc.cue", "My_Rom.bin"]
+    assert [op.src for op in renamer.plan_rules_for([t, o], rules)] == [o]
+
+
+def test_package_scope_is_the_whole_console_folder(lib):
+    g = put(lib / "ps4" / "Game" / "a.pkg", b"x")
+    for pick in (g, g.parent, lib / "ps4"):
+        assert library.package_folders(get_config(), [pick]) == [("ps4", lib / "ps4", set())]
+    f = put(lib / "dl" / "a.pkg", b"x")
+    assert library.package_folders(get_config(), [f]) == [(library.OTHER, lib / "dl", set())]

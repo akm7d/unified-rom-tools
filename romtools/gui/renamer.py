@@ -8,9 +8,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout, QGroupBox,
-                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
-                               QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
+                               QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar, QToolButton,
                                QVBoxLayout, QWidget, QListWidget, QListWidgetItem, QSizePolicy)
 
 from .. import __version__
@@ -125,6 +125,7 @@ class RenamerWindow(QMainWindow):
         self.ops: list[rn.Op] = []
         self.base_ops: list[rn.Op] = []
         self.worker: Worker | None = None
+        self.preview_of = ""            # what was picked with Check file/folder ("" = the library)
         self._filling = False
 
         tb = QToolBar("Main")
@@ -145,7 +146,25 @@ class RenamerWindow(QMainWindow):
         act_hist.triggered.connect(lambda: HistoryDialog(self, self.cache).exec())
         act_dats = QAction(QIcon.fromTheme("view-list-details"), "Manage DATs…", self)
         act_dats.triggered.connect(self.manage_dats)
-        for a in (self.act_preview, self.act_stop, self.act_apply):
+        self.check_btn = QToolButton()
+        self.check_btn.setText("Check file/folder")
+        self.check_btn.setIcon(QIcon.fromTheme("document-open"))
+        self.check_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.check_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.check_btn.setToolTip("Preview the ticked sections for any ROM, archive or folder right away - no library or "
+                                  "system needed.\nYou can also drag files or folders onto this window. Nothing is "
+                                  "changed before you press Apply.")
+        cm = QMenu(self.check_btn)
+        a = cm.addAction(QIcon.fromTheme("document-open"), "ROM / archive file(s)…", self.check_files)
+        a.setShortcut(QKeySequence("Ctrl+O"))
+        a = cm.addAction(QIcon.fromTheme("folder-open"), "Folder…", self.check_folder)
+        a.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.addActions(cm.actions())          # shortcuts work without opening the menu
+        self.check_btn.setMenu(cm)
+        self.setAcceptDrops(True)
+        tb.addAction(self.act_preview)
+        tb.addWidget(self.check_btn)
+        for a in (self.act_stop, self.act_apply):
             tb.addAction(a)
         tb.addSeparator()
         for a in (act_hist, act_dats):
@@ -403,15 +422,51 @@ class RenamerWindow(QMainWindow):
                         find=self.r_find.text(), replace=self.r_repl.text(), regex=self.r_regex.isChecked(),
                         include_folders=self.r_dirs.isChecked(), extensions_lower=self.r_ext.isChecked())
 
-    def build_preview(self):
+    # ------------------------------------------------------------------ any file / folder
+    def check_files(self):
+        from ..hashing import ARCHIVE_EXTS
+        exts = " ".join(f"*{e}" for e in sorted(sc.ROM_EXTS | ARCHIVE_EXTS))
+        start = self.cfg["window_state"].get("last_check_dir") or self.picker.path_str()
+        files, _ = QFileDialog.getOpenFileNames(self, "Check ROM / archive files", start,
+                                                f"ROMs and archives ({exts});;All files (*)")
+        if files:
+            self.check_paths([Path(f) for f in files])
+
+    def check_folder(self):
+        start = self.cfg["window_state"].get("last_check_dir") or self.picker.path_str()
+        d = QFileDialog.getExistingDirectory(self, "Check a folder (with everything in it)", start)
+        if d:
+            self.check_paths([Path(d)])
+
+    def check_paths(self, paths: list[Path]):
+        paths = [p for p in paths if p.exists()]
+        if not paths:
+            return
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "Busy", "Wait for the current preview to finish, or press Stop.")
+            return
+        self.cfg["window_state"]["last_check_dir"] = str(paths[0] if paths[0].is_dir() else paths[0].parent)
+        self.cfg.save()
+        self.build_preview(targets=paths)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls() and any(u.isLocalFile() for u in e.mimeData().urls()):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        self.check_paths([Path(u.toLocalFile()) for u in e.mimeData().urls() if u.isLocalFile()])
+
+    def build_preview(self, _checked=False, targets: list[Path] | None = None):
+        """Preview for the ticked systems of the library, or (``targets``) for picked files and folders only."""
         if self.worker and self.worker.isRunning():
             return
         root = self.picker.path()
         systems = self.systems.checked()
-        if not systems:
-            QMessageBox.information(self, "Preview", "Tick at least one system on the left.")
-            return
-        self.systems.remember()
+        if targets is None:
+            if not systems:
+                QMessageBox.information(self, "Preview", "Tick at least one system on the left.")
+                return
+            self.systems.remember()
         do_dat, do_pkg, do_rules = (self.sec_dat.isChecked(), self.sec_pkg.isChecked(), self.sec_rules.isChecked())
         do_sort, s_opts = self.sec_sort.isChecked(), (self.s_header.isChecked(), self.s_ext.isChecked())
         if not (do_dat or do_pkg or do_rules or do_sort):
@@ -434,9 +489,16 @@ class RenamerWindow(QMainWindow):
             ops: list[rn.Op] = []
             notes: list[str] = []
             sorting: list[rn.Op] = []
+            files = [p for p in targets or [] if p.is_file()]
+
+            def picked(p: Path) -> bool:
+                return targets is None or any(p == t or t in p.parents for t in targets)
             if do_dat or do_sort:
                 results, skipped, items = [], [], []
-                listed, indexes = library.collect(cfg, root, systems, idxc, say)
+                if targets is None:
+                    listed, indexes = library.collect(cfg, root, systems, idxc, say)
+                else:
+                    listed, indexes = library.collect_paths(cfg, targets, idxc, say)
                 pkg_sys = {s for s in systems if (system_for(cfg, s) or None) and system_for(cfg, s).source == "package"}
                 nodat = sorted({it.system for it in listed if indexes.get(it.system) is None} - pkg_sys
                                - {library.OTHER})
@@ -445,7 +507,7 @@ class RenamerWindow(QMainWindow):
                         continue
                     if indexes.get(it.system) is None and not do_sort and it.kind != "package":
                         continue
-                    if skip_unc and it.kind == "chd":
+                    if skip_unc and it.kind == "chd" and it.path not in files:   # picked by hand: check it
                         try:
                             st = it.path.stat()
                             if not cache.get(it.path, st.st_size, st.st_mtime):
@@ -461,8 +523,13 @@ class RenamerWindow(QMainWindow):
                     op.reason = op.reason if op.reason.startswith("DAT") else "DAT: " + op.reason
                     ops.append(op)
                 if do_sort and not w.cancel.is_set():
-                    sorting, snotes = rn.plan_sorting(results, root, cfg, *s_opts)
-                    notes += snotes
+                    # inside the library: into its system folders; elsewhere: into folders made right there
+                    for base in [root] if targets is None else dict.fromkeys(
+                            root if root in t.parents or t == root else t if t.is_dir() else t.parent for t in targets):
+                        mine = [r for r in results if base in r.item.path.parents]
+                        sops, snotes = rn.plan_sorting(mine, base, cfg, *s_opts)
+                        sorting += [o for o in sops if o.src not in {x.src for x in sorting}]
+                        notes += snotes
                     if not do_dat:
                         nodat = []
                 if nodat:
@@ -471,14 +538,23 @@ class RenamerWindow(QMainWindow):
                     notes.append(f"{len(skipped)} CHD(s) not checked yet were skipped (check them in ROM Verifier, "
                                  f"or untick “Skip CHDs…”)")
             if do_pkg and not w.cancel.is_set():
-                pops, pnotes = rn.plan_packages(library.rule_folders(cfg, root, systems), pk.switch_keys(cfg),
-                                                *p_opts, progress=say)
+                where = library.rule_folders(cfg, root, systems) if targets is None else \
+                    library.package_folders(cfg, targets)
+                pops, pnotes = rn.plan_packages(where, pk.switch_keys(cfg), *p_opts, progress=say)
+                pops = [op for op in pops if picked(op.src)]
                 for op in pops:
                     op.reason = "Package: " + op.reason
                 ops += pops
                 notes += pnotes
             if do_rules and not w.cancel.is_set():
-                for op in rn.plan_from_rules(library.rule_folders(cfg, root, systems), rules):
+                if targets is None:
+                    rops = rn.plan_from_rules(library.rule_folders(cfg, root, systems), rules)
+                else:
+                    rops = rn.plan_rules_for(files, rules)
+                    for d in (t for t in targets if t.is_dir()):
+                        rops += rn.plan_from_rules(library.rule_folders(cfg, d, library.split(cfg, d)[0] +
+                                                                        [library.OTHER]), rules)
+                for op in rops:
                     op.reason = "Cleanup: " + op.reason if op.reason else "Cleanup"
                     ops.append(op)
             # one change per file: DAT name, then package name, then cleanup rules (that's the order added above)
@@ -487,6 +563,8 @@ class RenamerWindow(QMainWindow):
 
         self.worker = Worker(job, parent=self)
         self.worker.progress.connect(self._on_progress)
+        self.preview_of = "" if targets is None else ", ".join(t.name for t in targets[:3]) + (
+            " …" if len(targets) > 3 else "")
         self.worker.done.connect(self._preview_ready)
         self.worker.failed.connect(lambda e: (self._busy(False), QMessageBox.critical(self, "Preview failed", e)))
         self._busy(True)
@@ -500,6 +578,7 @@ class RenamerWindow(QMainWindow):
 
     def _busy(self, on):
         self.act_preview.setEnabled(not on)
+        self.check_btn.setEnabled(not on)
         self.act_stop.setEnabled(on)
         self.progress.setVisible(on)
         self.progress.setRange(0, 0)
@@ -513,7 +592,9 @@ class RenamerWindow(QMainWindow):
         self.base_ops = ops
         self.ops = rn.validate(rn.add_playlist_ops(ops))
         self._fill()
-        self.status.setText("  ·  ".join(notes) if notes else "Preview ready — nothing has been changed yet.")
+        of = f"Preview of {self.preview_of}" if self.preview_of else "Preview"
+        self.status.setText(f"{of}: " + "  ·  ".join(notes) if notes else
+                            f"{of} ready — nothing has been changed yet.")
 
     # ------------------------------------------------------------------ table
     def _fill(self):
@@ -596,7 +677,8 @@ class RenamerWindow(QMainWindow):
                          (f" into {len(new_dirs)} new folder(s)" if new_dirs else ""))
         what = " · ".join(parts)
         self.summary.setText(f"{what} · {n_on} checked · {n_bad} with problems (not applied)"
-                             if self.ops else "Nothing to change for the checked systems.")
+                             if self.ops else f"Nothing to change in {self.preview_of}." if self.preview_of else
+                             "Nothing to change for the checked systems.")
         self.act_apply.setEnabled(n_on > 0)
         self.apply_btn.setEnabled(n_on > 0)
         self.apply_btn.setText(f"Apply {n_on} change(s)…")

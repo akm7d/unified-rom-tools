@@ -89,8 +89,22 @@ def system_for_dat(dat_name: str) -> str | None:
     return None
 
 
+def place_of(cfg: Config, path: Path) -> str:
+    """The system of the nearest folder above ``path`` that is one ("" = none). Inside the library every folder up to
+    it counts, elsewhere only the three nearest."""
+    root = Path(cfg["library_root"] or "/nonexistent").expanduser()
+    above = list(path.parents)
+    above = above[:above.index(root)] if root in above else above[:3]
+    for p in above:
+        mapped = ((cfg["systems"] or {}).get(p.name) or {}).get("system") if p.parent == root else ""
+        g = guess_system(p.name)
+        if mapped or g:
+            return mapped or g.id
+    return ""
+
+
 def collect(cfg: Config, root: Path, keys: list[str], index_cache: IndexCache,
-            progress: Callable[[str], None] = lambda s: None):
+            progress: Callable[[str], None] = lambda s: None, place: str = ""):
     """(items, indexes) for the checked groups. Items in the OTHER group get system == OTHER."""
     from .scanner import _items_in, enumerate_system
     systems, others, _loose = split(cfg, root)
@@ -99,8 +113,7 @@ def collect(cfg: Config, root: Path, keys: list[str], index_cache: IndexCache,
         if key == OTHER:
             progress("Listing loose files and other folders…")
             rs = root_system(cfg, root)
-            from .systems import guess_system
-            own = (cfg["systems"].get(rs) or {}).get("system") or getattr(guess_system(rs), "id", "") if rs else ""
+            own = (cfg["systems"].get(rs) or {}).get("system") or getattr(guess_system(rs), "id", "") if rs else place
             items += _items_in(OTHER, root, skip_dirs=set(systems), expected=own)
             dats = (cfg["systems"].get(rs) or {}).get("dats", []) if rs else []
             needed = any(it.system == OTHER for it in items)
@@ -121,12 +134,29 @@ def collect(cfg: Config, root: Path, keys: list[str], index_cache: IndexCache,
     return items, indexes
 
 
-def item_for_file(path: Path):
+def sheet_of(path: Path) -> Path | None:
+    """The .cue / .gdi in the same folder that lists this file as one of its tracks."""
+    from .scanner import _cue_parts, _gdi_parts
+    if path.suffix.lower() not in (".bin", ".img", ".raw", ".iso", ".wav"):
+        return None
+    try:
+        for f in sorted(path.parent.iterdir()):
+            parts = _cue_parts(f) if f.suffix.lower() == ".cue" else _gdi_parts(f) if f.suffix.lower() == ".gdi" else []
+            if path in parts:
+                return f
+    except OSError:
+        pass
+    return None
+
+
+def item_for_file(path: Path, cfg: Config | None = None):
     """A scan item for one picked file (ROM, archive, CHD, or a .cue/.gdi with its tracks)."""
-    from .scanner import Item, _cue_parts, _gdi_parts, _system_of_folder, kind_for
+    from .config import get_config
+    from .scanner import Item, _cue_parts, _gdi_parts, kind_for
+    path = sheet_of(path) or path              # one track of a disc: the whole disc
     ext = path.suffix.lower()
     parts = _cue_parts(path) if ext == ".cue" else _gdi_parts(path) if ext == ".gdi" else None
-    expected = next((s for s in map(_system_of_folder, (p.name for p in path.parents[:3])) if s), "")
+    expected = place_of(cfg or get_config(), path)
     if parts is not None:
         return Item(OTHER, path, "cueset", [p for p in parts if p.exists()], expected=expected)
     return Item(OTHER, path, kind_for(ext), expected=expected)
@@ -141,11 +171,11 @@ def collect_paths(cfg: Config, paths: list[Path], index_cache: IndexCache,
     for p in paths:
         if p.is_dir():
             systems, _others, _loose = split(cfg, p)
-            its, idx = collect(cfg, p, systems + [OTHER], index_cache, progress)
+            its, idx = collect(cfg, p, systems + [OTHER], index_cache, progress, place_of(cfg, p))
             items += its
             indexes.update({k: v for k, v in idx.items() if k != OTHER})
         elif p.is_file():
-            items.append(item_for_file(p))
+            items.append(item_for_file(p, cfg))
     if any(it.system == OTHER for it in items):
         dats = all_dats(cfg)
         if dats:
@@ -170,6 +200,26 @@ def rule_folders(cfg: Config, root: Path, keys: list[str]) -> list[tuple[str, Pa
         else:
             out.append((key, root / key, set()))
     return out
+
+
+def package_folders(cfg: Config, paths: list[Path]) -> list[tuple[str, Path, set[str]]]:
+    """Folders to read console packages from for these picked files / folders: the whole PS4 / Switch folder they are
+    in (names come from a game and its updates together), else the folder itself."""
+    out: list[tuple[str, Path, set[str]]] = []
+    for p in paths:
+        home = None
+        for q in ([p] if p.is_dir() else []) + list(p.parents)[:4]:
+            g = guess_system(q.name)
+            if g and g.source == "package":
+                home = q
+                break
+        if home is not None:
+            out.append((home.name, home, set()))
+        elif p.is_dir():
+            out += rule_folders(cfg, p, split(cfg, p)[0] + [OTHER])
+        else:
+            out.append((OTHER, p.parent, set()))
+    return list({(k, f): (k, f, s) for k, f, s in out}.values())
 
 
 __all__ = ["OTHER", "OTHER_LABEL", "split", "collect", "all_dats", "system_for_dat", "rule_folders",
