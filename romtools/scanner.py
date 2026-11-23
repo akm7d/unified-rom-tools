@@ -159,6 +159,9 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
                 else "package" if ext in packages.PACKAGE_EXTS else "archive" if ext in ARCHIVE_EXTS else "file")
         items.append(Item(system, f, kind))
     for d in dirs:
+        if packages.is_extracted_switch(d):            # an extracted Switch game: identified, not "Skipped"
+            items.append(Item(system, d, "package"))
+            continue
         if depth < MAX_DEPTH and (_has_roms(d) or _has_rom_subdirs(d)):
             items.extend(_items_in(system, d, depth + 1))
         else:
@@ -554,8 +557,7 @@ def _package_problems(item: Item, info, keys: Path | None) -> list[str]:
         hit = _SCOPE_CACHE.get(ck)
     if hit is None or time.monotonic() - hit[0] > 60:
         infos = []
-        for f in sorted(p for p in scope.rglob("*") if p.suffix.lower() in packages.PACKAGE_EXTS
-                        and len(p.relative_to(scope).parts) <= MAX_DEPTH + 1):
+        for f in packages.iter_packages(scope, MAX_DEPTH + 1):
             try:
                 infos.append(_package_info(f, keys))
             except (packages.PackageError, OSError):

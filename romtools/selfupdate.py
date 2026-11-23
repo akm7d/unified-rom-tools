@@ -34,6 +34,26 @@ from .compat import FROZEN, IS_WIN, app_dir
 GITHUB_REPO = "akm7d/unified-rom-tools"
 API = "https://api.github.com/repos/{repo}/releases/latest"
 CHECK_INTERVAL = 12 * 3600       # the automatic check at launch runs at most twice a day
+# Ed25519 public keys whose signature on SHA256SUMS (SHA256SUMS.sig) a release must carry. The private key never
+# leaves the maintainer's machine, so a compromised GitHub account alone can't publish an update that installs.
+RELEASE_KEYS = ["LtU2fLVzjX64ubTrJUu+s2UknrCmMDOZqm0dKwzqzYk="]
+
+
+def verify_signature(data: bytes, sig_b64: str, keys: list[str] | None = None) -> bool:
+    import base64
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    try:
+        sig = base64.b64decode(sig_b64.strip(), validate=True)
+    except ValueError:
+        return False
+    for k in keys if keys is not None else RELEASE_KEYS:
+        try:
+            Ed25519PublicKey.from_public_bytes(base64.b64decode(k)).verify(sig, data)
+            return True
+        except (InvalidSignature, ValueError):
+            continue
+    return False
 
 
 class UpdateError(Exception):
@@ -157,12 +177,18 @@ def _update_build(rel: Release, progress) -> tuple[Path, str]:
         raise UpdateError(f"the release has no {name}")
     if "SHA256SUMS" not in rel.assets:
         raise UpdateError("the release has no SHA256SUMS file, so the download can't be checked")
+    if "SHA256SUMS.sig" not in rel.assets:
+        raise UpdateError("the release isn't signed, so it can't be trusted - download it from the release page "
+                          "if you want it anyway")
     here = app_dir()
     parent = here.parent
     target = parent / name.replace(".tar.gz", "").replace(".zip", "")
     if target.exists():
         raise UpdateError(f"{target} already exists - start that one, or remove it and update again")
-    sums = _get(rel.assets["SHA256SUMS"]).decode("utf-8", "replace")
+    raw_sums = _get(rel.assets["SHA256SUMS"])
+    if not verify_signature(raw_sums, _get(rel.assets["SHA256SUMS.sig"]).decode("ascii", "replace")):
+        raise UpdateError("the release's signature doesn't match the project's key - nothing was downloaded")
+    sums = raw_sums.decode("utf-8", "replace")
     want = next((ln.split()[0].lower() for ln in sums.splitlines() if ln.strip().endswith(name)), None)
     if not want:
         raise UpdateError(f"SHA256SUMS doesn't list {name}")

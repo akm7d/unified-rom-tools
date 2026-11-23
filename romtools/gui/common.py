@@ -498,7 +498,7 @@ def _offer(win, module: str, rel) -> None:
     kind = su.install_kind()
     box = QMessageBox(QMessageBox.Icon.Information, "Update available",
                       f"<b>romtools {rel.version}</b> is available (you have {__version__}).", parent=win)
-    how = {"build": "It's downloaded, checked against its published checksum and unpacked next to this folder; "
+    how = {"build": "It's downloaded, checked against its signed checksum and unpacked next to this folder; "
                     "your settings and DATs come along, and this version stays where it is.",
            "git": "Your copy is updated with git (git pull), then the bundled tools are fetched again.",
            "source": "This copy has no git history: open the release page to download it."}[kind]

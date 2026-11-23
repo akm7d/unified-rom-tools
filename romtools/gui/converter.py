@@ -507,19 +507,49 @@ class BatchTab(QWidget):
         if preset in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS) and not Path(self.keys.text().strip()).is_file():
             if not self.ask_for_keys("prod"):
                 return
-        files = cv.collect(paths, preset)
-        if not files:
-            QMessageBox.information(self, "Nothing to add",
-                                    f"No matching files ({', '.join(cv.PRESETS[preset][1])}) were found.")
+        self._plan_in_background(preset, paths, self.options(), first=True)
+
+    def _plan_in_background(self, preset: str, paths: list[Path], opts: cv.Options, first: bool):
+        """Find the files and plan the jobs off the GUI thread: planning reads headers (CD/DVD detection, Switch
+        package contents over a network share), which can take seconds for a big folder."""
+        if getattr(self, "_planner", None) is not None and self._planner.isRunning():
+            self.win.statusBar().showMessage("Still adding the previous files - try again in a moment.", 6000)
             return
-        queued = {(j.source, j.steps[0][1] if j.steps else "") for j in self.jobs if j.status == "Queued"}
-        jobs = cv.plan(preset, files, self.options())
-        if preset == cv.SWITCH_FS and any(cv.NEEDS_TITLE_KEY in j.message for j in jobs) \
-                and self.ask_for_keys("title", sum(cv.NEEDS_TITLE_KEY in j.message for j in jobs)):
-            jobs = cv.plan(preset, files, self.options())          # again, with the title.keys just set
-        jobs = [j for j in jobs if (j.source, j.steps[0][1] if j.steps else "") not in queued]
-        self.add_jobs(jobs)
-        self.save_state()
+        self.win.statusBar().showMessage("Looking at the files to add…")
+        self.setCursor(Qt.CursorShape.BusyCursor)
+
+        def job(_w):
+            files = cv.collect(paths, preset)
+            return files, (cv.plan(preset, files, opts) if files else [])
+
+        def done(res):
+            self.unsetCursor()
+            files, jobs = res
+            if not files:
+                self.win.statusBar().clearMessage()
+                QMessageBox.information(self, "Nothing to add",
+                                        f"No matching files ({', '.join(cv.PRESETS[preset][1])}) were found.")
+                return
+            missing = sum(cv.NEEDS_TITLE_KEY in j.message for j in jobs)
+            if first and preset == cv.SWITCH_FS and missing and self.ask_for_keys("title", missing):
+                self._plan_in_background(preset, paths, self.options(), first=False)   # again, with title.keys
+                return
+            queued = {(j.source, j.steps[0][1] if j.steps else "") for j in self.jobs if j.status == "Queued"}
+            jobs = [j for j in jobs if (j.source, j.steps[0][1] if j.steps else "") not in queued]
+            self.add_jobs(jobs)
+            self.save_state()
+            self.win.statusBar().showMessage(f"Added {len(jobs)} job(s).", 5000)
+
+        def failed(err):
+            self.unsetCursor()
+            self.win.statusBar().clearMessage()
+            QMessageBox.critical(self, "Couldn't add files", err)
+
+        w = Worker(job, parent=self)
+        w.done.connect(done)
+        w.failed.connect(failed)
+        self._planner = w
+        w.start()
 
     def ask_for_keys(self, which: str, count: int = 0) -> bool:
         """Missing keys: offer to pick the file now (saved for all three apps). True if one was set."""

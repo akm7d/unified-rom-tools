@@ -211,7 +211,7 @@ Every app has an **Updates** button: *Check for updates now*, and *Check for upd
 default; at most twice a day; it reads one small file from GitHub's public API). A packaged build downloads the new
 release, checks it against the release's `SHA256SUMS`, and unpacks it **next to** the current folder; a portable
 build's `data/` (settings, DATs, tags, rename history) is copied over and the Linux menu entries are pointed at it.
-The old folder is left as it was, so you can go back. A copy cloned with git is updated with `git pull --ff-only`.
+The old folder is left as it was, so you can go back. Releases are **signed**: the update is only installed if the signature on its checksums matches the project's key built into the apps. A copy cloned with git is updated with `git pull --ff-only`.
 
 ## Files
 

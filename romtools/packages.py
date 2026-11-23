@@ -539,8 +539,71 @@ def copy_member(container_path: Path, name: str, dest: Path, progress=None, canc
 
 # ============================================================================ common
 
+def is_extracted_switch(d: Path) -> bool:
+    """A Switch game already extracted to folders (exefs/ with main.npdm, usually romfs/ next to it)."""
+    try:
+        return (d / "exefs" / "main.npdm").is_file()
+    except OSError:
+        return False
+
+
+def iter_packages(scope: Path, max_depth: int = 4, skip: set[str] | None = None):
+    """Package files (PS4 PKG, Switch NSP/XCI/…) and extracted Switch game folders under ``scope``, without
+    walking into the extracted games' thousands of romfs files. ``skip``: top-level folder names to leave out."""
+    import os
+    scope = Path(scope)
+    for dirpath, dirnames, filenames in os.walk(scope):
+        here = Path(dirpath)
+        depth = len(here.relative_to(scope).parts)
+        keep = []
+        for dn in sorted(dirnames):
+            if depth == 0 and skip and dn in skip:
+                continue
+            sub = here / dn
+            if is_extracted_switch(sub):
+                yield sub
+            elif depth + 1 < max_depth and not dn.startswith("."):
+                keep.append(dn)
+        dirnames[:] = keep
+        for fn in sorted(filenames):
+            if Path(fn).suffix.lower() in PACKAGE_EXTS and not fn.startswith("."):
+                yield here / fn
+
+
+def read_switch_dir(d: Path) -> PackageInfo:
+    """An extracted Switch game: the Title ID from exefs/main.npdm (its ACI0 block), the name and version from a
+    control.nacp if the dump kept one, else the name from the folder."""
+    npdm = (d / "exefs" / "main.npdm").read_bytes()
+    if npdm[:4] != b"META":
+        raise PackageError("exefs/main.npdm isn't a valid NPDM")
+    off, size = struct.unpack("<II", npdm[0x70:0x78])
+    if npdm[off:off + 4] != b"ACI0":
+        raise PackageError("exefs/main.npdm has no ACI0 block")
+    tid = f"{struct.unpack('<Q', npdm[off + 0x10:off + 0x18])[0]:016X}"
+    info = PackageInfo("switch", str(d), title_id=tid, base_id=tid, kind=GAME + " (extracted)")
+    nacp = next((p for p in (d / "control.nacp", d / "control" / "control.nacp") if p.is_file()), None)
+    if nacp:
+        info.title, info.display_version = _nacp(nacp.read_bytes())
+    if not info.title:
+        info.title = re.sub(r"\s*\[[^\]]*\]|\s*\(v\d+\)", "", d.name).strip()
+        info.note = "name taken from the folder name"
+    parts = [p for p in ("exefs", "romfs") if (d / p).is_dir()]
+    if "romfs" not in parts:
+        info.note = (info.note + "; " if info.note else "") + "no romfs/ folder"
+    m = re.search(r"\(v(\d+)\)", d.name)          # our extractor names updated games "Title [ID] (v65536)"
+    if m:
+        info.version, info.version_str = int(m.group(1)), f"v{m.group(1)}"
+    info.contents = [Content(GAME, tid, info.version, info.version_str, info.display_version)]
+    return info
+
+
 def read(path: Path, keys_path: Path | None = None) -> PackageInfo:
     ext = path.suffix.lower()
+    if path.is_dir():
+        try:
+            return read_switch_dir(path)
+        except (OSError, struct.error, ValueError) as exc:
+            raise PackageError(f"couldn't read the extracted game: {exc}") from exc
     try:
         if ext in PS4_EXTS:
             return read_ps4(path)

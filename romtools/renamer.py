@@ -240,9 +240,7 @@ def plan_packages(folders: list[tuple], keys: Path | None, rename: bool = True,
         skip = entry[2] if len(entry) > 2 else set()
         if not folder.is_dir():
             continue
-        files = sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in pk.PACKAGE_EXTS
-                       and len(p.relative_to(folder).parts) <= MAX_DEPTH + 1
-                       and p.relative_to(folder).parts[0] not in skip and p not in seen)
+        files = [p for p in pk.iter_packages(folder, MAX_DEPTH + 1, skip) if p.is_file() and p not in seen]
         seen.update(files)
         infos: list[tuple[Path, pk.PackageInfo]] = []
         unread = 0
@@ -314,6 +312,7 @@ class JournalEntry:
     new_text: str | None = None
     done: bool = False
     made_dir: str | None = None   # folder created for this move (removed again by undo if empty)
+    via: str | None = None        # temporary name while renames that depend on each other are done
 
 
 def _rename(src: Path, dst: Path) -> None:
@@ -325,6 +324,29 @@ def _rename(src: Path, dst: Path) -> None:
         os.rename(tmp, dst)
     else:
         os.rename(src, dst)
+
+
+def _park(entries: list[JournalEntry], frm: str, to: str) -> tuple[set[int], list[str]]:
+    """Renames that depend on each other (A→B while B→C, or two names swapped): move those files to a
+    temporary name first (recorded in ``via``), so the second pass can put each in place without anything in
+    the way. ``frm``/``to`` are "src"/"dst" for apply and "dst"/"src" for undo.
+    Returns (ids of entries that couldn't be parked, error messages)."""
+    starts = {getattr(e, frm).lower() for e in entries}
+    ends = {getattr(e, to).lower() for e in entries}
+    failed, errors = set(), []
+    for e in entries:
+        a, b = getattr(e, frm).lower(), getattr(e, to).lower()
+        if a == b or not (b in starts or a in ends):
+            continue
+        cur = Path(getattr(e, frm))
+        tmp = cur.with_name(f".romtools-ren-{uuid.uuid4().hex[:8]}{cur.suffix}")
+        try:
+            os.rename(cur, tmp)
+            e.via = str(tmp)
+        except OSError as exc:
+            failed.add(id(e))
+            errors.append(f"{cur.name}: {exc}")
+    return failed, errors
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -357,14 +379,26 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
     _save_journal(jpath, meta, entries)  # written BEFORE touching anything
 
     errors = []
+    # renames that depend on each other (A→B while B→C, or two names swapped) go via a temporary name first
+    skip, errors = _park([e for e in entries if e.kind == FILE], "src", "dst")
+    _save_journal(jpath, meta, entries)
     for i, e in enumerate(entries):
         try:
             src, dst = Path(e.src), Path(e.dst)
             if e.kind == FILE:
+                if id(e) in skip:     # couldn't be moved aside (reported above): left as it was
+                    continue
                 if not dst.parent.exists():
                     dst.parent.mkdir(parents=True)
                     e.made_dir = str(dst.parent)
-                _rename(src, dst)
+                try:
+                    _rename(Path(e.via) if e.via else src, dst)
+                except OSError:
+                    if e.via:         # couldn't finish: put the file back under its old name
+                        os.rename(e.via, src)
+                        e.via = None
+                    raise
+                e.via = None
                 if cache:
                     cache.rename(src, dst)
             else:
@@ -400,14 +434,21 @@ def list_journals() -> list[tuple[Path, dict]]:
 def undo(jpath: Path, cache=None) -> list[str]:
     data = json.loads(jpath.read_text(encoding="utf-8"))
     entries = [JournalEntry(**e) for e in data["entries"]]
-    errors = []
+    skip, errors = _park([e for e in entries if e.kind == FILE and e.done], "dst", "src")
     for e in reversed(entries):
-        if not e.done:
+        if not e.done or id(e) in skip:
             continue
         src, dst = Path(e.src), Path(e.dst)
         try:
             if e.kind == FILE:
-                _rename(dst, src)
+                try:
+                    _rename(Path(e.via) if e.via else dst, src)
+                except OSError:
+                    if e.via:
+                        os.rename(e.via, dst)
+                        e.via = None
+                    raise
+                e.via = None
                 if cache:
                     cache.rename(dst, src)
             else:

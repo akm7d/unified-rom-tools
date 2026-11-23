@@ -5,6 +5,7 @@
     python3 packaging/build.py windows    # dist/romtools-<version>-windows-x64.zip  (Wine on Linux, or native)
     python3 packaging/build.py all
     python3 packaging/build.py tools      # source checkout: fetch nodtool, nsz, xdelta3 into ./tools
+    python3 packaging/build.py keygen     # once: make the release signing key (kept outside the repo)
     python3 packaging/build.py test-portable  # self-test the Linux build on a clean Ubuntu 24.04 (Docker)
     python3 packaging/build.py clean      # remove build/ and dist/
     python3 packaging/build.py distclean  # also remove the download / venv / Wine cache
@@ -495,11 +496,15 @@ def clean(cache_too: bool) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("target", choices=["linux", "windows", "all", "tools", "test-portable", "clean", "distclean"])
+    ap.add_argument("target", choices=["linux", "windows", "all", "tools", "keygen", "test-portable", "clean",
+                                       "distclean"])
     ap.add_argument("--skip-selftest", action="store_true", help="don't run the packaged program's self-test")
     args = ap.parse_args()
     if args.target in ("clean", "distclean"):
         clean(args.target == "distclean")
+        return 0
+    if args.target == "keygen":
+        keygen()
         return 0
     if args.target == "tools":
         if sys.platform == "win32":
@@ -524,6 +529,43 @@ def main() -> int:
     return 0
 
 
+SIGNING_KEY = Path(os.environ.get("ROMTOOLS_SIGNING_KEY") or
+                   Path.home() / ".config" / "romtools-release" / "release-signing.key")
+
+
+def keygen() -> None:
+    """Create the Ed25519 release signing key (once). Prints the public key for romtools/selfupdate.py."""
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    if SIGNING_KEY.exists():
+        raise SystemExit(f"{SIGNING_KEY} already exists - not replacing it")
+    key = Ed25519PrivateKey.generate()
+    SIGNING_KEY.parent.mkdir(parents=True, exist_ok=True)
+    SIGNING_KEY.parent.chmod(0o700)
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                            serialization.NoEncryption())
+    fd = os.open(SIGNING_KEY, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(pem)
+    pub = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    print(f"private key: {SIGNING_KEY}  (back it up; never commit it)")
+    print(f"public key for RELEASE_KEYS in romtools/selfupdate.py:\n{base64.b64encode(pub).decode()}")
+
+
+def sign_file(path: Path) -> None:
+    """<path>.sig = base64 Ed25519 signature of the file, with the release key (skipped if there's no key)."""
+    import base64
+    if not SIGNING_KEY.is_file():
+        print(f"   (not signed: no release key at {SIGNING_KEY}; run `build.py keygen` once)")
+        return
+    from cryptography.hazmat.primitives import serialization
+    key = serialization.load_pem_private_key(SIGNING_KEY.read_bytes(), password=None)
+    sig = key.sign(path.read_bytes())
+    path.with_name(path.name + ".sig").write_text(base64.b64encode(sig).decode() + "\n")
+    print(f"   signed {path.name} -> {path.name}.sig")
+
+
 def write_release_files() -> None:
     """dist/SHA256SUMS (the in-app updater only installs archives listed there) and dist/RELEASE_NOTES.md
     (this version's CHANGELOG.md section), ready to attach to a GitHub release."""
@@ -531,6 +573,7 @@ def write_release_files() -> None:
     if not archives:
         return
     (DIST / "SHA256SUMS").write_text("".join(f"{sha256(a)}  {a.name}\n" for a in archives))
+    sign_file(DIST / "SHA256SUMS")
     log = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     # every version since the last published release tag (versions that never got a release of their own)
     last = subprocess.run(["git", "describe", "--tags", "--abbrev=0", "--match", "v*"], cwd=ROOT,

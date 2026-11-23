@@ -3,6 +3,20 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.10.0
+- **Signed releases**: each release's SHA256SUMS is signed with the project's Ed25519 key (kept off GitHub); the
+  updater only installs a release whose signature matches the key built into the apps, so a compromised GitHub
+  account alone can't push an update.
+- ROM Verifier: **extracted Switch games** (folders with `exefs/main.npdm`, e.g. made by the RomFS + ExeFS task) are
+  identified from the NPDM's Title ID (name from a `control.nacp` if present, else the folder) instead of
+  *Skipped*. Package folders are walked without descending into extracted games' RomFS.
+- ROM Optimizer: adding files plans the jobs in the background, so the window no longer freezes while it reads a
+  big Switch folder over the network.
+- Fix: renames that depend on each other (A→B while B→C, or two names swapped) passed the check but then failed
+  half-way when applied; they now go through temporary names, for both Apply and Undo.
+- **Test suite**: `make test` runs pytest over renaming/undo, patching, console packages, trim/untrim, scanning
+  and signed updates, always with throwaway settings folders.
+
 ## 1.9.0
 - **PS4, Switch and Switch 2 are systems** now (folders `ps4`, `switch`, `switch-2`, …) instead of "Other folders &
   loose files". They need no DAT: Manage DATs shows *No DAT needed* and a **Read package data** toggle per folder
