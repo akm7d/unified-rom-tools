@@ -223,7 +223,7 @@ class BatchTab(QWidget):
         # ---- what to do
         self.preset = QComboBox()
         groups = [[cv.TO_CHD, cv.FROM_CHD, cv.RECOMPRESS, cv.FIX_CHD, cv.VERIFY, cv.INFO],
-                  [cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS],
+                  [cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS, cv.PS4_EXTRACT],
                   [cv.M3U, cv.TRIM, cv.UNTRIM]]
         for gi, group in enumerate(groups):
             if gi:
@@ -323,10 +323,19 @@ class BatchTab(QWidget):
         par.addWidget(QLabel("CPU threads per job"))
         par.addWidget(self.procs)
         par.addStretch(1)
+        self.beta_note = QLabel(
+            "<b style='color:#d49a1b'>⚠ BETA - use with care.</b> Extracts PS4 packages with the <i>ShadPs4Plus PKG "
+            "Extractor</i>, a young third-party program. Only fake / homebrew packages work, and not those with the "
+            "newer key scheme. It copies the whole game out (as large as the package or larger). Every extracted "
+            "file is checked byte for byte against the package by romtools' own reader; output that doesn't match "
+            "is removed. Your packages are never changed or trashed.")
+        self.beta_note.setWordWrap(True)
+        g.addRow(self.beta_note)
         g.addRow("Performance:", par)
         self.opts_rows = {"codec": [self.cd_codec, self.dvd_codec, self.custom_codec, self.hunk],
                           "iso": [self.iso_as], "split": [self.split_bin], "verify": [self.verify_after],
-                          "trash": [self.trash], "keys": [self.keys_row], "tkeys": [self.tkeys_row]}
+                          "trash": [self.trash], "keys": [self.keys_row], "tkeys": [self.tkeys_row],
+                          "beta": [self.beta_note]}
         self.opts_form = g
 
         top = QHBoxLayout()
@@ -450,7 +459,8 @@ class BatchTab(QWidget):
         conversions = (cv.TO_CHD, cv.RECOMPRESS, cv.TO_RVZ, cv.FROM_RVZ, cv.TO_NSZ, cv.FROM_NSZ, cv.TRIM, cv.UNTRIM)
         show = {"codec": p in (cv.TO_CHD, cv.RECOMPRESS), "iso": p == cv.TO_CHD, "split": p == cv.FROM_CHD,
                 "verify": p in (cv.TO_CHD, cv.RECOMPRESS), "trash": p in conversions,
-                "keys": p in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS), "tkeys": p == cv.SWITCH_FS}
+                "keys": p in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS), "tkeys": p == cv.SWITCH_FS,
+                "beta": p == cv.PS4_EXTRACT}
         self.trash.setText("Move source files to the trash after a verified success"
                            if p in (cv.TO_CHD, cv.RECOMPRESS) else
                            "Move the originals to the trash once the result is verified")
@@ -550,7 +560,50 @@ class BatchTab(QWidget):
         if preset in (cv.TO_NSZ, cv.FROM_NSZ, cv.SWITCH_FS) and not Path(self.keys.text().strip()).is_file():
             if not self.ask_for_keys("prod"):
                 return
+        if preset == cv.PS4_EXTRACT and not self.ps4_beta_ok(paths):
+            return
         self._plan_in_background(preset, paths, self.options(), first=True)
+
+    def ps4_beta_ok(self, paths: list[Path]) -> bool:
+        """The beta warning, every time the task is used (until it's turned off), then the extractor's download."""
+        from .. import ps4tool
+        cfg = get_config()
+        if not cfg["window_state"].get("ps4_beta_accepted"):
+            box = QMessageBox(QMessageBox.Icon.Warning, "Beta feature - use with care",
+                              "<b>Extracting PS4 packages is a beta feature.</b>", parent=self)
+            box.setInformativeText(
+                "• It runs the <i>ShadPs4Plus PKG Extractor</i>, a young third-party program that isn't part of "
+                "romtools.<br>• Only fake / homebrew packages work; official ones, and those with the newer key "
+                "scheme, are skipped.<br>• It needs as much free space as the whole game.<br>• Every extracted file "
+                "is checked byte for byte against the package afterwards, and output that doesn't match is removed. "
+                "That proves the files are right, not that a game runs.<br><br>Your packages are only read.")
+            go = box.addButton("I understand, continue", QMessageBox.ButtonRole.AcceptRole)
+            stop = box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(stop)
+            again = QCheckBox("Don't warn me again")
+            box.setCheckBox(again)
+            box.exec()
+            if box.clickedButton() is not go:
+                return False
+            if again.isChecked():
+                cfg["window_state"]["ps4_beta_accepted"] = True
+                cfg.save()
+        if ps4tool.program():
+            return True
+        if QMessageBox.question(
+                self, "Download the PKG extractor?",
+                f"The ShadPs4Plus PKG Extractor {ps4tool.VERSION} isn't included with romtools. Download it now "
+                f"(about 2 MB) from its official GitHub release?\n\n{ps4tool.PAGE}\n\nThe download is checked "
+                f"against a fixed checksum.") != QMessageBox.StandardButton.Yes:
+            return False
+        self.win.statusBar().showMessage("Downloading the PKG extractor…")
+        w = Worker(lambda _w: ps4tool.install(), parent=self)
+        w.done.connect(lambda _p: (self.win.statusBar().showMessage("PKG extractor installed.", 5000),
+                                   self._plan_in_background(cv.PS4_EXTRACT, paths, self.options(), first=True)))
+        w.failed.connect(lambda e: QMessageBox.warning(self, "PKG extractor", f"Couldn't install it: {e}"))
+        self._ps4_dl = w
+        w.start()
+        return False            # planning starts when the download is done
 
     def _plan_in_background(self, preset: str, paths: list[Path], opts: cv.Options, first: bool):
         """Find the files and plan the jobs off the GUI thread: planning reads headers (CD/DVD detection, Switch

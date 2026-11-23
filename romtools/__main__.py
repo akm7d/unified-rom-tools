@@ -54,6 +54,7 @@ def selftest(report: str | None) -> int:
 
     def imports():
         import romtools
+        from romtools import ps4pkg, ps4tool, selfupdate  # noqa: F401
         from romtools import (cache, chd, chdfix, chdman_tool, compat, config, converter, dat, datmanager,  # noqa
                               advisor, discdetect, hashing, library, patching, renamer, scanner, systems, tags,
                               tasks, updater)

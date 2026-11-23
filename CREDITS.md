@@ -16,6 +16,12 @@ one in the builds' `tools/` folder.
 | **nsz** | Switch NSP / XCI ↔ NSZ / XCZ | [nicoboss/nsz](https://github.com/nicoboss/nsz) | MIT |
 | **nstool** | Switch RomFS / ExeFS extraction, applying updates | [jakcron/nstool](https://github.com/jakcron/nstool) | MIT |
 
+## Downloaded on first use (not included in romtools)
+
+| Tool | Used for | Project | License |
+|---|---|---|---|
+| **ShadPs4Plus PKG Extractor** | extracting PS4 packages (beta) | [AzaharPlus/shadPS4Plus](https://github.com/AzaharPlus/shadPS4Plus) | GPL-2.0 |
+
 ## Libraries and runtimes in the builds
 
 | Library | Used for | Project | License |
@@ -42,6 +48,7 @@ one in the builds' `tools/` folder.
 
 * **[Switchbrew](https://switchbrew.org)** and the hactool / LibHac / nstool sources: documentation of the Switch
   NSP, XCI, NCA, CNMT, NACP and RomFS formats that the package reader follows.
+* **[LibOrbisPkg](https://github.com/maxton/LibOrbisPkg)** and the shadPS4 sources: how the PS4 PFS / PFSC formats are laid out.
 * **[PS4 Developer Wiki](https://www.psdevwiki.com/ps4/)**: the PS4 PKG and PARAM.SFO formats.
 * **[PS4PKGTool](https://github.com/pearlxcore/PS4PKGTool)** by pearlxcore: the ideas for PS4 package
   identification, renaming and update checks.

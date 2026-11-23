@@ -27,6 +27,7 @@ TO_CHD, FROM_CHD, VERIFY, INFO, RECOMPRESS, CUSTOM = "to_chd", "from_chd", "veri
 FIX_CHD, M3U, TRIM, UNTRIM = "fix_chd", "m3u", "trim", "untrim"
 TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ = "to_rvz", "from_rvz", "to_nsz", "from_nsz"
 SWITCH_FS = "switch_fs"
+PS4_EXTRACT = "ps4_extract"
 DISC_EXTS = (".chd", ".cue", ".gdi", ".iso", ".pbp", ".rvz", ".ccd", ".mds")
 
 PRESETS = {
@@ -43,6 +44,7 @@ PRESETS = {
     FROM_NSZ: ("NSZ / XCZ → NSP / XCI (decompress)", (".nsz", ".xcz")),
     SWITCH_FS: ("NSP / XCI → RomFS + ExeFS folders (auto-applies the newest update NSP / XCI)",
                 (".nsp", ".xci", ".nsz", ".xcz")),
+    PS4_EXTRACT: ("PKG → extracted game folder (BETA - use with care)", (".pkg",)),
     TRIM: ("Trim ROMs (reversible)", (".nds", ".dsi", ".3ds", ".cci")),
     UNTRIM: ("Untrim ROMs back to the full dump", (".nds", ".dsi", ".3ds", ".cci")),
 }
@@ -59,6 +61,7 @@ PRESET_SYSTEMS = {
                                        "PC Engine CD and any other disc system"),
     TO_RVZ: ("GC/Wii", "Nintendo GameCube and Wii"), FROM_RVZ: ("GC/Wii", "Nintendo GameCube and Wii"),
     TO_NSZ: ("NSW", "Nintendo Switch"), FROM_NSZ: ("NSW", "Nintendo Switch"), SWITCH_FS: ("NSW", "Nintendo Switch"),
+    PS4_EXTRACT: ("PS4", "PlayStation 4 (fake / homebrew packages only)"),
     TRIM: ("NDS/3DS", "Nintendo DS (and DSi) and Nintendo 3DS"), UNTRIM: ("NDS/3DS", "Nintendo DS (and DSi) and 3DS"),
 }
 
@@ -206,6 +209,32 @@ def _skipped(title: str, src: Path, why: str) -> Job:
     return j
 
 
+def _plan_ps4(src: Path, opts: Options) -> Job:
+    """Check what can be checked before running anything: the beta extractor can't tell us itself."""
+    from . import packages, ps4pkg, tasks
+    title = f"extract PKG: {src.name}"
+    try:
+        info = packages.read_ps4(src)
+        with ps4pkg.PkgReader(src) as r:
+            if not r.has_files:
+                return _skipped(title, src, "nothing to extract: it only holds a licence (an unlock-only DLC)")
+            if r.new_crypt:
+                return _skipped(title, src, "not supported by the extractor: this package uses the newer key scheme, "
+                                            "which it doesn't implement")
+            files = r.files()
+    except (packages.PackageError, ps4pkg.Ps4PkgError, OSError) as exc:
+        return _skipped(title, src, str(exc))
+    base = _out_dir(src, opts)
+    if info.kind == packages.DLC:
+        out = base / "addcont" / info.title_id / info.content_id.split("-")[-1]
+    else:       # the folder names shadPS4 expects
+        out = base / (info.title_id + ("-patch" if info.kind == packages.UPDATE else ""))
+    size = sum(f.size for f in files)
+    j = _task_job(title, src, tasks.extract_ps4(src, out), "Extracting (beta)", [out], [],
+                  detail=f"⚠ BETA - {info.kind}, {len(files)} files, {size / 1e9:.2f} GB → {out.name}/")
+    return j
+
+
 def _plan_task(preset: str, src: Path, opts: Options) -> Job | None:
     from . import tasks
     out_dir = _out_dir(src, opts)
@@ -245,6 +274,8 @@ def _plan_task(preset: str, src: Path, opts: Options) -> Job | None:
         out = out_dir / (src.stem + (".rvz" if preset == TO_RVZ else ".iso"))
         return _task_job(f"to {out.suffix[1:].upper()}: {src.name}", src, tasks.convert_disc_nod(src, out),
                          f"Converting to {out.suffix[1:].upper()}", [out], [src], opts)
+    if preset == PS4_EXTRACT:
+        return _plan_ps4(src, opts)
     if preset in (TO_NSZ, FROM_NSZ):
         ext = {".nsp": ".nsz", ".xci": ".xcz", ".nsz": ".nsp", ".xcz": ".xci"}[src.suffix.lower()]
         if preset == TO_NSZ:
@@ -407,7 +438,7 @@ def plan(preset: str, files: list[Path], opts: Options) -> list[Job]:
 
 
 def _plan_one(preset: str, src: Path, opts: Options) -> Job | None:
-    if preset in (FIX_CHD, TRIM, UNTRIM, TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ):
+    if preset in (FIX_CHD, TRIM, UNTRIM, TO_RVZ, FROM_RVZ, TO_NSZ, FROM_NSZ, PS4_EXTRACT):
         return _plan_task(preset, src, opts)
     ext = src.suffix.lower()
     out_dir = _out_dir(src, opts)
