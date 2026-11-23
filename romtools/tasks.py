@@ -397,7 +397,39 @@ def convert_nsz(src: Path, out: Path, keys: Path | None) -> Callable[[TaskContex
             argv = [exe, "-C" if compress else "-D", "-V", "-o", str(work), "--keys", str(keys)]
             if compress:
                 argv += ["-K"]          # keep everything, so decompressing gives back the identical NSP
-            _run_tool(argv + [str(src)], ctx, "Compressing (NSZ)" if compress else "Decompressing")
+            # nsz shows no readable progress when it isn't in a terminal: watch the output grow instead, and
+            # once it stops growing nsz is verifying (it reads the whole result back and checks every hash)
+            stop = threading.Event()
+            total = max(src.stat().st_size, 1) * (1.0 if compress else 1.3)
+            word = "Compressing" if compress else "Decompressing"
+
+            def watch():
+                import time
+                last, still = -1, 0.0
+                while not stop.wait(2.0):
+                    try:
+                        size = sum(f.stat().st_size for f in work.iterdir() if f.is_file())
+                    except OSError:
+                        continue
+                    if size == last and size > 0:
+                        still += 2.0
+                    else:
+                        still, last = 0.0, size
+                    if still >= 6:
+                        ctx.progress(0.9, "Verifying (nsz reads the result back and checks every hash)")
+                    else:
+                        ctx.progress(min(0.85, 0.85 * size / total), f"{word} - {size / 2**30:.2f} GiB written")
+            threading.Thread(target=watch, daemon=True).start()
+            try:
+                _run_tool(argv + [str(src)], ctx, f"{word} (NSZ)" if compress else word)
+            except RuntimeError as exc:
+                if "hash mismatch" in str(exc).lower():
+                    raise RuntimeError("nsz couldn't reproduce this file exactly when checking its result (common "
+                                       "with non-standard dumps, e.g. NSPs whose content was decrypted), so no "
+                                       "NSZ was made - the original is untouched") from exc
+                raise
+            finally:
+                stop.set()
             made = [p for p in work.iterdir() if p.is_file()]
             if len(made) != 1:
                 raise RuntimeError(f"nsz produced {len(made)} files")

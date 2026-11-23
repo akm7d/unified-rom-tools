@@ -3,6 +3,13 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.10.1
+- Fix: NSP → NSZ (and back) showed no progress, so long runs looked stuck. nsz prints no readable progress outside a
+  terminal, so ROM Optimizer now shows how much has been written, then *Verifying* while nsz reads the result back.
+- When nsz's own check finds that the NSZ wouldn't give back the identical file (common with non-standard dumps,
+  e.g. NSPs whose content was decrypted), the job now says so plainly; nothing is made and the original is untouched.
+- Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
+
 ## 1.10.0
 - **Signed releases**: each release's SHA256SUMS is signed with the project's Ed25519 key (kept off GitHub); the
   updater only installs a release whose signature matches the key built into the apps, so a compromised GitHub

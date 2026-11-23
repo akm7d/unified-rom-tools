@@ -267,8 +267,10 @@ class _Nca:
 
     def read_section(self, i: int, rel: int, n: int) -> bytes:
         start, end, fsh = self.section(i)
+        return self._read_raw_section(fsh, start + rel, n)
+
+    def _read_raw_section(self, fsh: bytes, a: int, n: int) -> bytes:
         Cipher, algorithms, modes = _aes()
-        a = start + rel
         aligned = a & ~0xF
         data = self.c.read(self.name, aligned, n + (a - aligned))
         if fsh[4] == 1:          # not encrypted
@@ -398,9 +400,9 @@ def read_switch(path: Path, keys_path: Path | None) -> PackageInfo:
             for ct, ctl in sorted(found, key=lambda t: order.get(t[0].kind, 3) == 1, reverse=True):
                 if not ctl:
                     continue
-                nca = next((f"{ctl}.nca" for _ in [0] if f"{ctl}.nca" in c.files), None)
+                nca = next((f"{ctl}{ext}" for ext in (".nca", ".ncz") if f"{ctl}{ext}" in c.files), None)
                 if not nca:
-                    continue          # NSZ: compressed .ncz, can't read the name cheaply
+                    continue
                 try:
                     blob = _Nca(c, nca, keys).romfs_file("control.nacp")
                 except (PackageError, struct.error, ValueError, IndexError):
