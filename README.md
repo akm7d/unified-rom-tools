@@ -63,7 +63,7 @@ most once a day); for PS4, right-click a package → *Look up updates online* op
    (*Download and scan* / *Scan without them*, with *Don't ask again for these systems*).
 
 **Switch keys** (your own; romtools never includes any) are set in one place and used by all three apps:
-ROM Verifier → *Settings* → *Switch prod.keys* / *Switch title.keys*, or ROM Optimizer → *Tasks* → *Options* →
+ROM Verifier → *Settings* → *Switch prod.keys* / *Switch title.keys*, or ROM Optimizer → *Convert & Extract* → *Options* →
 *Switch keys* / *Title keys*. `prod.keys` is needed to read Switch packages and for NSZ / RomFS extraction;
 `title.keys` (hactool format, `rights ID = key`) only for content whose package carries no ticket. If a task
 needs one that isn't set, ROM Optimizer asks you to locate it.
@@ -147,10 +147,10 @@ for them are removed again by Undo.
 ## ROM Optimizer (formerly ROM Converter)
 
 Converts, compresses, trims, patches and fixes ROMs and disc images. Four tabs, in the order you'd use them:
-**Tasks** (pick a task, add files, run the queue), **Save space** (find what can be stored smaller and send it
-to Tasks), **Patch**, and **chdman (advanced)** (run any chdman command; choose and update chdman).
+**Convert & Extract** (pick a task, add files, run the queue), **ROM Storage Advisor** (find what can be stored
+smaller or load faster, and convert it right there), **Patches & Translations**, and **chdman (advanced)** (run any chdman command; choose and update chdman).
 
-- **Tasks** tab — pick a task, add files/folders (or drag & drop), *Start queue*:
+- **Convert & Extract** tab — pick a task, add files/folders (or drag & drop), *Start queue*:
   - *Create CHD (auto)*: `.cue/.gdi/.toc/.nrg` → `createcd`. For `.iso` it **detects CD vs DVD** and shows why
     in the *Detected as* column: the disc's own contents first (PSP `PSP GAME`; PS2 `BOOT2` vs PS1 `BOOT` in
     `SYSTEM.CNF`; Xbox / Xbox 360 / GameCube / Wii / Saturn / Sega CD / Dreamcast headers), then for small PS2
@@ -179,25 +179,25 @@ to Tasks), **Patch**, and **chdman (advanced)** (run any chdman command; choose 
     elapsed, ETA, throughput), a **Now running** card per active job (step "2/2 · Verifying CHD", chdman's
     live phase and compression ratio, step ETA, speed, output name), running rows highlighted with their
     step, and *Follow running job* keeps the live chdman log on screen. Progress is mirrored in the window
-    title, the Tasks tab label and the bottom status bar, so it's visible from every tab.
+    title, the Convert & Extract tab label and the bottom status bar, so it's visible from every tab.
   - Existing outputs are skipped unless *Overwrite* is ticked; half-written CHDs are removed on failure or
     Stop; a free-space check runs before starting. Every job keeps its full chdman log.
-- **Patch** tab — apply **IPS / EBP, BPS, UPS, PPF (1/2/3) and xdelta** patches (translations, hacks, fixes),
+- **Patches & Translations** tab — apply **IPS / EBP, BPS, UPS, PPF (1/2/3) and xdelta** patches (translations, hacks, fixes),
   several in a row if needed. Works on plain ROMs, single-game zip/7z/rar, `.cue` sets, `.iso` and **CHDs**
   (unpacked, patched and rebuilt as a new CHD of the same type, then `chdman verify`'d). The original is
   identified against your DATs first; BPS/UPS checksums are enforced (wrong ROM or already-patched ROM is
   refused) and copier headers are handled automatically. The original is never modified, an existing file is
   never overwritten, and the result can be tagged (Translation, Hack…) so ROM Verifier lists it as *Modified*.
-- **Patch → Auto-match a folder of patches…** — each patch is matched to a ROM in your library: by the
+- **Patches & Translations → Auto-match a folder of patches…** — each patch is matched to a ROM in your library: by the
   checksum BPS/UPS record (certain; unscanned files of the right size are hashed on the spot), by the original's
   name that xdelta patches store, or by name similarity (marked "check"). Tick and patch them all at once.
-- **Save space** tab — analyses a folder and lists what can be stored smaller without losing anything (disc
+- **ROM Storage Advisor** tab — analyses a folder and lists what can be stored smaller without losing anything (disc
   images → CHD, GameCube/Wii → RVZ, Switch → NSZ, NDS/3DS trimming, Xbox ISOs → CHD for archiving) or load
   faster (LZMA CHDs → Zstandard), with estimates from compressing samples of your files and a warning where the
   emulator can't read the result. Every file gets its own row with its own estimate and tick box (tick a
   suggestion to tick all its files). **Run ticked now** converts them right there: a *Status* column shows each
   file's progress and result, and *Move the originals to the trash once the new file is verified* (on the tab)
-  frees the space. *Add ticked to Tasks* only queues them, to check the options first.
+  frees the space. *Add ticked to Convert & Extract* only queues them, to check the options first.
 - **chdman (advanced) → Run a chdman command** — every chdman command with a form generated from `chdman help` (so new options
   appear automatically after an update), live command-line preview, *Run now* or *Add to task queue*.
 - **chdman (advanced) → chdman version & updates** — shows the selected chdman, the latest official MAME release and your

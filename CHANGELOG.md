@@ -21,6 +21,8 @@ patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after 
 - The Switch RomFS / ExeFS task is now called *NSP / XCI → RomFS + ExeFS folders (auto-applies the newest update
   NSP / XCI)*, and the update it applies gets **its own row** in the job list ("↳ apply update v…") right under the
   game, showing queued / running / applied (or why not). It's still applied in the same pass, which nstool needs.
+- ROM Optimizer tabs renamed to say what they do: **Convert & Extract** (was Tasks), **ROM Storage Advisor** (was
+  Save space), **Patches & Translations** (was Patch).
 - Switch package names are also read from NSZ / XCZ files (nsz leaves the small control data uncompressed).
 
 ## 1.10.0

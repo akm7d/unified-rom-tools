@@ -1,5 +1,5 @@
 """ROM Optimizer (formerly ROM Converter): task queue (convert / compress / trim / fix / playlists), ROM patching,
-the Save space advisor, and advanced chdman tools (every command, version & updates)."""
+the ROM Storage Advisor, and advanced chdman tools (every command, version & updates)."""
 
 from __future__ import annotations
 
@@ -190,7 +190,7 @@ class QueueStatusBar(QFrame):
 # ====================================================================== Batch tab
 
 class BatchTab(QWidget):
-    job_updated = Signal(object)     # a job's status/progress changed (Save space mirrors it per file)
+    job_updated = Signal(object)     # a job's status/progress changed (ROM Storage Advisor mirrors it per file)
     queue_finished = Signal()
 
     def __init__(self, win: "ConverterWindow"):
@@ -579,7 +579,7 @@ class BatchTab(QWidget):
         return True
 
     def enqueue_preset(self, preset: str, files: list[Path], **overrides) -> int:
-        """Queue files for a task chosen elsewhere (Save space), using the current options plus overrides."""
+        """Queue files for a task chosen elsewhere (ROM Storage Advisor), using the current options plus overrides."""
         import dataclasses
         opts = dataclasses.replace(self.options(), **overrides)
         jobs = cv.plan(preset, files, opts)
@@ -816,13 +816,13 @@ class BatchTab(QWidget):
         self.win.statusBar().showMessage(f"Queue finished in {fmt_dur(el)} — {what}")
         QApplication.alert(self.win)
         self.queue_finished.emit()
-        if getattr(self, "_start_again", False):   # jobs were added (from Save space) while this run was going
+        if getattr(self, "_start_again", False):   # jobs were added (from ROM Storage Advisor) while this run was going
             self._start_again = False
             if any(j.status == "Queued" for j in self.jobs):
                 QTimer.singleShot(0, self.start)
 
 
-# ====================================================================== Patch tab
+# ====================================================================== Patches & Translations tab
 
 class AutoMatchDialog(QDialog):
     """Pick a folder of patches; each one is matched to a ROM (checksum / name the patch records / name) and all
@@ -878,7 +878,7 @@ class AutoMatchDialog(QDialog):
         lay.addWidget(QLabel("<small>Ticked automatically: checksum matches, and patches that check the original "
                              "themselves (BPS, UPS, xdelta, PPF2/3). Name-only matches for IPS/PPF1 can't be "
                              "checked — confirm them before ticking. Output goes next to each original, tagged as "
-                             "chosen on the Patch tab. Originals are never changed.</small>"))
+                             "chosen on the Patches & Translations tab. Originals are never changed.</small>"))
         lay.addLayout(bottom)
 
     def find(self):
@@ -1298,7 +1298,7 @@ class PatchTab(QWidget):
                              f"changed and no output was left behind.")
 
 
-# ====================================================================== Save space tab
+# ====================================================================== ROM Storage Advisor tab
 
 class SpaceTab(QWidget):
     COLS = ["Suggestion / file", "Status", "Folder", "Files", "Now", "After (est.)", "Saves", "Readable by", "Note"]
@@ -1343,14 +1343,14 @@ class SpaceTab(QWidget):
         self.trash.setChecked(bool(cfg["window_state"].get("advisor_trash", False)))
         self.trash.toggled.connect(self._save_trash)
         self.run = QPushButton(QIcon.fromTheme("media-playback-start"), "Run ticked now")
-        self.run.setToolTip("Convert the ticked files right here; each row shows its progress. Uses the Tasks "
+        self.run.setToolTip("Convert the ticked files right here; each row shows its progress. Uses the Convert & Extract "
                             "options (codecs, jobs at once, output folder).")
         self.run.clicked.connect(self.run_now)
         self.stop_btn = QPushButton(QIcon.fromTheme("media-playback-stop"), "Stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(lambda: self.win.batch.stop())
-        self.queue = QPushButton(QIcon.fromTheme("list-add"), "Add ticked to Tasks")
-        self.queue.setToolTip("Only add them to the Tasks queue (to check options or run later)")
+        self.queue = QPushButton(QIcon.fromTheme("list-add"), "Add ticked to Convert && Extract")
+        self.queue.setToolTip("Only add them to the Convert & Extract queue (to check options or run later)")
         for b in (self.run, self.queue):
             b.setEnabled(False)
         self.queue.clicked.connect(self.to_batch)
@@ -1396,7 +1396,7 @@ class SpaceTab(QWidget):
             return
         root = Path(self.root.text().strip()).expanduser()
         if not root.is_dir():
-            QMessageBox.information(self, "Save space", "Choose a folder to analyse.")
+            QMessageBox.information(self, "ROM Storage Advisor", "Choose a folder to analyse.")
             return
         cfg = get_config()
         cfg["window_state"]["advisor_dir"] = str(root)
@@ -1534,7 +1534,7 @@ class SpaceTab(QWidget):
         jobs = self._enqueue()
         if jobs:
             self.win.tabs.setCurrentWidget(self.win.batch)
-            self.win.statusBar().showMessage(f"{len(jobs)} job(s) added to Tasks - check the options, then Start "
+            self.win.statusBar().showMessage(f"{len(jobs)} job(s) added to Convert & Extract - check the options, then Start "
                                              f"queue.", 10000)
 
     # -- live status per file ------------------------------------------------
@@ -1576,7 +1576,7 @@ class SpaceTab(QWidget):
         self._count_ticked()
         self.stop_btn.setEnabled(False)
         if mine:
-            self.win.statusBar().showMessage(f"Save space: {done} done" + (f", {failed} failed (hover the status "
+            self.win.statusBar().showMessage(f"ROM Storage Advisor: {done} done" + (f", {failed} failed (hover the status "
                                              f"for why)" if failed else "") + ". Analyse again to see what's left.",
                                              15000)
 
@@ -2053,12 +2053,12 @@ class ConverterWindow(QMainWindow):
         self.advanced.addTab(self.commands, QIcon.fromTheme("utilities-terminal"), "Run a chdman command")
         self.advanced.addTab(self.chdman, QIcon.fromTheme("system-software-update"), "chdman version && updates")
         for w, icon, label, tip in (
-                (self.batch, "view-list-details", "Tasks",
+                (self.batch, "view-list-details", "Convert && Extract",
                  "Pick a task (convert to CHD/RVZ/NSZ, extract, trim, fix CHD types, playlists…), add files and "
                  "run the queue"),
-                (self.space, "drive-harddisk", "Save space",
+                (self.space, "drive-harddisk", "ROM Storage Advisor",
                  "Analyse a folder: which files can be stored smaller (or load faster) without losing anything"),
-                (self.patch, "document-edit", "Patch",
+                (self.patch, "document-edit", "Patches && Translations",
                  "Apply IPS / BPS / UPS / PPF / xdelta patches (translations, hacks), with auto-matching"),
                 (self.advanced, "utilities-terminal", "chdman (advanced)",
                  "Run any chdman command by hand, choose which chdman is used, and update it")):
@@ -2066,7 +2066,7 @@ class ConverterWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         self.statusBar().showMessage("Ready")
         self.mini_label = QLabel()
-        self.mini_label.setToolTip("The task queue is still running. Switch to the Tasks tab for details.")
+        self.mini_label.setToolTip("The task queue is still running. Switch to the Convert & Extract tab for details.")
         self.mini_bar = QProgressBar()
         self.mini_bar.setToolTip("Task queue progress (all jobs). Shown here only while you're on another tab.")
         self.mini_bar.setRange(0, 1000)
@@ -2104,10 +2104,10 @@ class ConverterWindow(QMainWindow):
         self._queue_state = (p, finished, total, current, bits) if active else None
         self._apply_queue_state()
         if active:
-            self.tabs.setTabText(0, f"Tasks ({finished}/{total})")
+            self.tabs.setTabText(0, f"Convert && Extract ({finished}/{total})")
             self.setWindowTitle(f"ROM Optimizer — {p * 100:.0f}% · {finished}/{total} jobs")
         else:
-            self.tabs.setTabText(0, "Tasks")
+            self.tabs.setTabText(0, "Convert && Extract")
             self.setWindowTitle(getattr(self, "base_title", "ROM Optimizer"))
 
     def set_busy(self, on: bool):

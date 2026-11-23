@@ -359,7 +359,7 @@ def read_switch(path: Path, keys_path: Path | None) -> PackageInfo:
         else:
             if not keys.get("header_key"):
                 raise PackageError("needs your prod.keys to read - set it in ROM Verifier (Switch keys) or "
-                                   "ROM Optimizer → Tasks → Options")
+                                   "ROM Optimizer → Convert & Extract → Options")
             for n in [n for n in names if n.endswith(".cnmt.nca")]:
                 try:
                     for blob in _Nca(c, n, keys).pfs0_files().values():
