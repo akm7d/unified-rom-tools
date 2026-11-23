@@ -447,13 +447,20 @@ def test_portable() -> None:
     if not shutil.which("docker"):
         raise SystemExit("Docker is needed for this test")
     step(f"Self-testing {builds[-1].name} on {TEST_IMAGE}")
-    script = ("export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq "
+    apt = "apt-get -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=2"
+    script = (f"export DEBIAN_FRONTEND=noninteractive; {apt} update -qq >/dev/null && {apt} install -y -qq "
               "--no-install-recommends libglib2.0-0t64 libfontconfig1 libfreetype6 libx11-6 libx11-xcb1 "
               "libxkbcommon0 libegl1 libgl1 libdbus-1-3 libxcb1 fonts-dejavu-core >/dev/null 2>&1; "
               'echo "   $(. /etc/os-release; echo $PRETTY_NAME), $(ldd --version | head -1)"; '
               "QT_QPA_PLATFORM=offscreen /app/rom-verifier --selftest /tmp/r.txt >/dev/null 2>&1; cat /tmp/r.txt")
-    r = subprocess.run(["docker", "run", "--rm", "-v", f"{builds[-1]}:/app:ro", TEST_IMAGE, "bash", "-c", script],
-                       capture_output=True, text=True)
+    name = f"romtools-test-{os.getpid()}"
+    try:
+        r = subprocess.run(["docker", "run", "--rm", "--name", name, "-v", f"{builds[-1]}:/app:ro", TEST_IMAGE,
+                            "bash", "-c", script], capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["docker", "stop", "-t", "5", name], capture_output=True)
+        raise SystemExit("portable test timed out after 15 min (usually Ubuntu's package servers not answering "
+                         "inside the container) - try again later")
     print("\n".join("   " + ln for ln in r.stdout.splitlines()))
     if "RESULT OK" not in r.stdout:
         print(r.stderr[-2000:])
