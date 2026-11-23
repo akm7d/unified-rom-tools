@@ -435,8 +435,9 @@ class UpdateButton(QToolButton):
         from .. import selfupdate as su
         where = f"<br>Updates: <a href='https://github.com/{su.GITHUB_REPO}/releases'>github.com/{su.GITHUB_REPO}" \
                 f"</a>" if su.GITHUB_REPO else ""
-        QMessageBox.about(self.win, "About romtools",
-                          f"<b>romtools {__version__}</b><br>ROM Verifier, ROM Renamer and ROM Optimizer.{where}")
+        QMessageBox.about(self.win, "About Unified Rom Tools",
+                          f"<b>Unified Rom Tools (URT) {__version__}</b><br>ROM Verifier, ROM Renamer and ROM "
+                          f"Optimizer.<br>Free software under the GNU GPL v3.0.{where}")
 
 
 def startup_update_check(win, module: str) -> None:

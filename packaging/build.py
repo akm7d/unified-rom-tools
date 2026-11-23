@@ -303,6 +303,7 @@ def build_linux(skip_selftest: bool) -> Path:
     shutil.copytree(ROOT / "icons", out / "icons")
     shutil.copy2(PKG / "linux" / "install.sh", out / "install.sh")
     shutil.copy2(ROOT / "README.md", out / "README.md")
+    shutil.copy2(ROOT / "LICENSE", out / "LICENSE.txt")
     (out / "install.sh").chmod(0o755)
     step("Bundling chdman and 7-Zip")
     linux_tools(out / "tools")
@@ -411,6 +412,7 @@ def build_windows(skip_selftest: bool) -> Path:
     shutil.copytree(tools, out / "tools")
     shutil.copy2(PKG / "windows" / "README-Windows.txt", out / "README-Windows.txt")
     shutil.copy2(ROOT / "README.md", out / "README.md")
+    shutil.copy2(ROOT / "LICENSE", out / "LICENSE.txt")
     (out / "portable.txt").write_text(PORTABLE_TXT.replace("\n", "\r\n"))
 
     if not skip_selftest:

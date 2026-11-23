@@ -1,4 +1,6 @@
-# romtools — ROM Verifier, ROM Renamer & ROM Optimizer
+# Unified Rom Tools (URT)
+
+**ROM Verifier, ROM Renamer & ROM Optimizer** (the code and settings folders are named `romtools`).
 
 Three Linux-native Qt (PySide6) desktop apps for a RomM-style library (`roms/<system>/…`).
 
@@ -215,3 +217,10 @@ The old folder is left as it was, so you can go back. A copy cloned with git is 
 | `~/.local/share/romtools/marks.json` | your hack / translation tags |
 | `~/.cache/romtools/hashes.sqlite` | hash cache |
 | `~/.local/share/romtools/chdman/` | chdman builds made by the updater |
+
+## License
+
+Unified Rom Tools is free software under the **GNU General Public License v3.0** (see [LICENSE](LICENSE)). The
+bundled third-party tools keep their own licenses, listed next to each one in `tools/` in the builds: chdman
+(MAME, GPL-2.0-or-later), 7-Zip (LGPL), xdelta3 (Apache-2.0), nodtool (Apache-2.0 / MIT), nsz (MIT) and
+nstool (MIT). No console keys or copyrighted game data are included; you supply your own `prod.keys` / `title.keys`.

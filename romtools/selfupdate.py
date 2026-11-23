@@ -31,7 +31,7 @@ from . import __version__
 from .compat import FROZEN, IS_WIN, app_dir
 
 # "owner/name" of the GitHub repository whose releases are the updates (set when the project is published)
-GITHUB_REPO = ""
+GITHUB_REPO = "akm7d/unified-rom-tools"
 API = "https://api.github.com/repos/{repo}/releases/latest"
 CHECK_INTERVAL = 12 * 3600       # the automatic check at launch runs at most twice a day
 
