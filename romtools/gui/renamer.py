@@ -22,7 +22,19 @@ from ..datmanager import IndexCache
 from .common import add_app_buttons, LibraryPicker, SystemList, TempModeCombo, ThemeButton, UpdateButton, startup_update_check, Worker, is_dark, make_app, restore_geometry, save_geometry
 from .datdialog import DatDialog
 
-C_ON, C_SYS, C_OLD, C_NEW, C_WHY, C_PROBLEM = range(6)
+C_ON, C_SYS, C_ACT, C_OLD, C_NEW, C_WHY, C_PROBLEM = range(7)
+SAME_NAME = "(same name)"
+MOVE_COLOR = "#2f7fd1"
+
+
+def op_action(op) -> tuple[str, bool]:
+    """(what the change does, in words; whether it moves the file to another folder)."""
+    if op.kind == rn.M3U_EDIT:
+        return ("Update playlist" + (" + rename" if op.dst != op.src else "")), False
+    if not op.move or op.dst.parent == op.src.parent:
+        return "Rename", False
+    where = op.dst.parent.name + "/" + ("" if op.dst.parent.exists() else " (new folder)")
+    return (f"Move into {where}" if op.dst.name == op.src.name else f"Rename + move into {where}"), True
 
 
 class HistoryDialog(QDialog):
@@ -268,8 +280,8 @@ class RenamerWindow(QMainWindow):
         self.order_note.setWordWrap(True)
 
         # ---- preview table
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["", "System", "Current name", "New name (double-click to edit)",
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["", "System", "Action", "Current name", "New name (double-click to edit)",
                                               "Reason", "Problem"])
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(26)
@@ -280,6 +292,8 @@ class RenamerWindow(QMainWindow):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(C_ON, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(C_SYS, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(C_ACT, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(C_ACT, 260)
         hh.setSectionResizeMode(C_OLD, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(C_NEW, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(C_WHY, QHeaderView.ResizeMode.Interactive)
@@ -292,6 +306,7 @@ class RenamerWindow(QMainWindow):
         sel_all.clicked.connect(lambda: self._check_all(True))
         sel_none.clicked.connect(lambda: self._check_all(False))
         self.summary = QLabel("Build a preview to see proposed renames. Nothing is changed until you press Apply.")
+        self.summary.setTextFormat(Qt.TextFormat.RichText)
         bottom = QHBoxLayout()
         bottom.addWidget(sel_all)
         bottom.addWidget(sel_none)
@@ -475,18 +490,26 @@ class RenamerWindow(QMainWindow):
                 op.enabled = False
             chk.setCheckState(Qt.CheckState.Checked if op.enabled else Qt.CheckState.Unchecked)
             self.table.setItem(r, C_ON, chk)
-            for c, text in ((C_SYS, op.system or op.src.parent.name), (C_OLD, op.src.name), (C_WHY, op.reason)):
-                if c == C_OLD and op.move:
-                    text = f"{op.src.parent.name}/{op.src.name}"
+            action, moves = op_action(op)
+            for c, text in ((C_SYS, op.system or op.src.parent.name), (C_ACT, action), (C_OLD, op.src.name),
+                            (C_WHY, op.reason)):
                 it = QTableWidgetItem(text)
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                it.setToolTip(str(op.src) if c == C_OLD else text)
+                it.setToolTip(str(op.src) if c == C_OLD else
+                              f"from {op.src.parent}\nto   {op.dst.parent}" if c == C_ACT and moves else text)
+                if c == C_ACT:
+                    it.setIcon(QIcon.fromTheme("folder" if moves else "edit-rename"))
+                    if moves:
+                        it.setForeground(QColor(MOVE_COLOR))
+                        f = it.font()
+                        f.setBold(True)
+                        it.setFont(f)
                 self.table.setItem(r, c, it)
             new = QTableWidgetItem(op.dst.name)
-            if op.move:
-                new.setToolTip(f"moves to {op.dst.parent}")
-                new.setText(f"{op.dst.name}")
-                new.setData(Qt.ItemDataRole.UserRole, str(op.dst.parent))
+            if moves and op.dst.name == op.src.name:
+                new.setText(SAME_NAME)                 # a pure move: the name doesn't change
+                new.setForeground(QColor("#888"))
+            new.setToolTip(str(op.dst))
             if op.kind == rn.M3U_EDIT:
                 new.setFlags(new.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 new.setToolTip("Playlist contents:\n" + (op.new_text or ""))
@@ -506,7 +529,9 @@ class RenamerWindow(QMainWindow):
         if item.column() == C_ON:
             op.enabled = item.checkState() == Qt.CheckState.Checked
         elif item.column() == C_NEW:
-            op.dst = op.dst.with_name(item.text().strip())
+            text = item.text().strip()
+            if text and text != SAME_NAME:
+                op.dst = op.dst.with_name(text)
             op.enabled = True
         else:
             return
@@ -526,8 +551,15 @@ class RenamerWindow(QMainWindow):
     def _update_summary(self):
         n_on = sum(1 for o in self.ops if o.enabled and o.ok)
         n_bad = sum(1 for o in self.ops if not o.ok)
-        self.summary.setText(f"{len(self.ops)} proposed · {n_on} checked · {n_bad} with problems (not applied)"
-                             if self.ops else "No renames needed for the checked systems.")
+        moving = [o for o in self.ops if op_action(o)[1]]
+        new_dirs = {o.dst.parent for o in moving if not o.dst.parent.exists()}
+        parts = [f"{len(self.ops) - len(moving)} rename(s)"] if len(self.ops) > len(moving) else []
+        if moving:
+            parts.append(f"<span style='color:{MOVE_COLOR}'><b>{len(moving)} move(s)</b></span>" +
+                         (f" into {len(new_dirs)} new folder(s)" if new_dirs else ""))
+        what = " · ".join(parts)
+        self.summary.setText(f"{what} · {n_on} checked · {n_bad} with problems (not applied)"
+                             if self.ops else "Nothing to change for the checked systems.")
         self.act_apply.setEnabled(n_on > 0)
         self.apply_btn.setEnabled(n_on > 0)
         self.apply_btn.setText(f"Apply {n_on} change(s)…")
@@ -537,12 +569,20 @@ class RenamerWindow(QMainWindow):
         todo = [o for o in rn.validate(self.ops) if o.enabled and o.ok]
         if not todo:
             return
-        sample = "\n".join(f"• {o.src.name}  →  {o.dst.name}" for o in todo[:12])
-        more = f"\n… and {len(todo) - 12} more" if len(todo) > 12 else ""
+        def line(o):
+            action, moves = op_action(o)
+            if moves:
+                return f"• MOVE {o.src.name}  →  {o.dst.parent.name}/" + \
+                    ("" if o.dst.name == o.src.name else f" as {o.dst.name}")
+            return f"• {o.src.name}  →  {o.dst.name}"
+        sample = "\n".join(line(o) for o in todo[:30])
+        more = f"\n… and {len(todo) - 30} more" if len(todo) > 30 else ""
+        n_move = sum(1 for o in todo if op_action(o)[1])
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Apply renames")
-        box.setText(f"Rename {len(todo)} item(s) in your library?")
+        box.setWindowTitle("Apply changes")
+        box.setText(f"Apply {len(todo)} change(s) to your library: {len(todo) - n_move} rename(s)"
+                    + (f" and {n_move} move(s) into other folders" if n_move else "") + "?")
         box.setInformativeText("Existing files are never overwritten. Every change is logged and can be reverted "
                                "from History / Undo.")
         box.setDetailedText(sample + more)

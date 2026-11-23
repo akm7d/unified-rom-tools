@@ -3,6 +3,12 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.11.4
+- ROM Renamer's preview makes moves obvious: a new **Action** column says *Rename*, *Move into ‹folder›/* or
+  *Rename + move into ‹folder›/* (with "(new folder)" when it doesn't exist yet), moves are shown in blue with a
+  folder icon, a pure move shows "(same name)", the summary counts moves and new folders separately, and the Apply
+  confirmation lists moves as "MOVE ‹file› → ‹folder›/".
+
 ## 1.11.3
 - Every app has buttons to open the other two, in the same order and place (next to Theme / Updates) with the
   apps' own icons. ROM Verifier and ROM Renamer couldn't open ROM Optimizer before.
