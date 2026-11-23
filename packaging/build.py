@@ -532,9 +532,19 @@ def write_release_files() -> None:
         return
     (DIST / "SHA256SUMS").write_text("".join(f"{sha256(a)}  {a.name}\n" for a in archives))
     log = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    m = re.search(rf"^## {re.escape(VERSION)}\s*$(.*?)(?=^## |\Z)", log, re.M | re.S)
-    (DIST / "RELEASE_NOTES.md").write_text((m.group(1).strip() if m else f"romtools {VERSION}") + "\n",
-                                           encoding="utf-8")
+    # every version since the last published release tag (versions that never got a release of their own)
+    last = subprocess.run(["git", "describe", "--tags", "--abbrev=0", "--match", "v*"], cwd=ROOT,
+                          capture_output=True, text=True).stdout.strip().lstrip("v")
+
+    def vt(v):
+        return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+    sections = [(v, b.strip()) for v, b in re.findall(r"^## (\d+\.\d+\.\d+)\s*$(.*?)(?=^## |\Z)", log, re.M | re.S)
+                if vt(v) <= vt(VERSION) and (not last or vt(v) > vt(last))]
+    if len(sections) > 1:
+        notes = "\n\n".join(f"### {v}\n{b}" for v, b in sections)
+    else:
+        notes = sections[0][1] if sections else f"romtools {VERSION}"
+    (DIST / "RELEASE_NOTES.md").write_text(notes + "\n", encoding="utf-8")
     print(f"   {DIST / 'SHA256SUMS'}\n   {DIST / 'RELEASE_NOTES.md'}")
 
 
