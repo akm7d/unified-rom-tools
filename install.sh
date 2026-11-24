@@ -32,13 +32,19 @@ SH
   cp "$HERE/icons/$name.svg" "$ICONS/$name.svg"
 done
 
+# the Exec= value of a menu entry: quoted, so any folder name works
+exec_value() {
+  local s="$1"
+  s="${s//\\/\\\\\\\\}"; s="${s//\"/\\\\\"}"; s="${s//\`/\\\\\`}"; s="${s//\$/\\\\\$}"; s="${s//%/%%}"
+  printf '"%s"' "$s"
+}
 cat > "$APPS/rom-verifier.desktop" <<D
 [Desktop Entry]
 Type=Application
 Name=ROM Verifier
 GenericName=ROM hash checker
 Comment=Verify ROMs and CHDs against No-Intro and Redump DATs
-Exec=$BIN/rom-verifier
+Exec=$(exec_value "$BIN/rom-verifier")
 Icon=rom-verifier
 Terminal=false
 Categories=Game;Utility;Emulator;
@@ -51,7 +57,7 @@ Type=Application
 Name=ROM Renamer
 GenericName=ROM renaming tool
 Comment=Rename ROMs to their No-Intro / Redump names, with preview and undo
-Exec=$BIN/rom-renamer
+Exec=$(exec_value "$BIN/rom-renamer")
 Icon=rom-renamer
 Terminal=false
 Categories=Game;Utility;Emulator;
@@ -64,7 +70,7 @@ Type=Application
 Name=ROM Optimizer
 GenericName=ROM converter, compressor and patcher
 Comment=Convert, compress, trim, patch and fix ROMs and disc images; find space savings
-Exec=$BIN/rom-optimizer
+Exec=$(exec_value "$BIN/rom-optimizer")
 Icon=rom-optimizer
 Terminal=false
 Categories=Game;Utility;Emulator;

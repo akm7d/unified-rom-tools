@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -19,7 +20,7 @@ _TOKENS = (("{data}", DATA_DIR), ("{app}", app_dir()))
 
 
 def pack_path(p: str) -> str:
-    if not PORTABLE or not p or p.startswith("{"):
+    if not PORTABLE or not os.path.isabs(p):
         return p
     try:
         path = Path(p).resolve()
@@ -37,14 +38,32 @@ def unpack_path(p: str) -> str:
     for token, base in _TOKENS:
         if p.startswith(token + "/"):
             return str(base / p[len(token) + 1:])
+    if PORTABLE and (m := _OTHER_VERSION.match(p)):     # saved by a version that didn't keep all paths relative
+        mine = DATA_DIR / m[2]
+        if Path(m[1]) == DATA_DIR.parent.parent and mine.exists():
+            return str(mine)
     return p
+
+
+# a path in the data folder of another version next to this one
+_OTHER_VERSION = re.compile(r"^(.*)[/\\]romtools-[\d.]+-(?:linux|windows)-x64[/\\]data[/\\](.+)$")
+
+
+def _map_deep(v, fn):
+    if isinstance(v, str):
+        return fn(v)
+    if isinstance(v, list):
+        return [_map_deep(x, fn) for x in v]
+    if isinstance(v, dict):
+        return {k: _map_deep(x, fn) for k, x in v.items()}
+    return v
 
 
 def _map_paths(data: dict, fn) -> dict:
     out = json.loads(json.dumps(data))
-    for key in ("library_root", "tmp_dir", "chdman_path"):
-        if isinstance(out.get(key), str) and out[key] not in ("system",):
-            out[key] = fn(out[key])
+    for key in ("library_root", "tmp_dir", "chdman_path", "switch_keys", "title_keys", "window_state"):
+        if key in out:
+            out[key] = _map_deep(out[key], fn)          # (only full paths inside the portable folder are changed)
     for s in (out.get("systems") or {}).values():
         if isinstance(s, dict) and isinstance(s.get("dats"), list):
             s["dats"] = [fn(d) for d in s["dats"]]

@@ -115,3 +115,43 @@ def test_ping_needs_no_window():
     r = subprocess.run([sys.executable, "-m", "romtools", "--ping"], cwd=Path(__file__).parent.parent, timeout=60,
                        env={**os.environ, "QT_QPA_PLATFORM": "does-not-exist"})
     assert r.returncode == 0
+
+
+def test_library_path_is_not_passed_on(tmp_path):
+    mine, older, other = tmp_path / "new/_internal", tmp_path / "old/_internal", tmp_path / "x/_internal"
+    for d in (mine, older, other):
+        d.mkdir(parents=True)
+    (older.parent / "rom-verifier").touch()
+    assert compat.clean_library_path(f"{mine}:{older}:/opt/lib:{other}", mine) == f"/opt/lib:{other}"
+    assert compat.clean_library_path("", mine) == ""
+
+
+@pytest.mark.parametrize("path", ["chdman", "/opt/tools/bin/chdman", "/My Games & more/chdman stuff/bin/chdman",
+                                  r"C:\Users\Jane Doe\romtools\tools\chdman.exe", "/usr/bin/chdman-0.289"])
+def test_chdman_commands_from_any_folder(path):
+    from romtools import chdman_tool as ct
+    m = ct._CMD.match(f"   {path} createcd: create a CD CHD: from the input file")
+    assert m and m.groups() == ("createcd", "create a CD CHD: from the input file")
+    assert not ct._CMD.match("chdman - MAME Compressed Hunks of Data (CHD) manager 0.289 (unknown)")
+
+
+def test_paths_inside_a_portable_folder_stay_relative(tmp_path, monkeypatch):
+    new = tmp_path / "romtools-1.17.2-linux-x64"
+    (new / "data" / "keys").mkdir(parents=True)
+    (new / "data" / "keys" / "prod.keys").touch()
+    monkeypatch.setattr(config, "PORTABLE", True)
+    monkeypatch.setattr(config, "DATA_DIR", new / "data")
+    monkeypatch.setattr(config, "_TOKENS", (("{data}", new / "data"), ("{app}", new)))
+    key = str(new / "data" / "keys" / "prod.keys")
+    s = {"switch_keys": key, "title_keys": "", "chdman_path": "system", "library_root": "/lib",
+         "window_state": {"converter_opts": {"output_dir": str(new / "out"), "preset": "to_chd", "procs": 2},
+                          "bios_folders": [str(new / "data" / "bios"), "/bios"], "checked_systems": ["nes", "(other)"]}}
+    packed = config._map_paths(s, config.pack_path)
+    assert str(tmp_path) not in json.dumps(packed)
+    assert packed["window_state"]["checked_systems"] == ["nes", "(other)"] and packed["chdman_path"] == "system"
+    assert config._map_paths(packed, config.unpack_path) == s
+    # saved as a full path by an older version next to this one: found in this folder
+    old = str(tmp_path / "romtools-1.17.1-linux-x64" / "data" / "keys" / "prod.keys")
+    assert config.unpack_path(old) == key
+    assert config.unpack_path(old + "x") == old + "x"                       # not here: left as it is
+    assert config.unpack_path(old.replace(str(tmp_path), "/elsewhere")) == old.replace(str(tmp_path), "/elsewhere")

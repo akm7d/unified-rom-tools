@@ -96,7 +96,8 @@ class Command:
 
 
 _OPT = re.compile(r"^\s*--([\w-]+),\s*-([\w-]+):?\s*(?:<([^>]*)>)?:?\s*(.*)$")
-_CMD = re.compile(r"^\s*\S*chdman\S*\s+(\w+):\s*(.*)$")
+# "  <path of chdman> info: displays …" (the path may contain spaces)
+_CMD = re.compile(r"^\s*.*?chdman[^\s/\\]*\s+(\w+):\s+(.*)$")
 _cache: dict[tuple, list[Command]] = {}
 
 

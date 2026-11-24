@@ -11,14 +11,17 @@ Checking reads one small JSON document from GitHub's public API; nothing about y
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -192,8 +195,10 @@ def _update_build(rel: Release, progress) -> tuple[Path, str]:
     want = next((ln.split()[0].lower() for ln in sums.splitlines() if ln.strip().endswith(name)), None)
     if not want:
         raise UpdateError(f"SHA256SUMS doesn't list {name}")
-    work = parent / f".romtools-update-{os.getpid()}"
-    work.mkdir(exist_ok=True)
+    try:
+        work = Path(tempfile.mkdtemp(prefix=".romtools-update-", dir=parent))
+    except OSError as exc:
+        raise UpdateError(f"the new version can't be put into {parent} ({exc.strerror or exc})") from exc
     try:
         archive = work / name
         _download(rel.assets[name], archive, progress, 0.0, 0.7)
@@ -216,9 +221,13 @@ def _update_build(rel: Release, progress) -> tuple[Path, str]:
         if not inner:
             raise UpdateError("the archive is empty")
         # keep a portable build's own data (settings, DATs, tags, rename history)
-        if (here / "data").is_dir() and (here / "portable.txt").exists():
+        if not (here / "portable.txt").exists():        # switched to per-user settings: so is the new version
+            (inner / "portable.txt").unlink(missing_ok=True)
+        elif (here / "data").is_dir():
             progress("Copying your settings and DATs…", 0.9)
-            shutil.copytree(here / "data", inner / "data", dirs_exist_ok=True)
+            copy_data(here / "data", inner / "data")
+        if target.exists():
+            raise UpdateError(f"{target} was created meanwhile (by another update?) - nothing was changed")
         os.rename(inner, target)
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -228,11 +237,47 @@ def _update_build(rel: Release, progress) -> tuple[Path, str]:
     return target, f"romtools {rel.version} is in {target}. Your current version stays in {here}."
 
 
+def copy_data(src: Path, dst: Path) -> None:
+    """Copy a portable data folder; what the destination already has (as new or newer) is left. The scan database may be
+    in use, so it's copied through SQLite (its -wal / -shm files aren't copied as they are)."""
+    def one(s: str, d: str) -> str:
+        a, b = Path(s), Path(d)
+        if a.suffix != ".sqlite":
+            if not (b.exists() and b.stat().st_mtime >= a.stat().st_mtime):
+                shutil.copy2(a, b)
+            return d
+        wal = a.with_name(a.name + "-wal")
+        changed = max(p.stat().st_mtime for p in (a, wal) if p.exists())
+        if b.exists() and b.stat().st_mtime >= changed:
+            return d
+        for p in (b, b.with_name(b.name + "-wal"), b.with_name(b.name + "-shm")):
+            p.unlink(missing_ok=True)
+        try:
+            with contextlib.closing(sqlite3.connect(a, timeout=30)) as da, contextlib.closing(sqlite3.connect(b)) as db:
+                da.backup(db)
+        except sqlite3.Error:                           # only remembered scans: not worth failing an update
+            b.unlink(missing_ok=True)
+        return d
+
+    shutil.copytree(src, dst, dirs_exist_ok=True, copy_function=one,
+                    ignore=shutil.ignore_patterns("*.sqlite-wal", "*.sqlite-shm", "*.json.lock", "*.tmp"))
+
+
+def carry_over(new: Path) -> None:
+    """Settings saved since the update was unpacked (a closing window saves some) go to the new version too."""
+    here = app_dir()
+    if all((p / "portable.txt").exists() for p in (here, new)) and (here / "data").is_dir():
+        copy_data(here / "data", new / "data")
+
+
 def _repoint_menu(old: Path, new: Path) -> None:
     """Linux: if the menu entries / ~/.local/bin links point at the old folder, re-run the new install.sh."""
     apps = Path.home() / ".local" / "share" / "applications"
+    links = Path.home() / ".local" / "bin"
     try:
-        uses_old = any(str(old) in p.read_text(encoding="utf-8", errors="replace") for p in apps.glob("rom-*.desktop"))
+        uses_old = any(f"{old}/rom-" in p.read_text(encoding="utf-8", errors="replace")
+                       for p in apps.glob("rom-*.desktop")) \
+            or any(p.is_symlink() and Path(os.readlink(p)).parent == old for p in links.glob("rom-*"))
     except OSError:
         uses_old = False
     if uses_old and (new / "install.sh").exists():

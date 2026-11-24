@@ -164,10 +164,14 @@ def app_command(module: str) -> list[str]:
     return [str(app_file(app_dir(), module))] if FROZEN else [sys.executable, "-m", f"romtools.gui.{module}"]
 
 
+def start_app(argv: list[str], folder: Path) -> None:
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"} if FROZEN else None
+    subprocess.Popen(argv, cwd=str(folder), env=env)
+
+
 def launch_app(module: str) -> None:
     """Start another of the three apps (verifier / renamer / converter). Raises OSError if it can't be started."""
-    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"} if FROZEN else None
-    subprocess.Popen(app_command(module), cwd=str(app_dir()), env=env)
+    start_app(app_command(module), app_dir())
 
 
 def lies_inside(path: Path, folder: Path) -> bool:
@@ -215,6 +219,26 @@ def file_lock(path: Path, timeout: float = 10.0):
                 except OSError:
                     pass
             fh.close()                  # (closing releases it on POSIX)
+
+
+def clean_library_path(current: str, build: Path) -> str:
+    """LD_LIBRARY_PATH without the folders of this or another romtools build (an older version that started us)."""
+    def ours(entry: str) -> bool:
+        d = Path(entry)
+        return d == build or (d.name == "_internal" and ((d.parent / "rom-verifier").exists() or not d.exists()))
+    return ":".join(e for e in current.split(":") if e and not ours(e))
+
+
+def restore_environment() -> None:
+    """Linux build: its launcher points LD_LIBRARY_PATH at the bundled libraries. Our own process has them by now; other
+    programs must not get them (file managers, terminals and browsers crash with another Qt)."""
+    if IS_WIN or not FROZEN:
+        return
+    orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", "")
+    os.environ.pop("LD_LIBRARY_PATH", None)
+    keep = clean_library_path(orig, resource_dir())
+    if keep:
+        os.environ["LD_LIBRARY_PATH"] = keep
 
 
 def hide_console_windows() -> None:

@@ -3,6 +3,22 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.17.2
+Found by really updating a copy of 1.17.0. Updating (takes effect when updating *from* this version on):
+- **Only one update check or update runs at a time.** The automatic check could come up on top of one you had started; two
+  updates then got in each other's way. Closing the window stops an update and leaves nothing behind.
+- **Settings a window saves while it closes** (e.g. ROM Optimizer's options) are taken to the new version too.
+- **A copy without portable.txt stays that way**: the update brought the file back, so your settings seemed to be gone.
+- The database of remembered scans is copied safely while it's in use.
+
+Also fixed:
+- **Linux build: file managers, browsers and terminals opened from it could crash**, because they were given the build's own
+  libraries.
+- **chdman's commands were missing when the folder's path contains a space** (Linux and Windows).
+- Portable copies keep all paths inside their folder relative (Switch keys, output, patch and BIOS folders too). Ones saved
+  by an earlier version are found again in the new folder.
+- Linux menu entries work in folders with spaces and special characters.
+
 ## 1.17.1
 A review of the whole suite. Serious:
 - The **"Open ROM …" buttons** didn't work in the Linux build (they looked for .exe files). The self-test now starts all three

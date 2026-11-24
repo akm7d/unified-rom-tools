@@ -75,3 +75,122 @@ def test_tampered_archive_refused(release):
     with pytest.raises(su.UpdateError, match="checksum"):
         su._update_build(rel, lambda s, f: None)
     assert not (old.parent / "romtools-9.9.9-linux-x64").exists()
+
+
+def test_copy_without_portable_txt_stays_per_user(release):
+    rel, rel_dir, old = release
+    (old / "portable.txt").unlink()
+    # (a real archive brings portable.txt along)
+    real = su.tarfile.open
+
+    class WithMarker:
+        def __init__(self, *a):
+            self.t = real(*a)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.t.close()
+
+        def extractall(self, path, **kw):
+            self.t.extractall(path, **kw)
+            (path / "romtools-9.9.9-linux-x64" / "portable.txt").touch()
+
+    su.tarfile.open = WithMarker
+    try:
+        folder, _ = su._update_build(rel, lambda s, f: None)
+    finally:
+        su.tarfile.open = real
+    assert not (folder / "portable.txt").exists() and not (folder / "data").exists()
+
+
+def test_stopping_leaves_nothing_behind(release):
+    rel, _d, old = release
+
+    def stop(step, f):
+        if step.startswith("Unpacking"):
+            raise su.UpdateError("stopped")
+    before = sorted(p.name for p in old.parent.iterdir())
+    with pytest.raises(su.UpdateError, match="stopped"):
+        su._update_build(rel, stop)
+    assert sorted(p.name for p in old.parent.iterdir()) == before
+
+
+def test_two_updates_at_once_dont_disturb_each_other(release):
+    rel, _d, old = release
+    other = []
+
+    def progress(step, f):
+        if step.startswith("Unpacking") and not other:
+            other.append(None)
+            other.append(su._update_build(rel, lambda s, f: None)[0])
+    with pytest.raises(su.UpdateError, match="created meanwhile"):
+        su._update_build(rel, progress)
+    assert (other[1] / "rom-verifier").exists()
+    assert not list(old.parent.glob(".romtools-update-*"))
+
+
+def test_database_in_use_is_copied_whole(tmp_path):
+    import sqlite3
+    src, dst = tmp_path / "a", tmp_path / "b"
+    (src / "cache").mkdir(parents=True)
+    live = sqlite3.connect(src / "cache" / "hashes.sqlite")
+    live.execute("PRAGMA journal_mode=WAL")
+    live.execute("CREATE TABLE t (x)")
+    live.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(500)])
+    live.commit()
+    su.copy_data(src, dst)
+    assert sorted(p.name for p in (dst / "cache").iterdir()) == ["hashes.sqlite"]
+
+    def rows():
+        c = sqlite3.connect(dst / "cache" / "hashes.sqlite")
+        n = c.execute("SELECT count(*) FROM t").fetchone()[0]
+        c.close()
+        return n
+    assert rows() == 500
+    live.execute("INSERT INTO t VALUES (1)")
+    live.commit()
+    su.copy_data(src, dst)
+    live.close()
+    assert rows() == 501
+
+
+def test_settings_saved_while_closing_come_along(release):
+    import os
+    rel, _d, old = release
+    cfg = old / "data" / "config" / "config.json"
+    cfg.parent.mkdir()
+    cfg.write_text("before")
+    (old / "data" / "dats" / "x.dat").write_text("dat")
+    folder, _ = su._update_build(rel, lambda s, f: None)
+    (folder / "portable.txt").touch()
+    new = folder / "data" / "config" / "config.json"
+    cfg.write_text("after closing")
+    os.utime(cfg, (new.stat().st_mtime + 5,) * 2)
+    newer_dat = folder / "data" / "dats" / "x.dat"
+    newer_dat.write_text("updated in the new version")
+    su.carry_over(folder)
+    assert new.read_text() == "after closing" and newer_dat.read_text() == "updated in the new version"
+
+
+def test_menu_entry_for_any_folder_name(tmp_path):
+    """Exec= is read back the way desktops do it: string escapes first, then quoting, then field codes."""
+    import subprocess
+    from pathlib import Path
+    script = (Path(su.__file__).parents[1] / "packaging" / "linux" / "install.sh").read_text()
+    func = script[script.index("exec_value()"):script.index("\n}\n", script.index("exec_value()")) + 3]
+    for path in ("/plain/rom", "/with space/rom", "/a&b/rom", "/it's/rom", '/q"uote/rom', "/d$ollar/rom", "/back\\slash/rom",
+                 "/100%/rom", "/t`ick/rom", "/Émulation/rom"):
+        out = subprocess.run(["bash", "-c", func + 'exec_value "$1"', "x", path], capture_output=True, encoding="utf-8").stdout
+        s = out.replace("\\\\", "\\")                       # value of type string
+        assert s[0] == s[-1] == '"'
+        body, got, i = s[1:-1], "", 0
+        while i < len(body):
+            if body[i] == "\\":
+                i += 1
+            else:
+                assert body[i] not in '"`$', (path, out)
+            got += body[i]
+            i += 1
+        assert got.replace("%%", "%") == path, (path, out)

@@ -475,25 +475,34 @@ def check_updates(win, module: str, manual: bool) -> None:
     """Look for a newer release in the background. ``manual``: also report "up to date" and errors."""
     from .. import __version__
     from .. import selfupdate as su
+    if getattr(win, "_update_busy", False):         # one check / update at a time
+        win._update_manual = getattr(win, "_update_manual", False) or manual
+        return
+    win._update_busy, win._update_manual = True, manual
 
     def job(_w):
         return su.latest()
 
     def done(rel):
+        manual = win._update_manual
         cfg = get_config()
         su.mark_checked(cfg)
         skipped = cfg["window_state"].get("update_skip_version", "")
         if not su.newer(rel.version):
             if manual:
                 QMessageBox.information(win, "Updates", f"romtools {__version__} is the newest version.")
+            win._update_busy = False
             return
         if not manual and rel.version == skipped:
+            win._update_busy = False
             return
-        _offer(win, module, rel)
+        if not _offer(win, module, rel):
+            win._update_busy = False
 
     def failed(err):
         su.mark_checked(get_config())
-        if manual:
+        win._update_busy = False
+        if win._update_manual:
             QMessageBox.warning(win, "Updates", f"Couldn't check for updates:\n{err.split(': ', 1)[-1]}")
 
     w = Worker(job, parent=win)
@@ -503,7 +512,8 @@ def check_updates(win, module: str, manual: bool) -> None:
     w.start()
 
 
-def _offer(win, module: str, rel) -> None:
+def _offer(win, module: str, rel) -> bool:
+    """Ask, and start updating if wanted. True while an update is running."""
     from PySide6.QtWidgets import QProgressDialog
     from .. import __version__
     from .. import selfupdate as su
@@ -527,42 +537,61 @@ def _offer(win, module: str, rel) -> None:
         cfg = get_config()
         cfg["window_state"]["update_skip_version"] = rel.version
         cfg.save()
-        return
+        return False
     if clicked is later or clicked is None:
-        return
+        return False
     if kind == "source":
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
         QDesktopServices.openUrl(QUrl(rel.page))
-        return
+        return False
     dlg = QProgressDialog("Starting…", None, 0, 1000, win)
     dlg.setWindowTitle(f"Updating to {rel.version}")
     dlg.setMinimumDuration(0)
     dlg.setValue(0)
 
-    w = Worker(lambda wk: su.apply(rel, lambda s, f: wk.progress.emit(int(f * 1000), 1000, s, f)), parent=win)
+    def job(wk):
+        def progress(s, f):
+            if wk.cancel.is_set() and f < 1:        # the window was closed: stop and leave nothing behind
+                raise su.UpdateError("stopped")
+            wk.progress.emit(int(f * 1000), 1000, s, f)
+        return su.apply(rel, progress)
+
+    w = Worker(job, parent=win)
     w.progress.connect(lambda d, _t, s, _f: (dlg.setLabelText(s), dlg.setValue(d)))
 
     def finished(res):
         dlg.close()
+        win._update_busy = False
         folder, msg = res
         if QMessageBox.question(win, "Updated", msg + "\n\nRestart now with the new version?") != \
                 QMessageBox.StandardButton.Yes:
             return
-        import subprocess
-        import sys
-        if folder is not None:
-            subprocess.Popen(su.launcher(folder, module), cwd=str(folder))
-        else:
-            from ..compat import app_dir
-            subprocess.Popen([sys.executable, "-m", f"romtools.gui.{module}"], cwd=str(app_dir()))
-        win.close()
+        from ..compat import launch_app, start_app
+        if not win.close():                         # something is running and shouldn't be stopped
+            return
+        try:
+            if folder is not None:
+                try:
+                    su.carry_over(folder)           # what the window saved while closing
+                finally:
+                    start_app(su.launcher(folder, module), folder)
+            else:
+                launch_app(module)
+        except OSError as exc:
+            QMessageBox.warning(None, "Updated", f"The new version couldn't be started, or not all of its settings could be "
+                                                 f"copied:\n{exc}")
+
+    def failed(err):
+        dlg.close()
+        win._update_busy = False
+        QMessageBox.warning(win, "Update failed", err.split(": ", 1)[-1] + "\n\nNothing was changed.")
 
     w.done.connect(finished)
-    w.failed.connect(lambda e: (dlg.close(), QMessageBox.warning(win, "Update failed",
-                                                                 e.split(": ", 1)[-1] + "\n\nNothing was changed.")))
+    w.failed.connect(failed)
     win._update_worker = w
     w.start()
+    return True
 
 
 def show_credits(parent) -> None:

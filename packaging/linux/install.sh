@@ -6,6 +6,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HOME/.local/bin"; APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 mkdir -p "$BIN" "$APPS" "$ICONS"
+# the Exec= value of a menu entry: quoted, so any folder name works
+exec_value() {
+  local s="$1"
+  s="${s//\\/\\\\\\\\}"; s="${s//\"/\\\\\"}"; s="${s//\`/\\\\\`}"; s="${s//\$/\\\\\$}"; s="${s//%/%%}"
+  printf '"%s"' "$s"
+}
 declare -A NAME=([verifier]="ROM Verifier" [renamer]="ROM Renamer" [optimizer]="ROM Optimizer")
 declare -A DESC=([verifier]="Verify ROMs and CHDs against No-Intro and Redump DATs"
                  [renamer]="Rename ROMs to their No-Intro / Redump names, with preview and undo"
@@ -18,7 +24,7 @@ for app in verifier renamer optimizer; do
 Type=Application
 Name=${NAME[$app]}
 Comment=${DESC[$app]}
-Exec=$HERE/rom-$app
+Exec=$(exec_value "$HERE/rom-$app")
 Icon=rom-$app
 Terminal=false
 Categories=Game;Utility;Emulator;
