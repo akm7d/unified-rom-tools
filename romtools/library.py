@@ -215,7 +215,7 @@ def package_folders(cfg: Config, paths: list[Path]) -> list[tuple[str, Path, set
         home = None
         for q in ([p] if p.is_dir() else []) + list(p.parents)[:4]:
             g = guess_system(q.name)
-            if g and g.source == "package":
+            if g and (g.source == "package" or g.id == "wiiu"):
                 home = q
                 break
         if home is not None:

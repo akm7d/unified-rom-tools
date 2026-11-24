@@ -244,7 +244,8 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
         skip = d.name.lower() in MEDIA_DIRS or depth >= MAX_DEPTH or d.is_symlink()
         inside = None if skip else _entries(d)
         game = identify.extracted_game(d, {p.name.lower() for x in inside for p in x} if inside else None)
-        if game == "switch" and packages.is_extracted_switch(d):   # an extracted Switch game: identified, not "Skipped"
+        # an extracted Switch / Wii U game: identified, not "Skipped"
+        if game in ("switch", "wiiu") and packages.is_extracted_package(d):
             items.append(Item(system, d, "package", expected=here))
         elif game is None and inside and holds_roms(d, inside):
             items.extend(_items_in(system, d, depth + 1, expected=here))
@@ -270,7 +271,7 @@ def holds_roms(d: Path, inside: tuple[list[Path], list[Path]] | None = None, bud
         if depth:
             game = identify.extracted_game(cur, {p.name.lower() for x in (files, dirs) for p in x})
             if game is not None:
-                if game == "switch" and packages.is_extracted_switch(cur):
+                if game in ("switch", "wiiu") and packages.is_extracted_package(cur):
                     return True
                 continue
         budget -= len(files) + len(dirs)
@@ -619,7 +620,7 @@ class Scanner:
         try:
             info = _package_info(item.path, self.switch_keys)
         except packages.PackageError as exc:
-            if item.system == "(other)" and item.path.suffix.lower() in packages.SWITCH_EXTS:
+            if item.system == "(other)" and packages.package_ext(item.path) in packages.SWITCH_EXTS:
                 item.system = "switch"
             if (item.path.suffix.lower() == ".pkg" and "PS3" in str(exc)) or "prod.keys" in str(exc):
                 return Result(item, NODAT, note=str(exc))
@@ -628,15 +629,45 @@ class Scanner:
         if item.system == "(other)":
             item.system = info.platform
         want = self._expected(item)
+        integ = self.integrity_of(item)
         r = Result(item, ATTENTION if problems else IDENTIFIED, packages.clean_title(info.title),
-                   "PS4 package data" if info.platform == "ps4" else "Switch package data",
+                   f"{packages.PLATFORM_NAMES.get(info.platform, info.platform)} package data",
                    packages.describe(info) + ("" if not problems else " ⚠ " + "; ".join(problems)))
         r.chd_info = {"package": info.as_dict(), "problems": problems}
         r.found, r.found_by = info.platform, "package"
         if want and want != r.found and not (info.platform == "switch" and want == "switch2"):
             r.misplaced, r.status = True, MISPLACED
             r.note += f" ⚠ belongs in a {system_name(r.found)} folder, not {system_name(want)}"
+        show_integrity(r, integ)
         return r
+
+    def _stamp(self, item: Item) -> tuple[int, float]:
+        st = item.path.stat()
+        return (st.st_size + sum(x.stat().st_size for x in item.parts),
+                st.st_mtime + sum(x.stat().st_mtime for x in item.parts))
+
+    def integrity_of(self, item: Item):
+        """What an earlier integrity check of this (unchanged) package found, or None."""
+        from .integrity import Integrity
+        if not self.cache or not item.path.is_file():
+            return None
+        try:
+            hit = self.cache.get(item.path, *self._stamp(item))
+        except OSError:
+            return None
+        return Integrity.from_dict(hit[1].get("integrity")) if hit and hit[0] == "package" else None
+
+    def check_integrity(self, r: Result, progress: ProgressCb | None = None) -> Result:
+        """Read the whole package (see integrity.py), remember the outcome and show it in the result."""
+        from . import integrity
+        item = r.item
+        integ = integrity.check(item.path, self.switch_keys, lambda f, what: progress and progress(what, f), self.cancel)
+        if self.cache:
+            self.cache.put(item.path, *self._stamp(item), "package", {"integrity": integ.as_dict()}, [])
+        fresh = self.check_package(item)
+        if not fresh.chd_info:                      # its metadata couldn't be read
+            show_integrity(fresh, integ)
+        return fresh
 
     def _finish(self, item: Item, entries: list[Entry], index: DatIndex, extra: dict, cached: bool,
                 ident=None, own: bool = True) -> Result:
@@ -756,6 +787,20 @@ class Scanner:
                 exc = f.exception()
                 if exc and not isinstance(exc, Cancelled):
                     raise exc
+
+
+def show_integrity(r: Result, integ) -> None:
+    from . import integrity
+    if integ is None:
+        return
+    r.chd_info = {**(r.chd_info or {}), "integrity": integ.as_dict()}
+    if integ.state == integrity.DAMAGED:
+        r.status = BAD
+        r.note = f"NOT INTACT: {integ.note} (checked {integ.date}) · {r.note}"
+    elif integ.state == integrity.INTACT:
+        r.note += f" ✔ intact (checked {integ.date})"
+    else:
+        r.note += f" · integrity unknown: {integ.note}"
 
 
 # systems whose headers look alike or whose games run on each other's console
@@ -898,7 +943,8 @@ def _package_scope(item: Item) -> Path:
 
 
 # folder names that hold one console's packages (they have no DAT, so they're scanned as "other" folders)
-PACKAGE_FOLDERS = {"ps4", "playstation4", "switch", "switch-2", "switch2", "nsw", "ns", "nsw2"}
+PACKAGE_FOLDERS = {"ps4", "playstation4", "switch", "switch-2", "switch2", "nsw", "ns", "nsw2", "wiiu", "wii-u",
+                   "wii u"}
 
 
 _SCOPE_CACHE: dict[tuple, tuple[float, dict]] = {}

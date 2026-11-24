@@ -36,7 +36,8 @@ def media_text(r: sc.Result) -> str:
         return str(r.chd_info["disc"].get("container", "")).upper()
     if r.chd_info and "package" in r.chd_info:   # PS4 PKG / Switch NSP·XCI
         p = r.chd_info["package"]
-        return f"{'PS4' if p.get('platform') == 'ps4' else 'Switch'} · {p.get('kind', '')}"
+        from ..packages import PLATFORM_NAMES
+        return f"{PLATFORM_NAMES.get(p.get('platform'), p.get('platform', ''))} · {p.get('kind', '')}"
     kind = r.chd_info.get("kind", "") if r.chd_info else ""
     return kind.upper()
 
@@ -378,7 +379,27 @@ class VerifierWindow(QMainWindow):
                                     "database, downloaded once a day).\nPS4: right-click a package → Look up "
                                     "updates online.")
         self.act_updates.triggered.connect(self.check_updates)
-        for a in (self.act_fix, self.act_updates, act_dats, act_export, act_settings):
+        self.coll_btn = QToolButton()
+        self.coll_btn.setText("Collection")
+        self.coll_btn.setIcon(QIcon.fromTheme("view-list-tree", QIcon.fromTheme("folder")))
+        self.coll_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.coll_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.coll_btn.setToolTip("Checks over the whole collection: damaged packages, duplicates, missing discs, BIOS files")
+        om = QMenu(self.coll_btn)
+        om.setToolTipsVisible(True)
+        for text, tip, func in (
+                ("Check package integrity…", "Reads whole PS4 / Switch / Wii U packages and compares them with the hashes and "
+                 "signatures inside them, without extracting. The selected ones, or all that weren't checked yet.",
+                 lambda: self.check_integrity()),
+                ("Duplicates…", "Games stored more than once, in the list below", self.show_duplicates),
+                ("Missing discs…", "Multi-disc games with discs missing, in the list below", self.show_missing_discs),
+                ("BIOS files…", "Compares your BIOS files with known good hashes", self.show_bios)):
+            a = om.addAction(text, func)
+            a.setToolTip(tip)
+        self.coll_btn.setMenu(om)
+        tb.addAction(self.act_fix)
+        tb.addWidget(self.coll_btn)
+        for a in (self.act_updates, act_dats, act_export, act_settings):
             tb.addAction(a)
         add_app_buttons(tb, self, "verifier")
         tb.addWidget(ThemeButton(self))
@@ -734,6 +755,10 @@ class VerifierWindow(QMainWindow):
                       if st["not_scanned"] else " · everything is up to date"))
             if not self.model.rows and not st["not_scanned"]:
                 msg = "Ready — run a Quick scan (F5)"
+            from ..datmanager import oldest_check_days
+            days = oldest_check_days()
+            if days is not None and days >= 30:
+                msg += f" · your DATs were last checked {days} days ago (Manage DATs → Check for updates)"
         else:
             kind = "Full scan" if self.scan_mode == sc.FULL else "Quick scan"
             if getattr(self, "targets", None):
@@ -863,7 +888,7 @@ class VerifierWindow(QMainWindow):
             rows = [("Title", p.get("title")), ("Type", p.get("kind")), ("Title ID", p.get("title_id")),
                     ("Base game ID", p.get("base_id") if p.get("base_id") != p.get("title_id") else ""),
                     ("Version", p.get("version_str")), ("Display version", p.get("display_version")),
-                    ("Region", p.get("region")), ("Content ID", p.get("content_id")),
+                    ("Region", p.get("region")), ("Product code", p.get("product")), ("Content ID", p.get("content_id")),
                     ("Needs firmware", p.get("firmware")), ("Backport", "yes" if p.get("backport") else ""),
                     ("Note", p.get("note"))]
             out.append("<p><b>Package:</b><br>" + "<br>".join(f"&nbsp;&nbsp;{k}: {e(str(v))}" for k, v in rows if v)
@@ -873,6 +898,13 @@ class VerifierWindow(QMainWindow):
                     f"&nbsp;&nbsp;{e(c['kind'])} {e(c['title_id'])} {e(c['version_str'])}"
                     f"{' (' + e(c['display_version']) + ')' if c.get('display_version') else ''}"
                     for c in p["contents"]) + "</p>")
+            integ = r.chd_info.get("integrity")
+            if integ:
+                import datetime
+                colr = {"intact": STATUS_COLORS[sc.VERIFIED], "damaged": STATUS_COLORS[sc.BAD]}.get(integ["state"], "#888")
+                out.append(f"<p><b>Integrity:</b> <span style='color:{colr}'><b>{e(integ['state'])}</b></span> — "
+                           f"{e(integ['note'])} <small>(checked "
+                           f"{datetime.date.fromtimestamp(integ['when']).isoformat()})</small></p>")
             if r.chd_info.get("update"):
                 out.append(f"<p><b>Updates:</b> {e(r.chd_info['update'])}</p>")
             for msg in r.chd_info.get("problems", []):
@@ -942,6 +974,12 @@ class VerifierWindow(QMainWindow):
             m.addSeparator()
             m.addAction(QIcon.fromTheme("internet-web-browser"), "Look up updates online (orbispatches.com)",
                         lambda: [QDesktopServices.openUrl(QUrl(up.ps4_patch_page(t))) for t in ids])
+        pkgs = self._packages(res)
+        if pkgs:
+            m.addSeparator()
+            a = m.addAction(QIcon.fromTheme("security-high"), f"Check integrity of {len(pkgs)} package(s)…",
+                            lambda: self.check_integrity(pkgs))
+            a.setEnabled(not (self.worker and self.worker.isRunning()))
         fixable = [r for r in res if r.media_wrong and r.media.fixable]
         if fixable:
             m.addSeparator()
@@ -949,6 +987,127 @@ class VerifierWindow(QMainWindow):
                             f"Fix CHD type of {len(fixable)} selected…", lambda: self.fix_media(fixable))
             a.setEnabled(not (self.worker and self.worker.isRunning()))
         m.exec(self.table.viewport().mapToGlobal(pos))
+
+    # ------------------------------------------------------------------ the whole collection
+    def _packages(self, rows) -> list[sc.Result]:
+        return [r for r in rows if r.item.kind == "package" and r.item.path.is_file()]
+
+    def check_integrity(self, rows: list[sc.Result] | None = None):
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "Busy", "Wait for the current scan to finish, or press Stop.")
+            return
+        chosen = rows if rows is not None else self._packages(self._selected_results())
+        if not chosen:
+            chosen = [r for r in self._packages(self.model.rows) if not (r.chd_info or {}).get("integrity")]
+            if not chosen:
+                QMessageBox.information(self, "Package integrity", "No packages to check in the list: scan a PS4, Switch or Wii U "
+                                        "folder first, or select the ones to check again.")
+                return
+        size = sum(r.size for r in chosen)
+        box = QMessageBox(QMessageBox.Icon.Question, "Package integrity",
+                          f"Read {len(chosen)} package(s) completely ({human(size)})?",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, self)
+        box.setInformativeText("Over a network this takes about 10 seconds per GB. Results are remembered until a package "
+                               "changes. Nothing is extracted or written.\n\nIt proves the data is as it was packed, not "
+                               "that the game runs.")
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        scanner = sc.make_scanner(self.cfg, self.cache, sc.QUICK)
+        scanner.marks = self.marks
+        self.scanner = scanner
+
+        def job(w: ScanWorker):
+            scanner.cancel = w.cancel
+            n = {"intact": 0, "damaged": 0, "unknown": 0}
+            for i, r in enumerate(chosen):
+                if w.cancel.is_set():
+                    break
+                w.progress.emit(i, len(chosen), r.item.path.name, 0.0)
+                try:
+                    new = scanner.check_integrity(r, lambda what, f, r=r, i=i: w.progress.emit(
+                        i, len(chosen), f"{r.item.path.name}: {what}", f))
+                except sc.Cancelled:
+                    break
+                except OSError as exc:
+                    new = sc.Result(r.item, sc.ERROR, note=str(exc))
+                state = (new.chd_info or {}).get("integrity", {}).get("state")
+                if state:
+                    n[state] += 1
+                w.result.emit(new)
+            return n
+
+        def done(n):
+            self._set_running(False)
+            self.current.setText(f"Integrity: {n['intact']} intact, {n['damaged']} damaged" +
+                                 (f", {n['unknown']} couldn't be judged" if n["unknown"] else "") +
+                                 (" - stopped" if self.worker.cancel.is_set() else ""))
+            QApplication.alert(self)
+
+        self.worker = ScanWorker(job, parent=self)
+        self.worker.result.connect(self.model.replace)
+        self.worker.progress.connect(self._on_progress)
+        self.worker.done.connect(done)
+        self.worker.failed.connect(self._on_failed)
+        self.started = time.monotonic()
+        self._set_running(True)
+        self.worker.start()
+
+    def _have_results(self, title: str) -> bool:
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, title, "Wait for the current scan to finish, or press Stop.")
+            return False
+        if not self.model.rows:
+            QMessageBox.information(self, title, "Scan your library first: this looks at the results in the list.")
+            return False
+        return True
+
+    def show_duplicates(self):
+        from .collection import DuplicatesDialog
+        if self._have_results("Duplicates"):
+            d = DuplicatesDialog(list(self.model.rows), self)
+            d.exec()
+            if d.trashed:
+                self.model.remove_paths(set(d.trashed))
+                self._update_counts()
+
+    def show_missing_discs(self):
+        from .. import collection as col
+        from .. import library
+        from ..datmanager import dat_filename
+        from ..config import DAT_DIR
+        from ..systems import BY_ID
+        from .collection import MissingDiscsDialog
+        if not self._have_results("Missing discs"):
+            return
+        rows = list(self.model.rows)
+        self.statusBar().showMessage("Comparing with the DATs…")
+
+        def job(_w):
+            idx = {}
+            for sysid in {r.found or r.item.system for r in rows if col.disc_of(r.game or r.item.stem)}:
+                dats = [d for st in self.cfg["systems"].values() if (st or {}).get("system") == sysid
+                        for d in st.get("dats", [])]
+                if sysid in BY_ID and (DAT_DIR / dat_filename(BY_ID[sysid])).is_file():
+                    dats.append(str(DAT_DIR / dat_filename(BY_ID[sysid])))
+                idx[sysid] = library.shared_index(sorted(set(dats)))
+            return col.missing_discs(rows, idx)
+
+        def done(missing):
+            self.statusBar().clearMessage()
+            if missing:
+                MissingDiscsDialog(missing, self).exec()
+            else:
+                QMessageBox.information(self, "Missing discs", "No missing discs: every multi-disc game in the list is "
+                                                               "complete.")
+        w = Worker(job, parent=self)
+        w.done.connect(done)
+        w.failed.connect(lambda e: QMessageBox.critical(self, "Missing discs", e))
+        self._disc_worker = w
+        w.start()
+
+    def show_bios(self):
+        from .collection import BiosDialog
+        BiosDialog(self).exec()
 
     # ------------------------------------------------------------------ game updates (Switch)
     def check_updates(self):

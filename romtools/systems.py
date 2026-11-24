@@ -180,5 +180,6 @@ UNVERIFIABLE_HINT = {
     "ps4": "PS4 PKGs have no public DAT: they're identified from their own data (title, ID, type, version, region).",
     "ps5": "PS5 dumps have no public DAT.",
     "ps3": "PS3 folder (JB) dumps can't be compared with Redump's ISO hashes; only ISOs can.",
-    "wiiu": "WUA files are Cemu archives, not disc images; only .wud/.wux/.iso match Redump.",
+    "wiiu": "No DAT here. Wii U archives (.wua) and extracted games are identified from their own data; disc images "
+            "(.wud, .iso) can be checked with Redump's DAT (Manage DATs).",
 }

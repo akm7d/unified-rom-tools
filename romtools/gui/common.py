@@ -38,9 +38,10 @@ STATUS_HELP = {
     sc.MODIFIED: "Tagged as a hack, translation, undub or other modified ROM - expected not to match the DAT "
                  "(right-click → Mark as… to change); also trimmed dumps and dumps with extra bytes",
     sc.PARTIAL: "Some tracks/files match, others don't",
-    sc.BAD: "The name is in the DAT but the data differs: bad dump, hack, trimmed or modified",
+    sc.BAD: "The name is in the DAT but the data differs: bad dump, hack, trimmed or modified; or a console package that "
+            "failed its integrity check",
     sc.UNKNOWN: "Not in any of your DATs (hacks, translations, homebrew); the Notes say which system its own header names",
-    sc.IDENTIFIED: "Console package (PS4 PKG, Switch NSP/XCI) identified from its own data - no DAT exists for these",
+    sc.IDENTIFIED: "Console package (PS4 PKG, Switch NSP/XCI, Wii U) identified from its own data - no DAT exists for these",
     sc.ATTENTION: "Console package with a problem: an update or DLC without its game, DLC for another region, a "
                   "duplicate or an older update",
     sc.NODAT: "No DAT loaded for this system - open Manage DATs",

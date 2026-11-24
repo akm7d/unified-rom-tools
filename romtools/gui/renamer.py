@@ -29,6 +29,8 @@ MOVE_COLOR = "#2f7fd1"
 
 def op_action(op) -> tuple[str, bool]:
     """(what the change does, in words; whether it moves the file to another folder)."""
+    if op.kind == rn.RMDIR:
+        return "Remove empty folder", False
     if op.kind == rn.M3U_EDIT and op.move and op.dst.parent != op.src.parent:
         return f"Update playlist + move into {op.dst.parent.name}/", True
     if op.kind == rn.M3U_EDIT:
@@ -89,7 +91,8 @@ class HistoryDialog(QDialog):
         self.view.setRowCount(len(rows))
         for i, e in enumerate(rows):
             old = QTableWidgetItem(Path(e["src"]).name)
-            new = QTableWidgetItem(Path(e["dst"]).name + ("  (playlist edited)" if e["kind"] == rn.M3U_EDIT else ""))
+            new = QTableWidgetItem(Path(e["dst"]).name + ("  (playlist edited)" if e["kind"] == rn.M3U_EDIT else
+                                                               "  (empty folder removed)" if e["kind"] == rn.RMDIR else ""))
             if not e.get("done"):
                 for it in (old, new):
                     it.setForeground(QColor("#888"))
@@ -125,6 +128,7 @@ class RenamerWindow(QMainWindow):
         self.ops: list[rn.Op] = []
         self.base_ops: list[rn.Op] = []
         self.worker: Worker | None = None
+        self.tree: rn.FolderTree | None = None      # for finding folders that end up empty
         self.preview_of = ""            # what was picked with Check file/folder ("" = the library)
         self._filling = False
 
@@ -223,7 +227,7 @@ class RenamerWindow(QMainWindow):
         dl.addLayout(mrow)
         dl.addStretch(1)
 
-        sec_pkg = QGroupBox("Console packages (PS4 / Switch)")
+        sec_pkg = QGroupBox("Console packages (PS4 / Switch / Wii U)")
         sec_pkg.setCheckable(True)
         sec_pkg.setChecked(st.get("pkg", True))
         sec_pkg.setToolTip("PS4 PKG and Switch NSP / NSZ / XCI / XCZ named from their own data: “Title [CUSA00000] "
@@ -261,7 +265,12 @@ class RenamerWindow(QMainWindow):
         self.s_header.setChecked(st.get("s_header", True))
         self.s_ext = QCheckBox("Fix extensions the system doesn't use (rom.bin → rom.gba)")
         self.s_ext.setChecked(st.get("s_ext", True))
-        for w in (self.s_header, self.s_ext):
+        self.s_empty = QCheckBox("Remove folders that are empty (or will be)")
+        self.s_empty.setToolTip("Only folders with nothing at all in them: one picture or hidden file keeps a folder. "
+                                "Folders of systems directly in the library stay, even when empty. Undo makes them "
+                                "again.")
+        self.s_empty.setChecked(st.get("s_empty", False))
+        for w in (self.s_header, self.s_ext, self.s_empty):
             sl.addWidget(w)
         note = QLabel("<small>Tick <i>Other folders &amp; loose files</i> on the left to include loose ROMs. Discs move "
                       "with their tracks, playlists and saves; folders that hold one game stay together.</small>")
@@ -405,6 +414,7 @@ class RenamerWindow(QMainWindow):
         self.cfg["window_state"]["renamer_sections"] = {
             "dat": self.sec_dat.isChecked(), "pkg": self.sec_pkg.isChecked(), "rules": self.sec_rules.isChecked(),
             "sort": self.sec_sort.isChecked(), "s_header": self.s_header.isChecked(), "s_ext": self.s_ext.isChecked(),
+            "s_empty": self.s_empty.isChecked(),
             "skip_uncached": self.skip_uncached.isChecked(), "p_rename": self.p_rename.isChecked(),
             "p_org": self.p_org.isChecked(), "p_multi": self.p_multi.isChecked(),
             "rule_boxes": {k: b.isChecked() for k, b in self._rule_boxes.items()}}
@@ -474,6 +484,7 @@ class RenamerWindow(QMainWindow):
                                                      "sorting or cleanup rules.")
             return
         self._save_sections()
+        do_empty = do_sort and self.s_empty.isChecked()
         p_opts = (self.p_rename.isChecked(), self.p_org.isChecked(), self.p_multi.isChecked())
         self.cfg["rename_use_dat_ext"] = self.use_dat_ext.isChecked()
         self.cfg.save()
@@ -557,9 +568,18 @@ class RenamerWindow(QMainWindow):
                 for op in rops:
                     op.reason = "Cleanup: " + op.reason if op.reason else "Cleanup"
                     ops.append(op)
+            tree = None
+            if do_empty and not w.cancel.is_set():
+                say("Looking for empty folders…")
+                if targets is not None:
+                    tree = rn.FolderTree([t for t in targets if t.is_dir()], cancel=w.cancel)
+                else:               # a system's own folder stays; other folders directly in the library can go
+                    others = {root / o for o in library.split(cfg, root)[1]} if library.OTHER in systems else set()
+                    tree = rn.FolderTree([root / k for k in systems if k != library.OTHER] + sorted(others), others,
+                                         w.cancel)
             # one change per file: DAT name, then package name, then cleanup rules (that's the order added above)
             merged = rn.merge(ops, sorting)
-            return merged, notes
+            return merged, notes, tree
 
         self.worker = Worker(job, parent=self)
         self.worker.progress.connect(self._on_progress)
@@ -587,14 +607,19 @@ class RenamerWindow(QMainWindow):
             self.apply_btn.setEnabled(False)
 
     def _preview_ready(self, res):
-        ops, notes = res
+        ops, notes, self.tree = res
         self._busy(False)
         self.base_ops = ops
-        self.ops = rn.validate(rn.add_playlist_ops(ops))
+        self.ops = self._complete(ops)
         self._fill()
         of = f"Preview of {self.preview_of}" if self.preview_of else "Preview"
         self.status.setText(f"{of}: " + "  ·  ".join(notes) if notes else
                             f"{of} ready — nothing has been changed yet.")
+
+    def _complete(self, ops: list[rn.Op]) -> list[rn.Op]:
+        """The planned changes plus what follows from them: playlists, and folders that end up empty."""
+        out = rn.validate(rn.add_playlist_ops([o for o in ops if o.kind != rn.RMDIR]))
+        return out + rn.validate(rn.plan_empty_folders(self.tree, out)) if self.tree is not None else out
 
     # ------------------------------------------------------------------ table
     def _fill(self):
@@ -628,6 +653,10 @@ class RenamerWindow(QMainWindow):
                 new.setText(SAME_NAME)                 # a pure move: the name doesn't change
                 new.setForeground(QColor("#888"))
             new.setToolTip(str(op.dst))
+            if op.kind == rn.RMDIR:
+                new.setText("(removed)")
+                new.setForeground(QColor("#888"))
+                new.setFlags(new.flags() & ~Qt.ItemFlag.ItemIsEditable)
             if op.kind == rn.M3U_EDIT:
                 new.setFlags(new.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 new.setToolTip("Playlist contents:\n" + (op.new_text or ""))
@@ -655,10 +684,13 @@ class RenamerWindow(QMainWindow):
             return
         # Playlist edits depend on which discs are renamed: rebuild them.
         enabled_before = {id(o): o.enabled for o in self.ops}
-        self.ops = rn.validate(rn.add_playlist_ops(self.base_ops))
+        unticked = {o.src for o in self.ops if o.kind == rn.RMDIR and not o.enabled}
+        self.ops = self._complete(self.base_ops)
         for o in self.ops:
             if o.ok and id(o) in enabled_before:
                 o.enabled = enabled_before[id(o)]
+            elif o.kind == rn.RMDIR and o.src in unticked:
+                o.enabled = False
         self._fill()
 
     def _check_all(self, on: bool):
@@ -671,10 +703,14 @@ class RenamerWindow(QMainWindow):
         n_bad = sum(1 for o in self.ops if not o.ok)
         moving = [o for o in self.ops if op_action(o)[1]]
         new_dirs = {o.dst.parent for o in moving if not o.dst.parent.exists()}
-        parts = [f"{len(self.ops) - len(moving)} rename(s)"] if len(self.ops) > len(moving) else []
+        n_dirs = sum(1 for o in self.ops if o.kind == rn.RMDIR)
+        n_ren = len(self.ops) - len(moving) - n_dirs
+        parts = [f"{n_ren} rename(s)"] if n_ren else []
         if moving:
             parts.append(f"<span style='color:{MOVE_COLOR}'><b>{len(moving)} move(s)</b></span>" +
                          (f" into {len(new_dirs)} new folder(s)" if new_dirs else ""))
+        if n_dirs:
+            parts.append(f"{n_dirs} empty folder(s)")
         what = " · ".join(parts)
         self.summary.setText(f"{what} · {n_on} checked · {n_bad} with problems (not applied)"
                              if self.ops else f"Nothing to change in {self.preview_of}." if self.preview_of else
@@ -690,6 +726,8 @@ class RenamerWindow(QMainWindow):
             return
         def line(o):
             action, moves = op_action(o)
+            if o.kind == rn.RMDIR:
+                return f"• REMOVE empty folder {o.src}"
             if moves:
                 return f"• MOVE {o.src.name}  →  {o.dst.parent.name}/" + \
                     ("" if o.dst.name == o.src.name else f" as {o.dst.name}")
@@ -700,8 +738,10 @@ class RenamerWindow(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Apply changes")
-        box.setText(f"Apply {len(todo)} change(s) to your library: {len(todo) - n_move} rename(s)"
-                    + (f" and {n_move} move(s) into other folders" if n_move else "") + "?")
+        n_dirs = sum(1 for o in todo if o.kind == rn.RMDIR)
+        box.setText(f"Apply {len(todo)} change(s) to your library: {len(todo) - n_move - n_dirs} rename(s)"
+                    + (f", {n_move} move(s) into other folders" if n_move else "")
+                    + (f", {n_dirs} empty folder(s) removed" if n_dirs else "") + "?")
         box.setInformativeText("Existing files are never overwritten. Every change is logged and can be reverted "
                                "from History / Undo.")
         box.setDetailedText(sample + more)

@@ -346,11 +346,13 @@ class PkgReader:
     # -- layers ------------------------------------------------------------
     def _decrypt(self, first: int, count: int) -> bytes:
         """``count`` 4 KB sectors of the image, decrypted."""
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         self.f.seek(self.image_offset + first * SECTOR)
-        raw = self.f.read(min(count * SECTOR, self.image_size - first * SECTOR))
+        return self._decrypt_raw(first, self.f.read(min(count * SECTOR, self.image_size - first * SECTOR)))
+
+    def _decrypt_raw(self, first: int, raw: bytes) -> bytes:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         out, key = bytearray(), algorithms.AES(self._xts)
-        for k in range(count):
+        for k in range((len(raw) + SECTOR - 1) // SECTOR):
             s = raw[k * SECTOR:(k + 1) * SECTOR]
             if first + k >= XTS_FIRST and len(s) == SECTOR:
                 s = Cipher(key, modes.XTS((first + k).to_bytes(16, "little"))).decryptor().update(s)
@@ -417,6 +419,23 @@ class PkgReader:
         if len(found) != total:
             raise Ps4PkgError("the package's signature tables are incomplete")
         self._signed = found
+
+    def table_damage(self) -> str:
+        """Check the outer file system's own tables (inodes, directories) against their signatures: "" or what's wrong.
+        (The game data's are checked as it's read.)"""
+        def bad(block: int, sig: bytes) -> bool:
+            data = self._decrypt(block * (BLOCK // SECTOR), BLOCK // SECTOR)
+            return any(sig) and not hmac.compare_digest(self._mac(data), sig)
+        sb = self._read_outer(0, 0x400)
+        if bad(1, sb[0xB8:0xD8]):
+            return "its file table doesn't match its signature"
+        for n in range(min(struct.unpack_from("<q", sb, 0x30)[0], 64)):
+            raw = self.outer.read((1 + n // self.outer.per_block) * BLOCK + (n % self.outer.per_block) * S32, S32)
+            for k in range(12):
+                sig, block = raw[0x64 + 36 * k:0x84 + 36 * k], struct.unpack_from("<i", raw, 0x84 + 36 * k)[0]
+                if 0 < block < self.image_size // BLOCK and block not in self._signed and bad(block, sig):
+                    return f"a file system table (block {block}) doesn't match its signature"
+        return ""
 
     def _pfsc(self) -> None:
         h = self._read_outer(self.pfsc_at, 0x30)
@@ -587,4 +606,99 @@ def extract(pkgs: "Path | list[Path]", folder: Path, progress=lambda done, total
         return len(sums), size
     finally:
         for r in readers:
+            r.close()
+
+
+def verify(path: Path, progress=lambda done, total: None, cancel=None, passcode: str = DEFAULT_PASSCODE) -> tuple[str, str]:
+    """Read the whole package and check everything it can prove about itself, without writing anything:
+    ("intact" | "damaged" | "unknown", explanation).
+
+    The header names SHA-256 digests of the system part ("body") and of the first 64 KB of the game data; every other
+    block of a fake / homebrew package's game data has its own signature. An official package's game data can only be
+    compared with the digest of the whole of it."""
+    def stop():
+        if cancel is not None and cancel.is_set():
+            from .hashing import Cancelled
+            raise Cancelled()
+    r, retail = None, ""
+    try:
+        r = PkgReader(path, passcode)
+    except RetailPackage as exc:
+        retail = str(exc)
+    except Ps4PkgError as exc:
+        return "damaged", str(exc)
+    parts = pieces(Path(path))
+    f = _Joined(parts) if parts else open(path, "rb")
+    try:
+        h = f.read(0x1000)
+        body_at, body_size = struct.unpack_from(">QQ", h, 0x20)
+        image_at, image_size = struct.unpack_from(">QQ", h, 0x410)
+        size = f.size if parts else Path(path).stat().st_size
+        if body_at + body_size > size or image_at + image_size > size:
+            return "damaged", "the package is incomplete (smaller than its header says)"
+        total, done = body_size + image_size, 0
+
+        def differs(at: int, digest: bytes) -> bool:         # (some homebrew tools leave digests empty)
+            return any(h[at:at + 32]) and h[at:at + 32] != digest
+        if differs(0xFE0, hashlib.sha256(h[:0xFE0]).digest()):
+            return "damaged", "its header doesn't match its own digest"
+
+        def read(at: int, n: int) -> bytes:
+            f.seek(at)
+            d = f.read(n)
+            if len(d) < n:
+                raise Ps4PkgError("the package ends too early")
+            return d
+        sha, pos = hashlib.sha256(), 0
+        while pos < body_size:
+            stop()
+            d = read(body_at + pos, min(4 << 20, body_size - pos))
+            sha.update(d)
+            pos += len(d)
+            done += len(d)
+            progress(done, total)
+        if differs(0x160, sha.digest()):
+            return "damaged", "its system part (title data, icons, licence) doesn't match the digest in the header"
+        if r is not None:
+            for e in r.entries.values():
+                r._raw(e)
+        if not image_size:
+            return "intact", "licence-only package: everything in it matches its digests"
+        if r is not None and (wrong := r.table_damage()):
+            return "damaged", wrong
+        whole, pos, signed = hashlib.sha256(), 0, 0
+        while pos < image_size:
+            stop()
+            d = read(image_at + pos, min(64 * BLOCK, image_size - pos))
+            whole.update(d)
+            if pos == 0 and differs(0x460, hashlib.sha256(d[:BLOCK]).digest()):
+                return "damaged", "the start of its game data doesn't match the digest in the header"
+            if r is not None:
+                for k in range(0, len(d), BLOCK):
+                    b = (pos + k) // BLOCK
+                    want = r._signed.get(b)
+                    if want is None:
+                        continue
+                    if not hmac.compare_digest(r._mac(r._decrypt_raw(b * (BLOCK // SECTOR), d[k:k + BLOCK])), want):
+                        return "damaged", f"its game data is damaged (at {(pos + k) / 1e6:,.0f} MB: block {b} doesn't " \
+                                          f"match its signature)"
+                    signed += 1
+            pos += len(d)
+            done += len(d)
+            progress(done, total)
+        same = whole.digest() == h[0x440:0x460]
+        if r is not None:
+            if signed != len(r._signed):
+                return "damaged", "part of its game data is missing"
+            r.files()                               # the file lists are readable too
+            return "intact", f"all {signed:,} blocks of game data match their signatures" + (
+                ", and the whole matches the header's digest" if same else "")
+        if same:
+            return "intact", "official package: all its data matches the digest in the header"
+        return "unknown", "its game data can't be checked: " + retail
+    except Ps4PkgError as exc:
+        return "damaged", str(exc)
+    finally:
+        f.close()
+        if r is not None:
             r.close()

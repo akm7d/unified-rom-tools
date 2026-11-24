@@ -196,7 +196,15 @@ def selftest(report: str | None) -> int:
         name = pk.suggested_name(i, "Game One")
         assert name == "Game One [CUSA11111] (Update v1.05)", name
         assert pk.check_set([i])[str(f)] == ["no base game (CUSA11111) found next to this update"]
-        return f"PS4 PKG metadata, naming and checks; Switch reader {'with' if pk.switch_keys() else 'without'} keys"
+        from romtools import wiiu
+        try:                                # names inside .wua files need zstd (built in since Python 3.14)
+            from compression import zstd
+            assert wiiu._unpack(zstd.compress(bytes(0x10000))) == bytes(0x10000), "zstd"
+            wua = "Wii U names OK"
+        except ImportError:
+            assert not getattr(sys, "frozen", False), "zstd is missing from this build"
+            wua = "no zstd: Wii U archives are named after their file"
+        return f"{wua}; PS4 PKG metadata, naming and checks; Switch reader {'with' if pk.switch_keys() else 'without'} keys"
 
     def theme():
         from romtools.gui.common import _captured_palette, current_theme, default_theme

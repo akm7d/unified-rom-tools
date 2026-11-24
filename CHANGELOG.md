@@ -3,6 +3,33 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.17.0
+- **Wii U**: `.wua` archives and extracted games (code/content/meta, or title.tmd with its .app files) are identified from
+  their own data - title, ID, Game / Update / DLC, version, region, product code - without keys or a DAT. Archives holding a
+  game with its update and DLC are shown as such. Works like PS4 and Switch everywhere: ROM Verifier, problems (update
+  without its game, older update, duplicate), ROM Renamer (a name that already says it is kept), sorting, duplicates, and
+  the integrity check (an archive's own SHA-256).
+- Extracted Wii U games are no longer just "Skipped".
+- PS4, Switch and Wii U packages without an extension, or with another one, are read by their content ("not a console
+  package" before).
+
+## 1.16.0
+- ROM Verifier → **Collection → Check package integrity** (also in the right-click menu): reads whole PS4 / Switch packages
+  and compares them with the hashes and signatures inside them, without extracting. PS4: header, system data, file tables
+  and every block of game data. Switch: every content file's SHA-256 (no keys needed; compressed ones with nsz) and
+  whether any are missing; converted game-card dumps and content rewritten by a converter are told apart from damage with
+  your prod.keys (through the hash trees inside), and files that differ are named. Official PS4 packages are compared with
+  their header's digest. Results are remembered until a package changes; those that aren't intact are listed as *Bad dump*.
+- **Collection → Duplicates**: games stored more than once - identical data (whatever it's stored in), the same game with
+  other data, or other versions (region, revision, translation). Nothing is ticked by itself; ticked copies go to the trash
+  and one copy always stays.
+- **Collection → Missing discs**: multi-disc games with discs missing, from the DATs (or gaps in the numbers).
+- **Collection → BIOS files**: compares your BIOS files with the hashes in the libretro database (downloaded on first use).
+- **Manage DATs → Check for updates**: says which downloaded DATs are out of date and what changed, and replaces the ones
+  you tick (it used to download everything again). A hint is shown when the last check was 30 days ago.
+- ROM Renamer → Sort into system folders: **Remove folders that are empty (or will be)**, in the preview and undoable.
+  Never inside extracted games, never a system's own folder, and only if really nothing is in it.
+
 ## 1.15.1
 - ROM Optimizer, PS4: a game that gets its update merged in is listed as "Game v1.00; update v1.02 (next row) is merged
   in → CUSA…/" instead of "Game + update v1.02", which read as if the package itself held both.

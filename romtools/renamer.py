@@ -20,7 +20,7 @@ INVALID = re.compile(r'[/\x00]')
 # Characters that break Samba/Windows clients on a CIFS share
 CIFS_UNSAFE = re.compile(r'[\\:*?"<>|]')
 
-FILE, M3U_EDIT = "rename", "m3u-edit"
+FILE, M3U_EDIT, RMDIR = "rename", "m3u-edit", "rmdir"
 
 
 @dataclass
@@ -28,7 +28,7 @@ class Op:
     src: Path
     dst: Path
     reason: str = ""
-    kind: str = FILE            # rename | m3u-edit
+    kind: str = FILE            # rename | m3u-edit | rmdir (an empty folder; src == dst)
     new_text: str | None = None  # for m3u-edit
     enabled: bool = True
     problem: str = ""
@@ -106,7 +106,7 @@ def _right_ext(r) -> str:
     path, ext = r.item.path, r.item.path.suffix
     if r.item.kind in ("archive", "chd", "disc", "package"):
         hit = identify.identify(path)
-        ok = {"archive": (".zip", ".7z", ".rar"), "chd": (".chd",), "package": (".nsp", ".nsz", ".xci", ".xcz", ".pkg"),
+        ok = {"archive": (".zip", ".7z", ".rar"), "chd": (".chd",), "package": (".nsp", ".nsz", ".xci", ".xcz", ".pkg", ".wua"),
               "disc": (".rvz", ".wia", ".gcz", ".ciso", ".wbfs")}[r.item.kind]
         return hit.ext if hit and hit.ext and ext.lower() not in ok else ext
     if r.item.kind != "file":
@@ -327,6 +327,73 @@ def plan_rules_for(paths: list[Path], rules: Rules) -> list[Op]:
     return ops
 
 
+# ---------------------------------------------------------------- empty folders
+
+class FolderTree:
+    """What's in these folders, read once (so the preview can be recalculated without asking the disk or the network
+    again). Extracted games and hidden folders count as content and are never looked into: a game can need its empty
+    folders."""
+
+    def __init__(self, scopes: list[Path], removable: set[Path] = frozenset(), cancel=None):
+        from .identify import extracted_game
+        self.scopes = list(dict.fromkeys(scopes))
+        self.removable = set(removable)         # scopes that may go themselves (a system's own folder may not)
+        self.inside: dict[Path, tuple[set[str], set[str]]] = {}        # folder -> (files and other content, sub-folders)
+        todo = list(self.scopes)
+        while todo:
+            if cancel is not None and cancel.is_set():
+                self.scopes = []
+                return
+            d = todo.pop()
+            if d in self.inside or len(d.parts) > 60:
+                continue
+            files, dirs = set(), set()
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        (dirs if e.is_dir(follow_symlinks=False) and not e.name.startswith(".") else files).add(e.name)
+            except OSError:
+                files.add("(not readable)")
+            if extracted_game(d, {n.lower() for n in files | dirs}) is not None:
+                self.inside[d] = ({"(extracted game)"}, set())
+                continue
+            self.inside[d] = (files, dirs)
+            todo += [d / n for n in dirs]
+
+
+def plan_empty_folders(tree: FolderTree, ops: list[Op]) -> list[Op]:
+    """Folders that are empty, or will be once the enabled moves in ``ops`` are done - innermost first. Only truly empty
+    ones: a hidden file or a picture keeps its folder."""
+    leaving: dict[Path, set[str]] = {}
+    arriving: set[Path] = set()
+    for op in ops:
+        if op.kind == RMDIR or not op.enabled or not op.ok:
+            continue
+        if op.dst.parent != op.src.parent:
+            leaving.setdefault(op.src.parent, set()).add(op.src.name)
+        arriving.add(op.dst.parent)
+        arriving.update(op.dst.parent.parents)
+    out: list[Op] = []
+    gone: dict[Path, bool] = {}
+
+    def walk(d: Path) -> bool:
+        """True if this folder goes."""
+        if d in gone:
+            return gone[d]
+        files, dirs = tree.inside.get(d, ({"?"}, set()))
+        left = [n for n in sorted(dirs) if not walk(d / n)]
+        goes = not left and not files - leaving.get(d, set()) and d not in arriving and (
+            d not in tree.scopes or d in tree.removable)
+        gone[d] = goes
+        if goes:
+            out.append(Op(d, d, "empty once its files are moved" if leaving.get(d) else "empty folder", RMDIR,
+                          system=d.parent.name))
+        return goes
+    for d in tree.scopes:
+        walk(d)
+    return out
+
+
 # ---------------------------------------------------------------- m3u playlists
 
 def _m3u_lines(path: Path) -> list[str]:
@@ -386,6 +453,9 @@ def validate(ops: list[Op]) -> list[Op]:
     seen: dict[str, Op] = {}
     for op in ops:
         op.problem = ""
+        if op.kind == RMDIR:            # whether it's empty by then is checked when applying
+            op.problem = "" if op.src.is_dir() else "folder is gone"
+            continue
         name = op.dst.name
         if not name or name in (".", "..") or INVALID.search(name):
             op.problem = "invalid name"
@@ -413,6 +483,18 @@ def validate(ops: list[Op]) -> list[Op]:
 
 
 # ---------------------------------------------------------------- console packages
+
+def _says_it_all(stem: str, info) -> bool:
+    """Does a file name already say which Wii U title this is, in whatever order and style?"""
+    from . import packages as pk
+    words = set(re.findall(r"[a-z0-9]+", stem.lower()))
+    need = set(re.findall(r"[a-z0-9]+", info.title.lower()))
+    if info.kind == pk.UPDATE:
+        need |= {"update"} if f"v{info.version}" not in words else set()
+    if info.kind == pk.DLC:
+        need |= {"dlc"}
+    return bool(need) and need <= words
+
 
 def plan_packages(folders: list[tuple], keys: Path | None, rename: bool = True,
                   organize: bool = False, only_multi: bool = True, progress=None) -> tuple[list[Op], list[str]]:
@@ -479,6 +561,8 @@ def plan_packages(folders: list[tuple], keys: Path | None, rename: bool = True,
                     low = f.name.lower()
                     if i.platform == "switch" and f"[{i.title_id.lower()}]" in low and f"[v{i.version}]" in low:
                         new_name = f.name       # already has the right ID and version: keep your wording
+                    elif i.platform == "wiiu" and _says_it_all(f.stem, i):
+                        new_name = f.name       # already names the game (and "update" / "DLC"): keep your wording
                     elif re.sub(r"[^a-z0-9]", "", new_name.lower()) == re.sub(r"[^a-z0-9]", "", low):
                         new_name = f.name       # only punctuation would change
                 dst_dir = target_dir or f.parent
@@ -487,7 +571,7 @@ def plan_packages(folders: list[tuple], keys: Path | None, rename: bool = True,
                     continue
                 why = []
                 if new_name != f.name:
-                    why.append(f"{'PS4' if i.platform == 'ps4' else 'Switch'} {i.kind} {i.title_id}")
+                    why.append(f"{pk.PLATFORM_NAMES.get(i.platform, i.platform)} {i.kind} {i.title_id}")
                 if dst_dir != f.parent:
                     why.append(f"into {dst_dir.name}/")
                 ops.append(Op(f, dst, " · ".join(why), system=key, move=dst_dir != f.parent))
@@ -561,6 +645,7 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
     todo = [op for op in validate(ops) if op.enabled and op.ok]
     files = [op for op in todo if op.kind == FILE]
     edits = [op for op in todo if op.kind == M3U_EDIT]
+    dirs = sorted((op for op in todo if op.kind == RMDIR), key=lambda op: -len(op.src.parts))
     JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     jpath = JOURNAL_DIR / f"{stamp}-{uuid.uuid4().hex[:6]}.json"
@@ -571,6 +656,8 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
     for op in edits:
         old = op.src.read_text(encoding="utf-8", errors="replace")
         entries.append(JournalEntry(M3U_EDIT, str(op.src), str(op.dst), old, op.new_text))
+    for op in dirs:                                 # last: the folders are empty by now
+        entries.append(JournalEntry(RMDIR, str(op.src), str(op.dst)))
     _save_journal(jpath, meta, entries)  # written BEFORE touching anything
 
     errors = []
@@ -580,7 +667,14 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
     for i, e in enumerate(entries):
         try:
             src, dst = Path(e.src), Path(e.dst)
-            if e.kind == FILE:
+            if e.kind == RMDIR:
+                try:
+                    os.rmdir(src)                   # refuses anything that isn't empty
+                except OSError:
+                    if src.is_dir():                # something is (still) in it: it stays
+                        continue
+                    raise
+            elif e.kind == FILE:
                 if id(e) in skip:     # couldn't be moved aside (reported above): left as it was
                     continue
                 _make_parent(e, dst)
@@ -648,7 +742,9 @@ def undo(jpath: Path, cache=None) -> list[str]:
             continue
         src, dst = Path(e.src), Path(e.dst)
         try:
-            if e.kind == FILE:
+            if e.kind == RMDIR:
+                src.mkdir(parents=True, exist_ok=True)
+            elif e.kind == FILE:
                 try:
                     _rename(Path(e.via) if e.via else dst, src)
                 except OSError:

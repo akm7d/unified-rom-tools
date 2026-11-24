@@ -94,6 +94,8 @@ def _container(h: bytes, read: Read, size: int) -> Ident | None:
         return Ident("switch", "Switch package", container="package", ext=".nsp")
     if h[0x100:0x104] == b"HEAD" and size > 0x10000 and read(0xF000, 4) == b"HFS0":
         return Ident("switch", "Switch game card image", container="package", ext=".xci")
+    if size > 144 and read(size - 4, 4) == b"\x16\x9f\x52\xd6" and read(size - 16, 8) == struct.pack(">Q", size):
+        return Ident("wiiu", "Wii U archive (.wua)", container="package", ext=".wua")
     if h[:4] == b"\0PBP":
         return Ident("psp", "PSP / PS1 EBOOT", ext=".pbp")
     return None
@@ -397,8 +399,11 @@ def extracted_game(d: Path, names: set[str] | None = None) -> str | None:
             return sysid
     if "exefs" in names and (d / "exefs" / "main.npdm").is_file():
         return "switch"
-    if {"code", "content", "meta"} <= names:
+    if {"code", "meta"} <= names and (d / "meta" / "meta.xml").is_file() or {"code", "content", "meta"} <= names:
         return "wiiu"
+    if "title.tmd" in names and any(n.endswith(".app") for n in names):      # Wii or Wii U, as downloaded
+        from .wiiu import tmd_title
+        return "wiiu" if tmd_title(d) else ""
     if "sys" in names and "files" in names and (d / "sys" / "boot.bin").is_file():
         return "ngc"
     return None

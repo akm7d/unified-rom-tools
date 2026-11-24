@@ -65,6 +65,8 @@ def pfs(tree, sign_key=None):
     struct.pack_into("<I", head, 0x20, BS)
     struct.pack_into("<qqqq", head, 0x30, len(tree), 0, iblocks, 0)
     head[0x370:0x380] = SEED
+    if signed:
+        head[0xB8:0xD8] = mac(bytes(table[:BS]))            # the file table's own signature
     return bytes(head) + bytes(table) + bytes(data) + b"".join(tables)
 
 
@@ -145,6 +147,11 @@ def build_pkg(path, new_crypt=False, passcode="0" * 32, evil=None, kind="gd", ve
                        for _i, _n, fl, _k, o, s in rows[:-1]) + bytes(32)
     h[0x1700:0x1700 + len(digests)] = digests
     h[0x140:0x160] = hashlib.sha256(digests).digest()
+    struct.pack_into(">QQ", h, 0x20, 0x1000, 0x1000)
+    h[0x160:0x180] = hashlib.sha256(bytes(h[0x1000:])).digest()
+    h[0x440:0x460] = hashlib.sha256(bytes(enc)).digest()
+    h[0x460:0x480] = hashlib.sha256(bytes(enc[:BS])).digest()
+    h[0xFE0:0x1000] = hashlib.sha256(bytes(h[:0xFE0])).digest()
     path.write_bytes(bytes(h) + bytes(enc))
     return ({**files, "sub/data.bin": sub["data.bin"]},
             {"sce_sys/param.sfo": sfo, "sce_sys/icon0.png": b"PNG-bytes", "sce_sys/nptitle.dat": secret})
@@ -403,3 +410,57 @@ def test_changed_merge_option_replans_queued_jobs(tmp_path):
     for j, f in cv.replan(queue, cv.Options(ps4_merge=False))[0]:
         cv.take_plan(j, f)
     assert all(j.follows is None and j.func for j in queue)
+
+
+# ---------------------------------------------------------------- integrity
+
+def test_integrity_of_whole_damaged_and_cut_packages(tmp_path):
+    from romtools import integrity
+    for new in (False, True):
+        build_pkg(tmp_path / "g.pkg", new_crypt=new)
+        r = integrity.check(tmp_path / "g.pkg")
+        assert r.state == "intact" and "match their signatures" in r.note and r.when
+    data = (tmp_path / "g.pkg").read_bytes()
+    p = tmp_path / "bad.pkg"
+    missed = []
+    for at in [*range(0x100, 0xF00, 0x111), *range(0x1000, 0x2000, 0x1F1), *range(0x2000, len(data), 0x8F31)]:
+        b = bytearray(data)
+        b[at] ^= 1
+        p.write_bytes(b)
+        if integrity.check(p).state == "intact":
+            missed.append(at)
+    assert not missed                                       # one flipped bit anywhere is noticed
+    p.write_bytes(data[:-5000])
+    assert integrity.check(p).state == "damaged"
+
+
+def test_integrity_of_an_official_package(tmp_path):
+    """Its game data can't be opened, but the header names a digest of all of it."""
+    from romtools import integrity
+    build_pkg(tmp_path / "o.pkg", passcode="A" * 32)
+    assert integrity.check(tmp_path / "o.pkg").state == "intact"
+    b = bytearray((tmp_path / "o.pkg").read_bytes())
+    b[-70000] ^= 1
+    (tmp_path / "o.pkg").write_bytes(b)
+    assert integrity.check(tmp_path / "o.pkg").state == "unknown"        # can't tell which of the two is wrong
+
+
+def test_integrity_is_remembered_until_the_package_changes(tmp_path):
+    from romtools import scanner
+    from romtools.cache import HashCache
+    from romtools.config import get_config
+    (tmp_path / "ps4").mkdir()
+    p = tmp_path / "ps4" / "g.pkg"
+    build_pkg(p)
+    cache = HashCache(tmp_path / "c.sqlite")
+    sc = scanner.make_scanner(get_config(), cache)
+    item, = scanner.enumerate_system("ps4", tmp_path / "ps4")
+    r = sc.check_package(item)
+    assert r.status == scanner.IDENTIFIED and "intact" not in r.note
+    assert "intact" in sc.check_integrity(r).note and "intact" in sc.check_package(item).note
+    b = bytearray(p.read_bytes())
+    b[0x2000 + 3 * BS] ^= 1
+    p.write_bytes(b)
+    os.utime(p, (1, 1))
+    assert "intact" not in sc.check_package(item).note
+    assert sc.check_integrity(r).status == scanner.BAD and sc.check_package(item).status == scanner.BAD

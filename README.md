@@ -127,6 +127,15 @@ but must be re-created from the original .gdi/.cue.
 Right-click rows for: open folder, copy paths / SHA-1s / DAT names, re-check. **Export report** writes a CSV
 (per track hashes) or a plain-text summary.
 
+**Wii U**: `.wua` archives and extracted games are identified from their own data (no keys needed); `.wud` / `.iso` disc images
+are checked with Redump's DAT, `.wux` can't be checked.
+
+**Collection** (toolbar):
+- **Check package integrity**: reads whole PS4 / Switch packages and compares them with the hashes and signatures they
+  carry, without extracting. Proves the data is as it was packed, not that a game runs.
+- **Duplicates**: identical copies, the same game with other data, and other versions; ticked copies go to the trash.
+- **Missing discs** of multi-disc games, and **BIOS files** against the libretro database's hashes.
+
 ## ROM Renamer (preview first, undoable)
 
 One panel with four sections; tick the ones you want and press **Build preview** (F5) for one combined preview, or
@@ -135,7 +144,8 @@ If two sections would rename the same file, the DAT name wins, then the package 
 *Reason* column says which section each change comes from.
 
 - **Sort into system folders** (off by default): moves loose or misplaced ROMs into their system's folder, using the one
-  you already have or making it. Tracks, playlists and saves go along; extensions the system doesn't use can be fixed.
+  you already have or making it. Tracks, playlists and saves go along; extensions the system doesn't use can be fixed,
+  and folders left empty removed.
 - **Official names from DATs (No-Intro / Redump)**: renames verified-good ROMs to their exact DAT name (identified
   by hash, shares the Verifier's cache). By default it skips CHDs ROM Verifier hasn't checked yet; untick that to
   check them now, and choose whether they're unpacked in RAM or on the SSD.

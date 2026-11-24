@@ -33,6 +33,7 @@ one in the builds' `tools/` folder.
 |---|---|
 | **[Redump](http://redump.org)** | disc-game DATs (PlayStation, Dreamcast, GameCube, Xbox, …) |
 | **[No-Intro](https://no-intro.org)**, via the **[libretro-database](https://github.com/libretro/libretro-database)** mirror | cartridge and handheld DATs |
+| **[libretro-database](https://github.com/libretro/libretro-database)** System.dat | known BIOS hashes (*BIOS files*, downloaded on first use) |
 | **[blawar/titledb](https://github.com/blawar/titledb)** | newest official Switch update versions (*Check game updates*) |
 | **[orbispatches.com](https://orbispatches.com)** | PS4 patch pages (opened in your browser, never scraped) |
 | **[MAME releases on GitHub](https://github.com/mamedev/mame/releases)** | chdman version check and updates |
@@ -43,6 +44,7 @@ one in the builds' `tools/` folder.
 * **[Switchbrew](https://switchbrew.org)** and the hactool / LibHac / nstool sources: documentation of the Switch
   NSP, XCI, NCA, CNMT, NACP and RomFS formats that the package reader follows.
 * **[LibOrbisPkg](https://github.com/maxton/LibOrbisPkg)** and the shadPS4 sources: how the PS4 PFS / PFSC formats are laid out.
+* **[ZArchive](https://github.com/Exzap/ZArchive)** by Exzap: the layout of Cemu's `.wua` archives.
 * **[PS4 Developer Wiki](https://www.psdevwiki.com/ps4/)**: the PS4 PKG and PARAM.SFO formats.
 * **[PS4PKGTool](https://github.com/pearlxcore/PS4PKGTool)** by pearlxcore: the ideas for PS4 package
   identification, renaming and update checks.

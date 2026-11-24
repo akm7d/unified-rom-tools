@@ -94,3 +94,40 @@ def test_move_never_replaces_a_file_of_the_same_name(tmp_path):
     c = tmp_path / "a" / "game.PKG"
     rn._rename(a, c)                    # only the case: still works
     assert c.read_bytes() == b"new"
+
+
+def test_empty_folders_are_found_removed_and_made_again(tmp_path):
+    from romtools import renamer as rn
+    lib = tmp_path / "lib"
+
+    def put(rel, data=b"x"):
+        f = lib / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(data)
+        return f
+    a = put("dl/deep/er/a.sfc")
+    put("dl/pic/cover.jpg")
+    put("hid/.hidden")
+    put("ps3/Game/PS3_GAME/PARAM.SFO")
+    (lib / "ps3/Game/PS3_GAME/USRDIR/empty").mkdir(parents=True)        # a game's own empty folder
+    (lib / "old/older").mkdir(parents=True)
+    (lib / "snes").mkdir()                                              # a system's folder stays, empty or not
+    (lib / "snes/nothing").mkdir()
+    others = {lib / "dl", lib / "hid", lib / "old"}
+    tree = rn.FolderTree([lib / "snes", lib / "ps3", *sorted(others)], others)
+    move = rn.Op(a, lib / "snes" / "a.sfc", move=True)
+    ops = rn.validate([move])
+    dirs = rn.plan_empty_folders(tree, ops)
+    assert [str(o.src.relative_to(lib)).replace("\\", "/") for o in dirs] == \
+        ["snes/nothing", "dl/deep/er", "dl/deep", "old/older", "old"]
+    move.enabled = False                                                # not moved: its folders stay
+    assert {o.src.name for o in rn.plan_empty_folders(tree, ops)} == {"nothing", "older", "old"}
+    move.enabled = True
+    put("old/older/just arrived.txt")                                   # filled after the preview: it stays too
+    j, errs = rn.apply(ops + dirs)
+    assert not errs
+    assert not (lib / "dl/deep").exists() and not (lib / "snes/nothing").exists()
+    assert (lib / "old/older/just arrived.txt").is_file() and (lib / "dl/pic/cover.jpg").is_file()
+    assert (lib / "ps3/Game/PS3_GAME/USRDIR/empty").is_dir()
+    assert rn.undo(j) == []
+    assert a.is_file() and (lib / "snes/nothing").is_dir()

@@ -49,12 +49,15 @@ class DatDialog(QDialog):
 
         self.btn_dl = QPushButton(QIcon.fromTheme("download"), "Download selected")
         self.btn_dl_all = QPushButton(QIcon.fromTheme("folder-download"), "Download all missing")
-        self.btn_update = QPushButton(QIcon.fromTheme("view-refresh"), "Update all")
+        self.btn_update = QPushButton(QIcon.fromTheme("view-refresh"), "Check for updates…")
+        self.btn_update.setToolTip("Asks Redump and the No-Intro mirror whether your downloaded DATs are out of date and "
+                                   "shows what changed. You choose which ones to replace. DATs you added yourself are "
+                                   "left alone.")
         self.btn_import = QPushButton(QIcon.fromTheme("document-import"), "Add DAT file…")
         self.btn_clear = QPushButton(QIcon.fromTheme("edit-clear"), "Remove DATs")
         self.btn_dl.clicked.connect(lambda: self._download(self._selected_folders()))
         self.btn_dl_all.clicked.connect(lambda: self._download(self._missing()))
-        self.btn_update.clicked.connect(lambda: self._download(self._mapped()))
+        self.btn_update.clicked.connect(self._check_updates)
         self.btn_import.clicked.connect(self._import)
         self.btn_clear.clicked.connect(self._clear)
         row = QHBoxLayout()
@@ -209,6 +212,49 @@ class DatDialog(QDialog):
         self.worker.failed.connect(lambda e: (self._busy(False), QMessageBox.critical(self, "Download", e)))
         self.worker.start()
 
+    def _check_updates(self):
+        from .. import datmanager as dm
+        have = dm.downloaded_dats()
+        if not have:
+            QMessageBox.information(self, "DAT updates", "No DATs have been downloaded yet.")
+            return
+        self._busy(True, len(have))
+
+        def job(w: Worker):
+            out = []
+            for i, (sysdef, _p) in enumerate(have):
+                if w.cancel.is_set():
+                    break
+                w.progress.emit(i, len(have), f"Checking {sysdef.name}…", 0)
+                out.append(dm.check_update(sysdef))
+            return out
+
+        def finished(res):
+            self._busy(False)
+            new = [u for u in res if u.state == "new"]
+            bad = [u for u in res if u.state == "error"]
+            self.status.setText(f"{len(res)} DAT(s) checked: {len(new)} out of date, "
+                                f"{sum(u.state == 'current' for u in res)} up to date" +
+                                (f", {len(bad)} couldn't be checked" if bad else ""))
+            if new:
+                chosen = DatUpdateDialog(res, self)
+                ok = chosen.exec() == QDialog.DialogCode.Accepted
+                take = chosen.ticked() if ok else []
+                for u in new:
+                    dm.apply_update(u) if u in take else dm.discard_update(u)
+                if take:
+                    self._fill()
+                    self.status.setText(f"{len(take)} DAT(s) updated. The next scan uses them (hashes are kept, so "
+                                        f"nothing is read again).")
+            elif bad:
+                QMessageBox.warning(self, "DAT updates", "\n".join(f"{u.system.name}: {u.note}" for u in bad))
+
+        self.worker = Worker(job, parent=self)
+        self.worker.progress.connect(lambda d, t, msg, _f: (self.progress.setValue(d), self.status.setText(msg)))
+        self.worker.done.connect(finished)
+        self.worker.failed.connect(lambda e: (self._busy(False), QMessageBox.critical(self, "DAT updates", e)))
+        self.worker.start()
+
     def _import(self):
         folders = self._selected_folders()
         if not folders:
@@ -248,3 +294,39 @@ class DatDialog(QDialog):
         if self.worker and self.worker.isRunning():
             return
         super().reject()
+
+
+class DatUpdateDialog(QDialog):
+    """What changed in the DATs that are out of date; tick the ones to replace."""
+
+    def __init__(self, updates, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("DAT updates")
+        self.resize(720, 380)
+        self.updates = sorted(updates, key=lambda u: ("new", "error", "current").index(u.state))
+        self.table = QTableWidget(len(self.updates), 2)
+        self.table.setHorizontalHeaderLabels(["DAT", "Result"])
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        for r, u in enumerate(self.updates):
+            it = QTableWidgetItem(u.system.name)
+            if u.state == "new":
+                it.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                it.setCheckState(Qt.CheckState.Checked)
+            self.table.setItem(r, 0, it)
+            self.table.setItem(r, 1, QTableWidgetItem(("couldn't be checked: " if u.state == "error" else "") + u.note))
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Replace ticked")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Newer versions of these DATs are available. “Changed” games have different data now, so a "
+                             "ROM's result can change."))
+        lay.addWidget(self.table, 1)
+        lay.addWidget(bb)
+
+    def ticked(self):
+        return [u for r, u in enumerate(self.updates)
+                if u.state == "new" and self.table.item(r, 0).checkState() == Qt.CheckState.Checked]

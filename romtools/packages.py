@@ -20,7 +20,9 @@ from pathlib import Path
 
 PS4_EXTS = {".pkg"}
 SWITCH_EXTS = {".nsp", ".nsz", ".xci", ".xcz"}
-PACKAGE_EXTS = PS4_EXTS | SWITCH_EXTS
+WIIU_EXTS = {".wua"}
+PACKAGE_EXTS = PS4_EXTS | SWITCH_EXTS | WIIU_EXTS
+PLATFORM_NAMES = {"ps4": "PS4", "switch": "Switch", "wiiu": "Wii U"}
 
 GAME, UPDATE, DLC, APP = "Game", "Update", "DLC", "App"
 
@@ -41,7 +43,7 @@ class Content:
 
 @dataclass
 class PackageInfo:
-    platform: str              # ps4 | switch
+    platform: str              # ps4 | switch | wiiu
     path: str
     title: str = ""
     title_id: str = ""         # PS4: CUSA…; Switch: the main content's own ID
@@ -56,6 +58,7 @@ class PackageInfo:
     backport: bool = False
     contents: list[Content] = field(default_factory=list)
     note: str = ""             # e.g. "no prod.keys: names not read"
+    product: str = ""          # Wii U: "WUP-P-BCZE"
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -600,6 +603,12 @@ def is_extracted_switch(d: Path) -> bool:
         return False
 
 
+def is_extracted_package(d: Path) -> bool:
+    """An extracted game folder that can be identified from its own data (Switch, Wii U)."""
+    from . import wiiu
+    return is_extracted_switch(d) or wiiu.is_extracted(d)
+
+
 def iter_packages(scope: Path, max_depth: int = 4, skip: set[str] | None = None):
     """Package files (PS4 PKG, Switch NSP/XCI/…) and extracted Switch game folders under ``scope``, without
     walking into the extracted games' thousands of romfs files. ``skip``: top-level folder names to leave out."""
@@ -613,7 +622,7 @@ def iter_packages(scope: Path, max_depth: int = 4, skip: set[str] | None = None)
             if depth == 0 and skip and dn in skip:
                 continue
             sub = here / dn
-            if is_extracted_switch(sub):
+            if is_extracted_package(sub):
                 yield sub
             elif depth + 1 < max_depth and not dn.startswith("."):
                 keep.append(dn)
@@ -650,8 +659,21 @@ def read_switch_dir(d: Path) -> PackageInfo:
     return info
 
 
-def read(path: Path, keys_path: Path | None = None) -> PackageInfo:
+def package_ext(path: Path) -> str:
+    """Which kind of package a file is, as its extension - by its content when it has none or another one."""
     ext = path.suffix.lower()
+    if ext in PACKAGE_EXTS or path.is_dir():
+        return ext
+    from .identify import identify
+    hit = identify(path)
+    return hit.ext if hit and hit.container == "package" else ext
+
+
+def read(path: Path, keys_path: Path | None = None) -> PackageInfo:
+    ext = package_ext(path)
+    if ext in WIIU_EXTS or path.is_dir() and not is_extracted_switch(path):
+        from . import wiiu
+        return wiiu.read(path)
     if path.is_dir():
         try:
             return read_switch_dir(path)
@@ -735,6 +757,15 @@ def suggested_name(info: PackageInfo, base_title: str = "", base_sfo_title: str 
             return f"{title} [{info.title_id}] (DLC - {name})" if base_title else \
                 f"{clean_title(info.title)} [{info.title_id}] (DLC)"
         return f"{title} [{info.title_id}]"
+    if info.platform == "wiiu":
+        s = title + (f" ({info.region})" if info.region and "," not in info.region else "")
+        if info.kind == UPDATE:
+            return f"{s} (Update {info.version_str})"
+        if info.kind == DLC:
+            return f"{s} (DLC)"
+        upd = max((c.version for c in info.contents[1:] if c.kind == UPDATE), default=None)
+        return s + (f" (+Update v{upd})" if upd is not None else "") + (
+            " (+DLC)" if any(c.kind == DLC for c in info.contents[1:]) else "")
     s = f"{title} [{info.title_id}][v{info.version}]"
     if info.kind == DLC:
         s = (f"{title} [{info.title_id}][v{info.version}] (DLC)" if base_title else
@@ -821,6 +852,9 @@ def _upd_version(i: PackageInfo) -> int:
 
 
 def _group_id(platform: str, title_id: str, kind: str) -> str:
+    if platform == "wiiu":
+        from .wiiu import base_of
+        return base_of(title_id)
     if platform == "switch":
         return f"{_base_of(int(title_id, 16), kind):016X}"
     return title_id
@@ -831,11 +865,13 @@ def describe(info: PackageInfo) -> str:
     bits = [info.kind]
     if info.kind.startswith(GAME) and info.platform == "switch":
         bits = [info.kind]
-    if info.version_str and not (info.platform == "switch" and info.kind.startswith(GAME) and info.version == 0):
+    if info.version_str and not (info.platform in ("switch", "wiiu") and info.kind.startswith(GAME) and info.version == 0):
         bits.append(f"v{info.version_str.lstrip('v')}" if info.platform == "ps4" else info.version_str)
     if info.display_version:
         bits.append(f"({info.display_version})")
     bits.append(info.title_id)
+    if info.product:
+        bits.append(info.product)
     if info.region:
         bits.append(info.region)
     if info.firmware:
