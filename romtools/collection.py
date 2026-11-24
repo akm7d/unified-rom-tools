@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import packages
+from .compat import lies_inside
 from .scanner import (BAD, ERROR, IDENTIFIED, MISNAMED, MISPLACED, MODIFIED, NODAT, PARTIAL, SKIPPED, UNKNOWN, VERIFIED,
-                      Result)
+                      Result, stamp_of)
 
 IDENTICAL, SAME_GAME, VERSIONS = "identical", "same game", "other versions"
 KIND_HELP = {
@@ -45,7 +46,53 @@ class Copy:
             return "one game inside an archive of several"
         if self.path.is_dir():
             return "an extracted game folder"
+        if any(not lies_inside(p, self.path.parent) for p in self.result.item.parts):
+            return "its tracks lie outside its folder"
         return ""
+
+    def problem(self) -> str:
+        """Why it isn't what was scanned any more, or ""."""
+        try:
+            now = stamp_of(self.result.item)
+        except OSError:
+            return "isn't there any more"
+        was = self.result.item.stamp
+        if was is None or was[0] != now[0] or abs(was[1] - now[1]) > 1e-3:
+            return "has changed since it was scanned"
+        return ""
+
+
+def _identity(path: Path) -> tuple | None:
+    try:
+        st = path.stat()
+        return (st.st_dev, st.st_ino) if st.st_ino else None
+    except OSError:
+        return None
+
+
+def one_per_file(rs: list[Result]) -> list[Result]:
+    """Several results can be one and the same file, reached through a link: only the real one counts."""
+    out: list[Result] = []
+    seen: dict[tuple, int] = {}
+    for r in rs:
+        key = _identity(r.item.path)
+        key = (*key, r.item.member) if key else (str(r.item.path), r.item.member)
+        if key not in seen:
+            seen[key] = len(out)
+            out.append(r)
+            continue
+        have = out[seen[key]].item.path
+        if _linked(have) and not _linked(r.item.path):
+            out[seen[key]] = r
+    return out
+
+
+def _linked(path: Path) -> bool:
+    """Is it, or a folder above it, a link?"""
+    try:
+        return path.resolve() != path.absolute()
+    except OSError:
+        return True
 
 
 @dataclass
@@ -118,6 +165,9 @@ def duplicates(results: list[Result], versions: bool = True) -> list[Group]:
         for members in groups.values():
             if len({(m.item.path, m.item.member) for m in members}) > 1:
                 used.update(map(id, members))
+                members = one_per_file(members)
+                if len(members) < 2:
+                    continue
                 out.append(_group(kind, title(members[0]), _system(members[0]), members))
 
     def pkg(r: Result) -> dict | None:

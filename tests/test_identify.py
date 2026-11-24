@@ -378,3 +378,59 @@ def test_package_scope_is_the_whole_console_folder(lib):
         assert library.package_folders(get_config(), [pick]) == [("ps4", lib / "ps4", set())]
     f = put(lib / "dl" / "a.pkg", b"x")
     assert library.package_folders(get_config(), [f]) == [(library.OTHER, lib / "dl", set())]
+
+
+def test_linked_folders_are_searched_but_not_in_circles(lib, tmp_path):
+    n, d = GAMES["gba"]
+    real = put(tmp_path / "elsewhere" / "Game" / n, d).parent
+    (lib / "gba").mkdir()
+    (lib / "gba" / "Game").symlink_to(real)
+    (lib / "gba" / "up").symlink_to(lib / "gba")                # leads back up
+    (real / "self").symlink_to(real)
+    (real / "other").symlink_to(lib / "gba")
+    res = [r for r in scan(lib) if r.game == "Advance Game (USA)"]
+    assert 1 <= len(res) <= 3 and all(r.status == scanner.VERIFIED for r in res)
+    assert any(r.item.path == lib / "gba" / "Game" / n for r in res)
+
+
+def test_packages_inside_extracted_games_are_not_the_librarys(lib):
+    from romtools import packages as pk
+    g = lib / "ps4" / "CUSA1"
+    put(g / "sce_sys" / "param.sfo", b"x")
+    put(g / "data" / "a" / "inner.pkg", b"x")
+    put(lib / "ps4" / "x" / "y" / "real.pkg", b"x")
+    assert [str(p.relative_to(lib / "ps4")).replace("\\", "/") for p in pk.iter_packages(lib / "ps4", 13)] == ["x/y/real.pkg"]
+    assert list(pk.iter_packages(lib, 13, {"ps4"})) == []
+    (lib / "ps4" / "loop").symlink_to(lib / "ps4")
+    assert len(list(pk.iter_packages(lib / "ps4", 13))) == 1
+
+
+def test_arcade_and_bios_folders_are_left_alone(lib):
+    with zipfile.ZipFile(put(lib / "arcade" / "nss.zip", b""), "w") as z:
+        z.writestr("ic1.bin", snes(88))
+        z.writestr("sound.bin", rnd(3000, 4))
+    put(lib / "MAME" / "sub" / "rom.bin", GAMES["snes"][1])
+    put(lib / "bios" / "my_name.bin", GAMES["gba"][1])
+    with zipfile.ZipFile(put(lib / "stuff" / "mixed.zip", b""), "w") as z:      # several files, one recognised, no DAT
+        z.writestr("a.bin", snes(89))
+        z.writestr("b.bin", rnd(3000, 5))
+    put(lib / "stuff" / "lost.bin", GAMES["n64"][1])
+    res = scan(lib)
+    sorting, notes = renamer.plan_sorting(res, lib, get_config())
+    ops = renamer.merge(renamer.plan_from_results(res), sorting)
+    assert [(o.src.name, str(o.dst.relative_to(lib)).replace("\\", "/")) for o in ops] == [("lost.bin", "n64/N Game (USA).z64")]
+    assert any("left alone" in n for n in notes)
+    rules = renamer.Rules(underscores=True)
+    assert [o.src.name for o in renamer.plan_from_rules({"b": lib / "bios", "s": lib / "stuff"}, rules)] == []
+
+
+def test_bios_from_a_dat_keeps_its_name(lib):
+    bios = rnd(16384, 77)
+    (DAT_DIR / (DATS["gba"] + ".dat")).write_text(dat(DATS["gba"], [("[BIOS] Game Boy Advance (World)", [
+        ("[BIOS] Game Boy Advance (World).gba", bios)])]))
+    r = one(lib, put(lib / "gba" / "gba_bios.bin", bios))
+    assert r.status == scanner.VERIFIED and "BIOS" in r.note
+    assert renamer.plan_from_results([r]) == [] and renamer.plan_sorting([r], lib, get_config())[0] == []
+    put(lib / "gba" / "gba_bios.bin", b"")
+    r = one(lib, put(lib / "loose" / "gba_bios.bin", bios))
+    assert renamer.plan_sorting([r], lib, get_config())[0] == []

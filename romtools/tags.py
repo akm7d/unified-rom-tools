@@ -17,6 +17,7 @@ import re
 import threading
 from pathlib import Path
 
+from .compat import file_lock
 from .config import DATA_DIR
 
 TAGS = {
@@ -62,32 +63,47 @@ def content_key(result) -> str:
 
 
 class MarkStore:
-    """Your manual tags, saved in ~/.local/share/romtools/marks.json."""
+    """Your manual tags, saved in ~/.local/share/romtools/marks.json. Several windows can use it at once: changes are
+    made to what's on the disk, and tags set by another window are picked up."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or DATA_DIR / "marks.json"
         self._lock = threading.Lock()
         self.marks: dict[str, dict] = {}
+        self._stamp: tuple | None = None
+        self._refresh()
+
+    def _refresh(self) -> None:
         try:
-            self.marks = json.loads(self.path.read_text(encoding="utf-8"))
+            st = self.path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+            if stamp == self._stamp:
+                return
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                self.marks, self._stamp = data, stamp
         except (OSError, ValueError):
-            self.marks = {}
+            pass
 
     def get(self, key: str) -> str | None:
-        m = self.marks.get(key)
+        with self._lock:
+            self._refresh()
+            m = self.marks.get(key)
         return None if m is None else m.get("tag", "")
 
     def set(self, key: str, tag: str | None, name: str = "") -> None:
         """tag None = forget the mark (back to name detection); "" = explicitly not modified."""
-        with self._lock:
+        with self._lock, file_lock(self.path):
+            self._refresh()
             if tag is None:
                 self.marks.pop(key, None)
             else:
                 self.marks[key] = {"tag": tag, "name": name}
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
+            tmp = self.path.with_name(f"marks.{os.getpid()}.tmp")
             tmp.write_text(json.dumps(self.marks, indent=1, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self.path)
+            st = self.path.stat()
+            self._stamp = (st.st_mtime_ns, st.st_size)
 
 
 def apply(result, store: MarkStore | None, modified_status: str, taggable: set[str]) -> None:

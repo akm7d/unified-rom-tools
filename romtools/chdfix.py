@@ -17,7 +17,6 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import subprocess
 import tempfile
 import threading
 import uuid
@@ -43,6 +42,7 @@ class FixResult:
     message: str
     entries: list[Entry] = field(default_factory=list)
     info: dict = field(default_factory=dict)
+    trashed: bool = False               # the original went to the trash (else it's still there under another name)
 
 
 def temp_root(ram_mode: bool, ssd_dir: Path) -> Path:
@@ -60,10 +60,7 @@ def _overall(stage: str, f: float) -> float:
 
 
 def _run(argv: list[str], stage: str, cancel: threading.Event, log: Log, prog: Prog) -> None:
-    p = Process(argv, log, lambda f: prog(stage, f))
-    watcher = threading.Thread(target=lambda: (cancel.wait(), p.cancel()), daemon=True)
-    watcher.start()
-    rc = p.run()
+    rc = Process(argv, log, lambda f: prog(stage, f)).run_until(cancel)
     if cancel.is_set():
         raise Cancelled()
     if rc != 0:
@@ -169,13 +166,14 @@ def fix(path: Path, target: str, ram_mode: bool, ssd_dir: Path, cancel: threadin
         except OSError:
             os.rename(parked, path)
             raise RuntimeError("couldn't put the new CHD in place, so the original was left as it was")
+        where = "original moved to trash"
         if not _trash(parked):
-            log(f"== Couldn't move the original to the trash; it was kept as {parked.name}")
+            where = f"the original couldn't be moved to the trash, so it was kept as “{parked.name}”"
         progress(1.0, "done")
-        log(f"== Done: {path.name} is now a {target.upper()} CHD (original is in the trash)")
+        log(f"== Done: {path.name} is now a {target.upper()} CHD; {where}")
         entries[0].name = "ISO.iso" if target == "dvd" else "BIN.bin"
-        return FixResult(path, True, f"converted to {target.upper()}; original moved to trash", entries,
-                         new_info.as_dict())
+        return FixResult(path, True, f"converted to {target.upper()}; {where}", entries, new_info.as_dict(),
+                         trashed=where == "original moved to trash")
     except Cancelled:
         log("== Cancelled — original unchanged")
         return FixResult(path, False, "cancelled — original unchanged")

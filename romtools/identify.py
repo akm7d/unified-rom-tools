@@ -360,12 +360,12 @@ def identify_archive(path: Path) -> Ident | None:
                         return hit
             return None
         import subprocess
-        from .hashing import SEVENZIP, _7z_list
+        from .hashing import SEVENZIP, _7z_list, member_command
         if not SEVENZIP:
             return None
         for member, size in sorted(_7z_list(path), key=lambda m: -m[1])[:2]:
-            proc = subprocess.Popen([SEVENZIP, "e", "-so", "-bd", str(path), member],
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(member_command(path, member), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    stdin=subprocess.DEVNULL)
             try:
                 hit = from_bytes(proc.stdout.read(INNER_MAX), size)
             finally:

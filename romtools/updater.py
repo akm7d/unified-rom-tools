@@ -60,12 +60,12 @@ class PackageInfo:
 def package_info(binary: str = "/usr/bin/chdman") -> PackageInfo:
     if not shutil.which("pacman") or not Path(binary).exists():
         return PackageInfo(None, None, None)
-    own = subprocess.run(["pacman", "-Qqo", binary], capture_output=True, text=True).stdout.strip() or None
+    own = subprocess.run(["pacman", "-Qqo", binary], capture_output=True, encoding="utf-8", errors="replace").stdout.strip() or None
     inst = repo = None
     if own:
-        q = subprocess.run(["pacman", "-Q", own], capture_output=True, text=True).stdout.split()
+        q = subprocess.run(["pacman", "-Q", own], capture_output=True, encoding="utf-8", errors="replace").stdout.split()
         inst = q[1] if len(q) > 1 else None
-        si = subprocess.run(["pacman", "-Si", own], capture_output=True, text=True).stdout
+        si = subprocess.run(["pacman", "-Si", own], capture_output=True, encoding="utf-8", errors="replace").stdout
         for line in si.splitlines():
             if line.startswith("Version"):
                 repo = line.split(":", 1)[1].strip()
@@ -194,7 +194,7 @@ def install_official_windows(tag: str, log, cancel) -> Path:
         fetch(asset, work / asset, progress=True)
         log("== Checking SHA-256 against MAME's published SHA256SUMS")
         want = ""
-        for line in (work / "SHA256SUMS").read_text().splitlines():
+        for line in (work / "SHA256SUMS").read_text(encoding="utf-8", errors="replace").splitlines():
             parts = line.split()
             if len(parts) == 2 and parts[1].lstrip("*") == asset:
                 want = parts[0].lower()
@@ -207,7 +207,7 @@ def install_official_windows(tag: str, log, cancel) -> Path:
         log(f"   {asset}: OK")
         log("== Extracting chdman.exe")
         r = subprocess.run([SEVENZIP, "e", "-y", f"-o{work}", str(work / asset), "chdman.exe"],
-                           capture_output=True, text=True)
+                           capture_output=True, encoding="utf-8", errors="replace")
         exe = work / "chdman.exe"
         if r.returncode != 0 or not exe.is_file():
             raise RuntimeError(f"couldn't extract chdman.exe: {r.stderr.strip() or r.stdout.strip()}")

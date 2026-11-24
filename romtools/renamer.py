@@ -6,14 +6,17 @@ recorded in a JSON journal first, so it can be undone later.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
+from . import textfile
+from .compat import lies_inside
 from .config import JOURNAL_DIR
 
 INVALID = re.compile(r'[/\x00]')
@@ -30,6 +33,7 @@ class Op:
     reason: str = ""
     kind: str = FILE            # rename | m3u-edit | rmdir (an empty folder; src == dst)
     new_text: str | None = None  # for m3u-edit
+    raw: bytes | None = None    # … and as bytes, in the playlist's own encoding and line ends
     enabled: bool = True
     problem: str = ""
     system: str = ""
@@ -46,7 +50,8 @@ def plan_from_results(results, use_dat_ext: bool = False) -> list[Op]:
     from .scanner import MISNAMED, MISPLACED
     ops = []
     for r in results:
-        if r.status not in (MISNAMED, MISPLACED) or r.found_by == "package" or r.game == r.item.stem or not r.game or r.item.kind == "folder" or getattr(r.item, "member", ""):
+        if r.status not in (MISNAMED, MISPLACED) or r.found_by == "package" or r.game == r.item.stem or not r.game \
+                or r.item.kind == "folder" or r.item.member or r.item.keep:
             continue  # a game inside a multi-game archive: renaming the archive after it would be wrong
         ext = r.item.path.suffix
         if use_dat_ext and r.item.kind == "file" and r.entries and r.entries[0].rom and not r.entries[0].headerless:
@@ -147,8 +152,14 @@ def plan_sorting(results, root: Path, cfg, by_header: bool = True, fix_ext: bool
             (r.found, _DISC_PART.sub("", r.game or r.item.stem).lower()) for r in rs)
     ops: list[Op] = []
     mixed = folders = 0
+    alone: set[str] = set()
     for path, rs in groups.items():
         r = rs[0]
+        if r.item.keep or r.game.startswith("[BIOS]"):
+            alone.update([r.item.keep] if r.item.keep else [])
+            continue
+        if r.item.kind == "archive" and (len(rs) > 1 or len(r.entries) > 1) and any(x.found_by == "header" for x in rs):
+            continue                            # one recognised file among several (an arcade set …) doesn't say enough
         if r.item.kind == "folder" or path.is_dir():
             folders += bool(r.misplaced)
             continue
@@ -174,14 +185,17 @@ def plan_sorting(results, root: Path, cfg, by_header: bool = True, fix_ext: bool
         how = {"hash": f"DAT match: {r.dat}", "package": "its own package data"}.get(
             r.found_by, "its own header" + (f" (“{r.ident.title}”)" if r.ident is not None and r.ident.title else ""))
         ops.append(Op(path, dest / name, f"Sort: {how}", system=r.found, move=True))
+        if not all(lies_inside(p, path.parent) for p in r.item.parts):
+            ops.pop()                           # tracks outside the sheet's own folder: leave the set alone
+            continue
         for part in r.item.parts:               # a .cue / .gdi keeps its tracks, in the same places around it
             try:
-                rel = part.relative_to(path.parent)
-            except ValueError:
-                ops.pop()                       # tracks outside the sheet's own folder: leave the set alone
-                ops = [o for o in ops if o.src not in r.item.parts]
-                break
+                rel = part.resolve().relative_to(path.parent.resolve())
+            except (ValueError, OSError):
+                continue
             ops.append(Op(part, dest / rel, f"Sort: goes with {path.name}", system=r.found, move=True))
+    if alone:
+        notes.append("files in BIOS, arcade and similar folders are left alone")
     if mixed:
         notes.append(f"{mixed} archive(s) hold games of several systems: not sorted")
     if folders:
@@ -291,7 +305,10 @@ def plan_from_rules(folders, rules: Rules) -> list[Op]:
     from .scanner import IGNORE_EXTS, _cue_parts, _gdi_parts
     ops = []
     entries = [(k, f, set()) for k, f in folders.items()] if isinstance(folders, dict) else folders
+    from .systems import left_alone
     for system, folder, skip in entries:
+        if left_alone(folder.name) == "bios":       # emulators look for these files by name
+            continue
         try:
             children = sorted(folder.iterdir(), key=lambda p: p.name.lower())
         except OSError:
@@ -396,10 +413,6 @@ def plan_empty_folders(tree: FolderTree, ops: list[Op]) -> list[Op]:
 
 # ---------------------------------------------------------------- m3u playlists
 
-def _m3u_lines(path: Path) -> list[str]:
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-
 def add_playlist_ops(ops: list[Op]) -> list[Op]:
     """Add m3u edits for renamed discs, and rename playlists whose discs all got renamed."""
     renames = {op.src: op.dst for op in ops if op.kind == FILE and op.enabled}
@@ -409,9 +422,10 @@ def add_playlist_ops(ops: list[Op]) -> list[Op]:
     for folder in folders:
         for m3u in sorted(folder.glob("*.m3u")):
             try:
-                lines = _m3u_lines(m3u)
+                sheet = textfile.read(m3u)
             except OSError:
                 continue
+            lines = sheet.text.splitlines(keepends=True)         # its own line ends stay as they are
             refs = [m3u.parent / ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
             if not any(r in renames for r in refs):
                 continue
@@ -428,7 +442,7 @@ def add_playlist_ops(ops: list[Op]) -> list[Op]:
                         new_lines.append(line.replace(ref, os.path.relpath(to, home)))
                         continue
                 new_lines.append(line)
-            text = "\n".join(new_lines) + "\n"
+            text = "".join(new_lines)
             m3u_dst = home / m3u.name
             renamed_discs = [renames[r] for r in refs if r in renames]
             if m3u in renames:  # already renamed by a rule: fold it into this single edit op
@@ -442,7 +456,7 @@ def add_playlist_ops(ops: list[Op]) -> list[Op]:
                     m3u_dst = cand
             out.append(Op(m3u, m3u_dst, "update playlist" + (" + move" if home != m3u.parent else
                                                              " + rename" if m3u_dst != m3u else ""),
-                          M3U_EDIT, text, system="", move=home != m3u.parent))
+                          M3U_EDIT, text, sheet.with_text(text).encode(), system="", move=home != m3u.parent))
     return out
 
 
@@ -587,6 +601,8 @@ class JournalEntry:
     dst: str
     old_text: str | None = None
     new_text: str | None = None
+    old_raw: str | None = None    # playlist edits: the file before / after, exactly (base64)
+    new_raw: str | None = None
     done: bool = False
     made_dir: str | None = None   # folder created for this move (removed again by undo if empty)
     made_top: str | None = None   # the topmost folder that had to be created for it
@@ -628,9 +644,9 @@ def _park(entries: list[JournalEntry], frm: str, to: str) -> tuple[set[int], lis
     return failed, errors
 
 
-def _write_text(path: Path, text: str) -> None:
+def _write_bytes(path: Path, data: bytes) -> None:
     tmp = path.with_name(f".romtools-{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_bytes(data)
     os.replace(tmp, path)
 
 
@@ -654,8 +670,10 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
     for op in files:
         entries.append(JournalEntry(FILE, str(op.src), str(op.dst)))
     for op in edits:
-        old = op.src.read_text(encoding="utf-8", errors="replace")
-        entries.append(JournalEntry(M3U_EDIT, str(op.src), str(op.dst), old, op.new_text))
+        raw = op.src.read_bytes()
+        new = op.raw if op.raw is not None else (op.new_text or "").encode("utf-8")
+        entries.append(JournalEntry(M3U_EDIT, str(op.src), str(op.dst), textfile.decode(raw).text, op.new_text,
+                                    base64.b64encode(raw).decode(), base64.b64encode(new).decode()))
     for op in dirs:                                 # last: the folders are empty by now
         entries.append(JournalEntry(RMDIR, str(op.src), str(op.dst)))
     _save_journal(jpath, meta, entries)  # written BEFORE touching anything
@@ -696,12 +714,12 @@ def apply(ops: list[Op], cache=None, progress=None) -> tuple[Path, list[str]]:
                 if missing:  # a disc rename failed: leave the playlist as it was
                     raise OSError(f"playlist not updated, missing {missing[0]}")
                 _make_parent(e, dst)
-                _write_text(src, e.new_text)
+                _write_bytes(src, base64.b64decode(e.new_raw))
                 if dst != src:
                     try:
                         _rename(src, dst)
                     except OSError:
-                        _write_text(src, e.old_text or "")      # as it was
+                        _write_bytes(src, base64.b64decode(e.old_raw))      # as it was
                         raise
             e.done = True
         except OSError as exc:
@@ -758,7 +776,7 @@ def undo(jpath: Path, cache=None) -> list[str]:
             else:
                 if dst != src:
                     _rename(dst, src)
-                _write_text(src, e.old_text or "")
+                _write_bytes(src, base64.b64decode(e.old_raw) if e.old_raw is not None else (e.old_text or "").encode("utf-8"))
             e.done = False
         except OSError as exc:
             errors.append(f"{dst.name}: {exc}")

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
 from pathlib import Path
 
-from .compat import IS_WIN, app_dir, default_tmp_dir, portable_root, ram_mode_supported, romtools_dirs
+from .compat import IS_WIN, app_dir, default_tmp_dir, file_lock, portable_root, ram_mode_supported, romtools_dirs
 
 CONFIG_DIR, DATA_DIR, CACHE_DIR = romtools_dirs()
 PORTABLE = portable_root() is not None
@@ -81,20 +82,66 @@ DEFAULTS = {
 }
 
 
+_MISSING = object()
+
+
+def _read_settings() -> dict | None:
+    """The settings on disk, complete (defaults filled in); None if there are none or they can't be read."""
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        if not isinstance(saved, dict):
+            raise ValueError("not a settings file")
+    except (OSError, ValueError):
+        return None
+    return _complete({**copy.deepcopy(DEFAULTS), **_map_paths(saved, unpack_path)})
+
+
+def _complete(data: dict) -> dict:
+    if not data.get("library_root"):
+        data["library_root"] = _default_library()
+    if not ram_mode_supported():
+        data["temp_mode"] = "ssd"
+    return data
+
+
+def _merge(mine: dict, base: dict, theirs: dict) -> None:
+    """Bring ``mine`` up to date: what was changed here since ``base`` stays, everything else is taken from ``theirs``
+    (what another window saved meanwhile). Nested settings are merged one by one, in place."""
+    for k in {**mine, **base, **theirs}:
+        m, b, t = mine.get(k, _MISSING), base.get(k, _MISSING), theirs.get(k, _MISSING)
+        if isinstance(m, dict) and isinstance(t, dict):
+            _merge(m, b if isinstance(b, dict) else {}, t)
+        elif m == b:                                # not touched here
+            if t is _MISSING:
+                mine.pop(k, None)
+            else:
+                mine[k] = copy.deepcopy(t)
+
+
 class Config:
+    """The settings, shared by all three apps. Each window keeps its own copy; saving only writes what this window
+    changed, so it never undoes what another one saved meanwhile."""
+
     _lock = threading.Lock()
 
     def __init__(self) -> None:
-        self.data = dict(DEFAULTS)
+        data = _read_settings()
+        if data is None and CONFIG_FILE.exists():
+            self._keep_damaged()
+        self.data = data if data is not None else _complete(copy.deepcopy(DEFAULTS))
+        self._base = copy.deepcopy(self.data)       # as last read from / written to the disk
+
+    @staticmethod
+    def _keep_damaged() -> None:
+        """Settings that can't be read are kept under another name instead of being overwritten."""
+        n = 1
+        while (dest := CONFIG_FILE.with_name(f"config.damaged-{n}.json")).exists():
+            n += 1
         try:
-            with open(CONFIG_FILE, encoding="utf-8") as fh:
-                self.data.update(_map_paths(json.load(fh), unpack_path))
-        except (OSError, ValueError):
+            os.rename(CONFIG_FILE, dest)
+        except OSError:
             pass
-        if not self.data.get("library_root"):
-            self.data["library_root"] = _default_library()
-        if not ram_mode_supported():
-            self.data["temp_mode"] = "ssd"
 
     def __getitem__(self, key):
         return self.data.get(key, DEFAULTS.get(key))
@@ -104,17 +151,25 @@ class Config:
 
     def system(self, folder: str) -> dict:
         s = self.data.setdefault("systems", {}).setdefault(folder, {})
-        s.setdefault("system", "")
-        s.setdefault("dats", [])
+        b = self._base.setdefault("systems", {}).setdefault(folder, {})
+        for k, empty in (("system", ""), ("dats", [])):
+            if k not in s:                          # only filled in, not a change made here
+                s[k] = copy.copy(empty)
+                b.setdefault(k, copy.copy(empty))
         return s
 
     def save(self) -> None:
         with self._lock:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = CONFIG_FILE.with_suffix(".tmp")
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(_map_paths(self.data, pack_path), fh, indent=2)
-            os.replace(tmp, CONFIG_FILE)
+            with file_lock(CONFIG_FILE):
+                disk = _read_settings()
+                if disk is not None:
+                    _merge(self.data, self._base, disk)
+                tmp = CONFIG_FILE.with_name(f"config.{os.getpid()}.tmp")
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(_map_paths(self.data, pack_path), fh, indent=2)
+                os.replace(tmp, CONFIG_FILE)
+                self._base = copy.deepcopy(self.data)
 
 
 _config: Config | None = None

@@ -15,7 +15,7 @@ from typing import Callable
 
 from .config import DAT_DIR, Config
 from .datmanager import IndexCache, library_folders
-from .systems import BY_ID, CATALOG, guess_system
+from .systems import BY_ID, CATALOG, guess_system, left_alone
 
 OTHER = "(other)"                       # group key for loose files / unrecognised folders
 OTHER_LABEL = "Other folders & loose files"
@@ -162,9 +162,10 @@ def item_for_file(path: Path, cfg: Config | None = None):
             return Item(OTHER, split[0], "package", split[1:], expected=place_of(cfg or get_config(), split[0]))
     parts = _cue_parts(path) if ext == ".cue" else _gdi_parts(path) if ext == ".gdi" else None
     expected = place_of(cfg or get_config(), path)
+    keep = next((k for k in (left_alone(p.name) for p in path.parents[:3]) if k), "")
     if parts is not None:
-        return Item(OTHER, path, "cueset", [p for p in parts if p.exists()], expected=expected)
-    return Item(OTHER, path, kind_for(ext), expected=expected)
+        return Item(OTHER, path, "cueset", [p for p in parts if p.exists()], expected=expected, keep=keep)
+    return Item(OTHER, path, kind_for(ext), expected=expected, keep=keep)
 
 
 def collect_paths(cfg: Config, paths: list[Path], index_cache: IndexCache,

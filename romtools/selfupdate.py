@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import __version__
-from .compat import FROZEN, IS_WIN, app_dir
+from .compat import FROZEN, IS_WIN, app_dir, app_file
 
 # "owner/name" of the GitHub repository whose releases are the updates (set when the project is published)
 GITHUB_REPO = "akm7d/unified-rom-tools"
@@ -141,16 +141,16 @@ def _update_git(progress) -> str:
     root = app_dir()
     progress("Checking your copy…", 0.05)
     dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
-                           capture_output=True, text=True).stdout.strip()
+                           capture_output=True, encoding="utf-8", errors="replace").stdout.strip()
     if dirty:
         raise UpdateError("your copy has local changes - commit or stash them first, then update again")
     progress("Downloading changes (git pull)…", 0.2)
-    r = subprocess.run(["git", "pull", "--ff-only"], cwd=root, capture_output=True, text=True)
+    r = subprocess.run(["git", "pull", "--ff-only"], cwd=root, capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         raise UpdateError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout) else "git pull failed")
     progress("Fetching the pinned tools…", 0.7)
     subprocess.run([sys.executable, str(root / "packaging" / "build.py"), "tools"], cwd=root,
-                   capture_output=True, text=True)
+                   capture_output=True, encoding="utf-8", errors="replace")
     progress("Done", 1.0)
     return "Updated. Restart the apps to use the new version."
 
@@ -232,7 +232,7 @@ def _repoint_menu(old: Path, new: Path) -> None:
     """Linux: if the menu entries / ~/.local/bin links point at the old folder, re-run the new install.sh."""
     apps = Path.home() / ".local" / "share" / "applications"
     try:
-        uses_old = any(str(old) in p.read_text(errors="replace") for p in apps.glob("rom-*.desktop"))
+        uses_old = any(str(old) in p.read_text(encoding="utf-8", errors="replace") for p in apps.glob("rom-*.desktop"))
     except OSError:
         uses_old = False
     if uses_old and (new / "install.sh").exists():
@@ -241,7 +241,4 @@ def _repoint_menu(old: Path, new: Path) -> None:
 
 def launcher(folder: Path, module: str) -> list[str]:
     """Command that starts one of the apps from an unpacked build folder."""
-    names = {"verifier": ("ROM Verifier.exe", "rom-verifier"), "renamer": ("ROM Renamer.exe", "rom-renamer"),
-             "converter": ("ROM Optimizer.exe", "rom-optimizer")}
-    win, lin = names[module]
-    return [str(folder / (win if IS_WIN else lin))]
+    return [str(app_file(folder, module))]

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout
 
 from .. import scanner as sc
 from ..config import get_config
-from ..datmanager import ensure_mapping, library_folders, system_for
+from ..datmanager import ensure_mapping, system_for
 from ..systems import UNVERIFIABLE_HINT
 
 STATUS_COLORS = {
@@ -226,6 +226,12 @@ class Worker(QThread):
         for w in list(Worker.live):
             if w.isRunning():
                 w.wait(timeout_ms)
+        if any(w.isRunning() for w in list(Worker.live)):
+            # something that can't be interrupted (a network share that hangs): end here, quietly. Tearing Qt down under a
+            # running thread would abort the program with a crash report.
+            import os
+            sys.stdout and sys.stdout.flush()
+            os._exit(0)
 
     def run(self):
         try:
@@ -586,14 +592,22 @@ APPS = (("verifier", "ROM Verifier", "rom-verifier"), ("renamer", "ROM Renamer",
 def add_app_buttons(tb, win, current: str) -> None:
     """'Open ROM …' buttons for the other two apps, in the same order and place in every app's toolbar."""
     from PySide6.QtGui import QAction
-    from ..compat import launch_app, resource_dir
+    from ..compat import resource_dir
     tb.addSeparator()
     for module, name, icon in APPS:
         if module == current:
             continue
         act = QAction(QIcon.fromTheme(icon, QIcon(str(resource_dir() / "icons" / f"{icon}.svg"))), f"Open {name}", win)
         act.setToolTip(f"Start {name} (opens in its own window)")
-        act.triggered.connect(lambda _=False, m=module: launch_app(m))
+        act.triggered.connect(lambda _=False, m=module, n=name: _launch(win, m, n))
         tb.addAction(act)
     tb.addSeparator()
 
+
+
+def _launch(win, module: str, name: str) -> None:
+    from ..compat import launch_app
+    try:
+        launch_app(module)
+    except OSError as exc:
+        QMessageBox.warning(win, f"Open {name}", f"{name} couldn't be started:\n{exc}")

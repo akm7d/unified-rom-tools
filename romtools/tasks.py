@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import textfile
 from .hashing import Cancelled
 
 
@@ -148,11 +149,11 @@ def write_playlist(m3u: Path, discs: list[Path]) -> Callable[[TaskContext], str]
     def run(ctx: TaskContext) -> str:
         text = "".join(os.path.relpath(d, m3u.parent) + "\n" for d in discs)
         if m3u.exists():
-            if m3u.read_text(errors="replace").replace("\r", "") == text:
+            if textfile.read_text(m3u) == text:
                 raise TaskSkipped("playlist already up to date")
             raise TaskSkipped(f"{m3u.name} already exists with different contents (left as it is)")
         tmp = _tmp_beside(m3u, ".m3u")
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_bytes(text.encode("utf-8"))
         os.rename(tmp, m3u)
         ctx.log(f"wrote {m3u.name}: " + ", ".join(d.name for d in discs))
         return f"{len(discs)} discs"
@@ -224,6 +225,7 @@ def trim(path: Path, out: Path) -> Callable[[TaskContext], str]:
             raise TaskSkipped("the area after the game isn't plain padding, so trimming wouldn't be reversible")
         if size != full:
             raise TaskSkipped(f"file size ({size:,}) isn't the cartridge size ({full:,}); left untouched")
+        out.parent.mkdir(parents=True, exist_ok=True)
         tmp = _tmp_beside(out, path.suffix)
         try:
             with open(path, "rb") as fi, open(tmp, "wb") as fo:
@@ -231,6 +233,8 @@ def trim(path: Path, out: Path) -> Callable[[TaskContext], str]:
                 while left:
                     ctx.check()
                     chunk = fi.read(min(left, 8 << 20))
+                    if not chunk:
+                        raise RuntimeError("the file got shorter while it was being read - nothing changed")
                     fo.write(chunk)
                     left -= len(chunk)
                     ctx.progress(0.5 * (1 - left / used), "Trimming")
@@ -285,6 +289,7 @@ def untrim(path: Path, out: Path, dat_index=None) -> Callable[[TaskContext], str
                 if hits:
                     chosen, note_dat = b, f"matches No-Intro: {hits[0][0].name}"
                     break
+        out.parent.mkdir(parents=True, exist_ok=True)
         tmp = _tmp_beside(out, path.suffix)
         try:
             with open(path, "rb") as fi, open(tmp, "wb") as fo:
@@ -321,11 +326,9 @@ def _run_tool(argv: list[str], ctx: TaskContext, phase: str, env: dict | None = 
 
     lo, hi = span or (0.0, 1.0)
     p = Process(argv, line, (lambda f: ctx.progress(lo + (hi - lo) * f, phase)) if span else None, env=env)
-    watcher = threading.Thread(target=lambda: (ctx.cancel.wait(), p.cancel()), daemon=True)
-    watcher.start()
     if span:
         ctx.progress(lo, phase)      # never back to 0: start where this step's share of the bar begins
-    rc = p.run()
+    rc = p.run_until(ctx.cancel)
     ctx.check()
     if rc != 0:
         tail = next((ln for ln in reversed(lines) if ln.strip()), f"exit code {rc}")
@@ -356,6 +359,7 @@ def convert_disc_nod(src: Path, out: Path) -> Callable[[TaskContext], str]:
         if src.suffix.lower() == ".wbfs" and out.suffix.lower() == ".rvz":
             ctx.log("note: WBFS files were already scrubbed when made, so the RVZ matches the WBFS, not the "
                     "original disc")
+        out.parent.mkdir(parents=True, exist_ok=True)
         tmp = _tmp_beside(out, out.suffix)
         try:
             src_sha = (sha1_file(src, ctx, (0.0, 0.25), "Hashing the original")
@@ -427,6 +431,7 @@ def convert_nsz(src: Path, out: Path, keys: Path | None) -> Callable[[TaskContex
         if out.exists():
             raise TaskSkipped(f"{out.name} already exists")
         compress = src.suffix.lower() in (".nsp", ".xci")
+        out.parent.mkdir(parents=True, exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix=".romtools-nsz-", dir=out.parent))
         try:
             argv = [exe, "-C" if compress else "-D", "-V", "-o", str(work), "--keys", str(keys)]

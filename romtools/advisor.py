@@ -66,8 +66,8 @@ def sample_ratio(path: Path, samples: int = 12, chunk: int = 1 << 20) -> float:
 def _chd_codecs(path: Path) -> str:
     from .chdman_tool import chdman_bin
     try:
-        out = subprocess.run([chdman_bin(), "info", "-i", str(path)], capture_output=True, text=True,
-                             timeout=30).stdout
+        out = subprocess.run([chdman_bin(), "info", "-i", str(path)], capture_output=True, encoding="utf-8",
+                             errors="replace", timeout=30).stdout
     except (OSError, subprocess.TimeoutExpired):
         return ""
     m = re.search(r"^Compression:\s*(.+)$", out, re.M)

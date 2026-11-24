@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import textfile
 from .chdman_tool import chdman_bin
 from .compat import mem_available as _mem_available, pid_alive, ram_mode_supported
 from .hashing import Cancelled, Entry, hash_file
@@ -56,7 +57,7 @@ def info(path: Path) -> ChdInfo:
     exe = chdman_bin()
     if not exe:
         raise RuntimeError("chdman not found (install the 'mame-tools' package)")
-    res = subprocess.run([exe, "info", "-i", str(path)], capture_output=True, text=True,
+    res = subprocess.run([exe, "info", "-i", str(path)], capture_output=True, encoding="utf-8",
                          errors="replace", check=False)
     if res.returncode != 0:
         raise RuntimeError(_last_line(res.stderr or res.stdout) or "chdman info failed")
@@ -135,7 +136,7 @@ def _cue_pregaps(cue: Path) -> dict[str, int]:
     into the file. Redump's track files contain that gap (as silence), so it's hashed back in as zeros."""
     out: dict[str, int] = {}
     try:
-        text = cue.read_text(errors="replace")
+        text = textfile.read_text(cue)
     except OSError:
         return out
     current = ""

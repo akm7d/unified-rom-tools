@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import csv
 import html
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QSplitter, QTableView, QTextBrowser, QToolBar, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QSplitter, QTableView, QTextBrowser, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, chd
 from .. import scanner as sc
@@ -535,8 +534,8 @@ class VerifierWindow(QMainWindow):
         self.systems.load(self.picker.path())
 
     def open_renamer(self):
-        from ..compat import launch_app
-        launch_app("renamer")
+        from .common import _launch
+        _launch(self, "renamer", "ROM Renamer")
 
     def _filter_changed(self):
         self.proxy.set(statuses={s for s, b in self.chips.items() if b.isChecked()})
@@ -1250,6 +1249,8 @@ class VerifierWindow(QMainWindow):
             return
         tmp_ssd, cache, indexes_cache = Path(cfg["tmp_dir"]), self.cache, self.indexes
 
+        kept: list[str] = []            # converted, but the original couldn't be trashed
+
         def job(w: ScanWorker):
             outcomes = []
             for i, r in enumerate(res):
@@ -1262,6 +1263,7 @@ class VerifierWindow(QMainWindow):
                                 progress=lambda f, stage, n=name: w.progress.emit(
                                     i, len(res), f"Fixing {n} — {stage}", f))
                 outcomes.append((name, fr.ok, fr.message))
+                kept.extend([name] if fr.ok and not fr.trashed else [])
                 if fr.ok:
                     st = r.item.path.stat()
                     cache.put(r.item.path, st.st_size, st.st_mtime, "chd", fr.info, fr.entries)
@@ -1276,7 +1278,7 @@ class VerifierWindow(QMainWindow):
         self.worker = ScanWorker(job, parent=self)
         self.worker.result.connect(self.model.replace)
         self.worker.progress.connect(self._on_fix_progress)
-        self.worker.done.connect(self._fix_done)
+        self.worker.done.connect(lambda o: self._fix_done(o, kept))
         self.worker.failed.connect(self._on_failed)
         self.started = time.monotonic()
         self._set_running(True, fixing=True)
@@ -1290,12 +1292,14 @@ class VerifierWindow(QMainWindow):
         if frac >= 0:
             self.item_progress.setValue(int(frac * 1000))
 
-    def _fix_done(self, outcomes):
+    def _fix_done(self, outcomes, kept=()):
         self._set_running(False)
         ok = sum(1 for _n, good, _m in outcomes if good)
         el = time.monotonic() - self.started
-        self.current.setText(f"CHD type fix: {ok} of {len(outcomes)} converted in {el / 60:.1f} min. "
-                             f"Originals are in the trash.")
+        self.current.setText(f"CHD type fix: {ok} of {len(outcomes)} converted in {el / 60:.1f} min. " + (
+            "" if not ok else "Originals are in the trash." if not kept else
+            f"{len(kept)} original(s) couldn't be moved to the trash and were kept next to the new ones "
+            f"(“… (original).chd”)."))
         detail = "\n".join(f"{'✔' if good else '✘'} {n}: {m}" for n, good, m in outcomes)
         box = QMessageBox(QMessageBox.Icon.Information if ok == len(outcomes) else QMessageBox.Icon.Warning,
                           "CHD type fix", f"{ok} of {len(outcomes)} CHD(s) converted.", parent=self)

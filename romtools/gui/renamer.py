@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
-                               QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar, QToolButton,
+                               QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QToolBar, QToolButton,
                                QVBoxLayout, QWidget, QListWidget, QListWidgetItem, QSizePolicy)
 
 from .. import __version__

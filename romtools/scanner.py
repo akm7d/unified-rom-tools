@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import chd, identify, nod, packages, ps4pkg
+from . import chd, identify, nod, packages, ps4pkg, textfile
 from .cache import HashCache
 from .compat import ram_mode_supported
 from .dat import DatIndex, Game
@@ -45,7 +45,9 @@ class Item:
                                # | cueset | folder
     parts: list[Path] = field(default_factory=list)  # extra files for cue/gdi sets
     member: str = ""           # one game inside a multi-game archive (its file name inside the archive)
+    stamp: tuple | None = None # (size, time) of its files when they were checked
     maybe: bool = False        # only shown if a DAT knows it (no extension or signature says it's a ROM)
+    keep: str = ""             # "bios" / "other platform": in such a folder, so neither renamed nor sorted
     expected: str = ""         # catalogue id of the nearest folder named like a system ("" = none)
 
     @property
@@ -117,7 +119,7 @@ _CUE_FILE = re.compile(r'^\s*FILE\s+"?(.+?)"?\s+\S+\s*$', re.I | re.M)
 
 def _cue_parts(cue: Path) -> list[Path]:
     try:
-        text = cue.read_text(errors="replace")
+        text = textfile.read_text(cue)
     except OSError:
         return []
     return [cue.parent / m for m in _CUE_FILE.findall(text)]
@@ -126,7 +128,7 @@ def _cue_parts(cue: Path) -> list[Path]:
 def _gdi_parts(gdi: Path) -> list[Path]:
     parts = []
     try:
-        lines = gdi.read_text(errors="replace").splitlines()[1:]
+        lines = textfile.read_text(gdi).splitlines()[1:]
     except OSError:
         return []
     for line in lines:
@@ -200,8 +202,20 @@ def _entries(folder: Path) -> tuple[list[Path], list[Path]]:
     return sorted(files, key=lambda p: p.name.lower()), sorted(dirs, key=lambda p: p.name.lower())
 
 
+def _leads_back(d: Path, followed: frozenset[str]) -> str | None:
+    """Where a linked folder really is - None if following it would lead in circles."""
+    import os
+    real, here = os.path.realpath(d), os.path.realpath(d.parent)
+    if real in followed or here == real or here.startswith(real.rstrip(os.sep) + os.sep):
+        return None
+    return real
+
+
 def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | frozenset = frozenset(),
-              expected: str = "") -> list[Item]:
+              expected: str = "", keep: str = "", followed: frozenset[str] = frozenset()) -> list[Item]:
+    from .systems import left_alone
+    if not depth:
+        keep = keep or left_alone(folder.name)
     files, dirs = _entries(folder)
     dirs = [p for p in dirs if p.name not in skip_dirs]
     consumed: set[Path] = set()
@@ -215,7 +229,7 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
         else:
             continue
         consumed.update(parts)
-        items.append(Item(system, f, "cueset", parts, expected=expected))
+        items.append(Item(system, f, "cueset", parts, expected=expected, keep=keep))
     # the tracks of one disc without their .cue
     tracks: dict[str, list[Path]] = {}
     for f in files:
@@ -225,7 +239,7 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
     for group in tracks.values():
         if len(group) > 1:
             consumed.update(group)
-            items.append(Item(system, group[0], "cueset", group[1:], expected=expected))
+            items.append(Item(system, group[0], "cueset", group[1:], expected=expected, keep=keep))
     for f in files:
         ext = f.suffix.lower()
         if f in consumed or ext in (".cue", ".gdi"):
@@ -238,17 +252,20 @@ def _items_in(system: str, folder: Path, depth: int = 0, skip_dirs: set[str] | f
                 continue
         sure = _is_rom(f, system != OTHER)
         if sure or ext not in NEVER_ROMS and _maybe_rom(f):
-            items.append(Item(system, f, kind_for(ext), expected=expected, maybe=not sure))
+            items.append(Item(system, f, kind_for(ext), expected=expected, maybe=not sure, keep=keep))
     for d in dirs:
         here = _system_of_folder(d.name) or expected
-        skip = d.name.lower() in MEDIA_DIRS or depth >= MAX_DEPTH or d.is_symlink()
+        skip, links = d.name.lower() in MEDIA_DIRS or depth >= MAX_DEPTH, followed
+        if d.is_symlink():                      # linked folders count too, but not round in circles
+            real = _leads_back(d, followed)
+            skip, links = skip or real is None, followed | {real or ""}
         inside = None if skip else _entries(d)
         game = identify.extracted_game(d, {p.name.lower() for x in inside for p in x} if inside else None)
         # an extracted Switch / Wii U game: identified, not "Skipped"
         if game in ("switch", "wiiu") and packages.is_extracted_package(d):
             items.append(Item(system, d, "package", expected=here))
         elif game is None and inside and holds_roms(d, inside):
-            items.extend(_items_in(system, d, depth + 1, expected=here))
+            items.extend(_items_in(system, d, depth + 1, expected=here, keep=keep or left_alone(d.name), followed=links))
         else:
             items.append(Item(system, d, "folder", expected=here))
     return items
@@ -264,9 +281,9 @@ def holds_roms(d: Path, inside: tuple[list[Path], list[Path]] | None = None, bud
                looks: int = 24) -> bool:
     """Is there a ROM anywhere under this folder? Stops at the first one, and gives up on huge trees of other files."""
     from collections import deque
-    todo: "deque[tuple[Path, int]]" = deque([(d, 0)])
+    todo: "deque[tuple[Path, int, frozenset]]" = deque([(d, 0, frozenset())])
     while todo and budget > 0:
-        cur, depth = todo.popleft()
+        cur, depth, followed = todo.popleft()
         files, dirs = inside if inside is not None and cur is d else _entries(cur)
         if depth:
             game = identify.extracted_game(cur, {p.name.lower() for x in (files, dirs) for p in x})
@@ -285,7 +302,12 @@ def holds_roms(d: Path, inside: tuple[list[Path], list[Path]] | None = None, bud
                 if _is_rom(p, False) or _maybe_rom(p):           # by content
                     return True
         if depth < MAX_DEPTH:
-            todo.extend((p, depth + 1) for p in dirs if p.name.lower() not in MEDIA_DIRS and not p.is_symlink())
+            for p in dirs:
+                if p.name.lower() in MEDIA_DIRS:
+                    continue
+                real = _leads_back(p, followed) if p.is_symlink() else ""
+                if real is not None:
+                    todo.append((p, depth + 1, followed | {real} if real else followed))
     return False
 
 
@@ -353,6 +375,8 @@ def match(item: Item, entries: list[Entry], index: DatIndex, name_dats: set[str]
     have_all = all(id(r) in held for r in required)
     if have_all and unmatched == 0:
         status = VERIFIED if best.name == stem else MISNAMED
+        if best.name.startswith("[BIOS]"):      # emulators look for these by their own names
+            return Result(item, VERIFIED, best.name, best.dat, "BIOS file: its name is left alone", ers)
         note = "" if status == VERIFIED else f"Should be named “{best.name}”"
         return Result(item, status, best.name, best.dat, note, ers)
     got = sum(1 for r in required if id(r) in held)
@@ -396,7 +420,8 @@ def split_archive(item: Item, entries: list[Entry], index: DatIndex) -> list[tup
         members = [data[i] for i in idxs]
         names = {Path(m.name).stem for m in members}
         cues = [e for e in entries if e.name.lower().endswith((".cue", ".gdi")) and Path(e.name).stem in names]
-        sub = Item(item.system, item.path, item.kind, member=members[0].name, expected=item.expected)
+        sub = Item(item.system, item.path, item.kind, member=members[0].name, expected=item.expected,
+                   stamp=item.stamp, keep=item.keep)
         out.append((sub, members + cues))
     return out
 
@@ -442,6 +467,7 @@ class Scanner:
         st = p.stat()
         mtime = st.st_mtime + sum(x.stat().st_mtime for x in item.parts)
         size = st.st_size + sum(x.stat().st_size for x in item.parts)
+        item.stamp = (size, mtime)
         if self.cache and self.mode != FULL and not again:
             hit = self.cache.get(p, size, mtime)
             if hit and item.kind == "chd" and hit[1].get("kind") == "gd" \
@@ -629,6 +655,8 @@ class Scanner:
         if item.system == "(other)":
             item.system = info.platform
         want = self._expected(item)
+        if item.path.is_file():
+            item.stamp = stamp_of(item)
         integ = self.integrity_of(item)
         r = Result(item, ATTENTION if problems else IDENTIFIED, packages.clean_title(info.title),
                    f"{packages.PLATFORM_NAMES.get(info.platform, info.platform)} package data",
@@ -641,18 +669,13 @@ class Scanner:
         show_integrity(r, integ)
         return r
 
-    def _stamp(self, item: Item) -> tuple[int, float]:
-        st = item.path.stat()
-        return (st.st_size + sum(x.stat().st_size for x in item.parts),
-                st.st_mtime + sum(x.stat().st_mtime for x in item.parts))
-
     def integrity_of(self, item: Item):
         """What an earlier integrity check of this (unchanged) package found, or None."""
         from .integrity import Integrity
         if not self.cache or not item.path.is_file():
             return None
         try:
-            hit = self.cache.get(item.path, *self._stamp(item))
+            hit = self.cache.get(item.path, *stamp_of(item))
         except OSError:
             return None
         return Integrity.from_dict(hit[1].get("integrity")) if hit and hit[0] == "package" else None
@@ -663,7 +686,7 @@ class Scanner:
         item = r.item
         integ = integrity.check(item.path, self.switch_keys, lambda f, what: progress and progress(what, f), self.cancel)
         if self.cache:
-            self.cache.put(item.path, *self._stamp(item), "package", {"integrity": integ.as_dict()}, [])
+            self.cache.put(item.path, *stamp_of(item), "package", {"integrity": integ.as_dict()}, [])
         fresh = self.check_package(item)
         if not fresh.chd_info:                      # its metadata couldn't be read
             show_integrity(fresh, integ)
@@ -787,6 +810,13 @@ class Scanner:
                 exc = f.exception()
                 if exc and not isinstance(exc, Cancelled):
                     raise exc
+
+
+def stamp_of(item: Item) -> tuple[int, float]:
+    """(size, time) of an item's files together: changes whenever one of them does."""
+    st = item.path.stat()
+    parts = [x.stat() for x in item.parts]
+    return st.st_size + sum(x.st_size for x in parts), st.st_mtime + sum(x.st_mtime for x in parts)
 
 
 def show_integrity(r: Result, integ) -> None:

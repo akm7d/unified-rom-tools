@@ -7,7 +7,6 @@ computed in the same pass, so headered and headerless DATs both match.
 from __future__ import annotations
 
 import hashlib
-import shutil
 import subprocess
 import threading
 import zipfile
@@ -181,16 +180,24 @@ def hash_zip(path, cancel=None, progress=None, depth: int = 0) -> list[Entry]:
     return out
 
 
-def _7z_list(path: Path) -> list[tuple[str, int]]:
-    res = subprocess.run([SEVENZIP, "l", "-slt", "-ba", str(path)], capture_output=True, text=True,
-                         errors="replace", check=False)
+class ArchiveError(RuntimeError):
+    pass
+
+
+def _7z_entries(path: Path) -> list[dict]:
+    """What 7-Zip lists, in the order it unpacks: {"Path", "Size", "CRC", "Folder", "Encrypted", …}."""
+    # -sccUTF-8: names as UTF-8 whatever the system's code page is; no standard input: it must never wait for a password
+    res = subprocess.run([SEVENZIP, "l", "-slt", "-ba", "-sccUTF-8", "--", str(path)], capture_output=True,
+                         encoding="utf-8", errors="surrogateescape", check=False, stdin=subprocess.DEVNULL)
     if res.returncode != 0:
-        raise RuntimeError(f"7z list failed: {res.stderr.strip() or res.stdout.strip()}")
+        said = (res.stderr.strip() or res.stdout.strip()).encode("utf-8", "replace").decode("utf-8")
+        raise ArchiveError("the archive is protected with a password" if "password" in said.lower() or "break signaled" in said.lower() else
+                           f"7z list failed: {said}")
     items, cur = [], {}
     for line in res.stdout.splitlines() + [""]:
         if not line.strip():
             if cur.get("Path") and cur.get("Folder", "-") != "+" and "D" not in cur.get("Attributes", ""):
-                items.append((cur["Path"], int(cur.get("Size") or 0)))
+                items.append(cur)
             cur = {}
             continue
         k, _, v = line.partition(" = ")
@@ -198,22 +205,72 @@ def _7z_list(path: Path) -> list[tuple[str, int]]:
     return items
 
 
+def _7z_list(path: Path) -> list[tuple[str, int]]:
+    return [(e["Path"], int(e.get("Size") or 0)) for e in _7z_entries(path)]
+
+
+def member_command(path: Path, member: str, *more: str) -> list[str]:
+    """7-Zip command that writes one file of an archive to its output: taken literally, whatever its name looks like
+    (-spd: no wildcards; after "--" neither a switch nor a list file)."""
+    return [SEVENZIP, "e", "-so", "-bd", "-spd", "-sccUTF-8", *more, "--", str(path), member]
+
+
+class _Slice:
+    """The next ``size`` bytes of a stream, as a file of its own."""
+
+    def __init__(self, fh: BinaryIO, size: int):
+        self.fh, self.left = fh, size
+
+    def read(self, n: int) -> bytes:
+        d = self.fh.read(min(n, self.left))
+        self.left -= len(d)
+        return d
+
+
 def hash_7z(path: Path, cancel=None, progress=None) -> list[Entry]:
     if not SEVENZIP:
-        raise RuntimeError("7z is not installed (pacman -S 7zip)")
+        raise ArchiveError("7z is not installed (pacman -S 7zip)")
+    items = _7z_entries(path)
+    if any(e.get("Encrypted") == "+" for e in items):
+        raise ArchiveError("the archive is protected with a password")
+    # all in one go (a solid archive would otherwise be unpacked from the start for every file in it), checked against the
+    # checksums in its list - one by one if those don't agree with the order
+    out = _hash_in_one_go(path, items, cancel, progress)
+    return out if out is not None else [_hash_member(path, e, cancel, progress) for e in items]
+
+
+def _hash_in_one_go(path: Path, items: list[dict], cancel, progress) -> list[Entry] | None:
+    if len(items) < 2 or any(not e.get("CRC") and int(e.get("Size") or 0) for e in items):
+        return None
+    proc = subprocess.Popen([SEVENZIP, "e", "-so", "-bd", "-sccUTF-8", "--", str(path)], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
     out = []
-    for member, size in _7z_list(path):
-        proc = subprocess.Popen([SEVENZIP, "e", "-so", "-bd", str(path), member],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        try:
-            out.append(hash_stream(proc.stdout, member, size, cancel, progress))
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait()
-        if proc.returncode not in (0, None, -9):
-            raise RuntimeError(f"7z failed extracting {member}")
-    return out
+    try:
+        for e in items:
+            size = int(e.get("Size") or 0)
+            entry = hash_stream(_Slice(proc.stdout, size), e["Path"], size, cancel, progress)
+            if entry.full.size != size or size and entry.full.crc != e["CRC"].lower():
+                return None
+            out.append(entry)
+        return out if not proc.stdout.read(1) else None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def _hash_member(path: Path, e: dict, cancel, progress) -> Entry:
+    size = int(e.get("Size") or 0)
+    proc = subprocess.Popen(member_command(path, e["Path"]), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL)
+    try:
+        entry = hash_stream(proc.stdout, e["Path"], size, cancel, progress)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    if entry.full.size != size or e.get("CRC") and size and entry.full.crc != e["CRC"].lower():
+        raise ArchiveError(f"7z couldn't unpack {e['Path']!r} (damaged archive?)")
+    return entry
 
 
 def hash_archive(path: Path, cancel=None, progress=None) -> list[Entry]:

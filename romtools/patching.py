@@ -15,6 +15,7 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import textfile
 from .compat import find_tool
 
 PATCH_EXTS = (".ips", ".ebp", ".bps", ".ups", ".ppf", ".xdelta", ".xdelta3", ".vcdiff", ".delta")
@@ -22,6 +23,12 @@ PATCH_EXTS = (".ips", ".ebp", ".bps", ".ups", ".ppf", ".xdelta", ".xdelta3", ".v
 
 class PatchError(Exception):
     pass
+
+
+def _check(cancel) -> None:
+    if cancel is not None and cancel.is_set():
+        from .hashing import Cancelled
+        raise Cancelled("stopped")
 
 
 def crc32(data: bytes) -> str:
@@ -106,6 +113,22 @@ def inspect(path: Path) -> PatchInfo:
 
 # ---------------------------------------------------------------- appliers (bytes in, bytes out)
 
+def _ips_ends(patch: bytes, pos: int) -> bool:
+    """Is the "EOF" at ``pos`` the end of the patch? The same three bytes are also the offset of a change at 0x454F46 - then
+    valid records follow, up to the real end."""
+    def end_like(p: int) -> bool:           # nothing more, the optional size to cut to, or EBP's description
+        return len(patch) - p - 3 in (0, 3) or patch[p + 3:p + 4] == b"{"
+    if end_like(pos):
+        return True
+    p = pos
+    while p + 5 <= len(patch):              # read on as if it were a record
+        size = int.from_bytes(patch[p + 3:p + 5], "big")
+        p += 5 + (size or 3)
+        if p + 3 <= len(patch) and patch[p:p + 3] == b"EOF" and end_like(p):
+            return False
+    return True
+
+
 def apply_ips(src: bytes, patch: bytes) -> bytes:
     if not patch.startswith(b"PATCH"):
         raise PatchError("not an IPS patch")
@@ -114,7 +137,7 @@ def apply_ips(src: bytes, patch: bytes) -> bytes:
     while True:
         if pos + 3 > len(patch):
             raise PatchError("IPS patch ends early")
-        if patch[pos:pos + 3] == b"EOF":
+        if patch[pos:pos + 3] == b"EOF" and _ips_ends(patch, pos):
             pos += 3
             break
         off = int.from_bytes(patch[pos:pos + 3], "big")
@@ -127,6 +150,8 @@ def apply_ips(src: bytes, patch: bytes) -> bytes:
         else:
             chunk = patch[pos:pos + size]
             pos += size
+        if pos > len(patch):
+            raise PatchError("IPS patch ends early")
         end = off + len(chunk)
         if end > len(out):
             out.extend(b"\x00" * (end - len(out)))
@@ -136,7 +161,7 @@ def apply_ips(src: bytes, patch: bytes) -> bytes:
     return bytes(out)
 
 
-def apply_bps(src: bytes, patch: bytes) -> bytes:
+def apply_bps(src: bytes, patch: bytes, cancel=None) -> bytes:
     if not patch.startswith(b"BPS1"):
         raise PatchError("not a BPS patch")
     pos = 4
@@ -149,7 +174,11 @@ def apply_bps(src: bytes, patch: bytes) -> bytes:
     out = bytearray(dst_size)
     o = src_rel = dst_rel = 0
     end = len(patch) - 12
+    n = 0
     while pos < end:
+        n += 1
+        if not n & 0x3FF:
+            _check(cancel)
         data, pos = _varint(patch, pos)
         cmd, length = data & 3, (data >> 2) + 1
         if cmd == 0:                                      # SourceRead
@@ -169,7 +198,9 @@ def apply_bps(src: bytes, patch: bytes) -> bytes:
                 o += length
             else:                                         # TargetCopy (may overlap: byte by byte)
                 dst_rel += delta
-                for _ in range(length):
+                for k in range(length):
+                    if not k & 0xFFFFF:
+                        _check(cancel)
                     out[o] = out[dst_rel]
                     o += 1
                     dst_rel += 1
@@ -210,7 +241,14 @@ def _ppf_records_end(data: bytes) -> int:
     return i if i >= 0 else len(data)
 
 
-def apply_ppf(src_path: Path, patch_path: Path, out_path: Path, ignore_check: bool = False) -> list[str]:
+def _copy(src: Path, dst: Path, cancel=None) -> None:
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        while chunk := fi.read(8 << 20):
+            _check(cancel)
+            fo.write(chunk)
+
+
+def apply_ppf(src_path: Path, patch_path: Path, out_path: Path, ignore_check: bool = False, cancel=None) -> list[str]:
     """PPF patches disc images (often hundreds of MB): copy the original, then write the changes in place."""
     data = patch_path.read_bytes()
     ver = data[3:4]
@@ -236,7 +274,7 @@ def apply_ppf(src_path: Path, patch_path: Path, out_path: Path, ignore_check: bo
     else:
         raise PatchError("unknown PPF version")
     end = _ppf_records_end(data)
-    shutil.copyfile(src_path, out_path)
+    _copy(src_path, out_path, cancel)
     with open(out_path, "r+b") as fh:
         while pos < end:
             if wide:
@@ -263,15 +301,17 @@ def _ppf_blockcheck(src_path: Path, offset: int, block: bytes, ignore: bool) -> 
         raise PatchError("this disc image isn't the one the PPF patch was made for (block check failed)")
 
 
-def apply_xdelta(src_path: Path, patch_path: Path, out_path: Path) -> None:
+def apply_xdelta(src_path: Path, patch_path: Path, out_path: Path, cancel=None) -> None:
+    from .chdman_tool import Process
     exe = find_tool("xdelta3")
     if not exe:
         raise PatchError("xdelta3 not found (it's bundled in the packaged builds; on Linux: pacman -S xdelta3)")
-    r = subprocess.run([exe, "-d", "-f", "-s", str(src_path), str(patch_path), str(out_path)],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        msg = (r.stderr or r.stdout).strip().splitlines()
-        msg = msg[-1] if msg else f"exit code {r.returncode}"
+    lines: list[str] = []
+    rc = Process([exe, "-d", "-f", "-s", str(src_path), str(patch_path), str(out_path)], lines.append).run_until(cancel)
+    _check(cancel)
+    if rc != 0:
+        said = [ln.strip() for ln in lines[1:] if ln.strip()]
+        msg = said[-1] if said else f"exit code {rc}"
         if "checksum" in msg.lower() or "source" in msg.lower():
             msg += " — this usually means the original isn't the version the patch was made for"
         raise PatchError(f"xdelta3: {msg}")
@@ -294,7 +334,7 @@ class ApplyResult:
     verified: bool | None            # True: matches the patch's target CRC; None: format has none
 
 
-def apply_file(src: Path, patches: list[Path], out: Path, header: str = "auto") -> ApplyResult:
+def apply_file(src: Path, patches: list[Path], out: Path, header: str = "auto", cancel=None) -> ApplyResult:
     """Apply one or more patches in order to a plain ROM/disc-image file, writing `out`.
     header: auto | keep | strip  (copier headers on SNES/NES/Lynx/7800 ROMs)."""
     notes: list[str] = []
@@ -303,6 +343,7 @@ def apply_file(src: Path, patches: list[Path], out: Path, header: str = "auto") 
     verified = None
     try:
         for i, p in enumerate(patches):
+            _check(cancel)
             info = inspect(p)
             dest = out if i == len(patches) - 1 else out.with_name(f".romtools-patch-{i}{out.suffix}")
             if dest != out:
@@ -329,17 +370,19 @@ def apply_file(src: Path, patches: list[Path], out: Path, header: str = "auto") 
                     label, data = variants[0]
                     if hlen and header == "strip":
                         notes.append(f"{p.name}: copier header removed first")
-                fn = {"IPS": apply_ips, "BPS": apply_bps, "UPS": apply_ups}[info.format]
+                fn = {"IPS": apply_ips, "UPS": apply_ups,
+                      "BPS": lambda a, b: apply_bps(a, b, cancel)}[info.format]
                 result = fn(data, p.read_bytes())
+                _check(cancel)
                 dest.write_bytes(result)
                 if info.target_crc:
                     verified = crc32(result) == info.target_crc
                     if not verified:
                         raise PatchError(f"{p.name}: the result doesn't match the patch's expected CRC32")
             elif info.format.startswith("PPF"):
-                notes += apply_ppf(work, p, dest)
+                notes += apply_ppf(work, p, dest, cancel=cancel)
             elif info.format == "xdelta":
-                apply_xdelta(work, p, dest)
+                apply_xdelta(work, p, dest, cancel)
             work = dest
         return ApplyResult(out, notes, file_crc32(out), verified)
     except Exception:
@@ -420,7 +463,7 @@ def default_output_name(src: Path, patches: list[Path]) -> str:
     return f"{stem} [{tag}]"
 
 
-def _identify(path: Path):
+def _identify(path: Path, cancel=None):
     """(game, dat) for a file, looked up across all DATs (with and without a copier header)."""
     from .config import get_config
     from .hashing import hash_file
@@ -429,7 +472,7 @@ def _identify(path: Path):
     if not dats:
         return "", ""
     idx = _index_cache().get(dats)
-    e = hash_file(path)
+    e = hash_file(path, cancel)
     for v in (e.full, e.headerless):
         if v is not None:
             hits = idx.lookup(v.size, v.crc, v.md5, v.sha1)
@@ -448,11 +491,12 @@ def _index_cache():
     return _identify.cache
 
 
-def _hash_path(path: Path) -> tuple[int, str, str]:
+def _hash_path(path: Path, cancel=None) -> tuple[int, str, str]:
     import hashlib
     h, c, n = hashlib.sha1(), 0, 0
     with open(path, "rb") as fh:
         while chunk := fh.read(8 << 20):
+            _check(cancel)
             h.update(chunk)
             c = zlib.crc32(chunk, c)
             n += len(chunk)
@@ -460,7 +504,7 @@ def _hash_path(path: Path) -> tuple[int, str, str]:
 
 
 def _extract_archive_member(src: Path, work: Path) -> Path:
-    from .hashing import SEVENZIP, _7z_list
+    from .hashing import SEVENZIP, _7z_list, member_command
     import zipfile
     if src.suffix.lower() == ".zip" and zipfile.is_zipfile(src):
         with zipfile.ZipFile(src) as zf:
@@ -474,19 +518,20 @@ def _extract_archive_member(src: Path, work: Path) -> Path:
             return out
     if not SEVENZIP:
         raise PatchError("7-Zip is needed to read this archive")
-    names = [n for n, _s in _7z_list(src)]
+    listed = _7z_list(src)
+    names, sizes = [n for n, _s in listed], [n for _n, n in listed]
     if len(names) != 1:
         raise PatchError(f"{src.name} holds {len(names)} files; patch a single-game archive")
-    r = subprocess.run([SEVENZIP, "e", "-y", f"-o{work}", str(src), names[0]], capture_output=True, text=True)
-    out = work / Path(names[0]).name
-    if r.returncode != 0 or not out.exists():
+    out = work / (Path(names[0].replace("\\", "/")).name or "rom")
+    with open(out, "wb") as fo:
+        r = subprocess.run(member_command(src, names[0]), stdout=fo, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    if r.returncode != 0 or out.stat().st_size != sizes[0]:
         raise PatchError(f"couldn't extract {names[0]} from {src.name}")
     return out
 
 
 def _cue_files(cue: Path) -> list[str]:
-    import re
-    return re.findall(r'^\s*FILE\s+"?(.+?)"?\s+\S+\s*$', cue.read_text(errors="replace"), re.I | re.M)
+    return re.findall(r'^\s*FILE\s+"?(.+?)"?\s+\S+\s*$', textfile.read_text(cue), re.I | re.M)
 
 
 def _pick_track(tracks: list[Path], patches: list[Path]) -> Path:
@@ -499,7 +544,8 @@ def _pick_track(tracks: list[Path], patches: list[Path]) -> Path:
     return tracks[0]
 
 
-def prepare(src: Path, patches: list[Path], work: Path, progress=lambda s, f=0.0: None) -> tuple[BaseInfo, Path, dict]:
+def prepare(src: Path, patches: list[Path], work: Path, progress=lambda s, f=0.0: None,
+            cancel=None) -> tuple[BaseInfo, Path, dict]:
     """Unpack whatever was picked into `work`; return (info, file to patch, context for finishing)."""
     from . import chd
     ext = src.suffix.lower()
@@ -517,7 +563,8 @@ def prepare(src: Path, patches: list[Path], work: Path, progress=lambda s, f=0.0
                 argv.append("-sb")
         else:
             argv = [exe, "extractdvd", "-i", str(src), "-o", str(work / "disc.iso"), "-f"]
-        rc = Process(argv, on_progress=lambda f: progress("Unpacking the CHD", f)).run()
+        rc = Process(argv, on_progress=lambda f: progress("Unpacking the CHD", f)).run_until(cancel)
+        _check(cancel)
         if rc != 0:
             raise PatchError("chdman couldn't unpack the CHD")
         if ci.kind == "cd":
@@ -545,22 +592,51 @@ def prepare(src: Path, patches: list[Path], work: Path, progress=lambda s, f=0.0
         target = src
         info = BaseInfo(src, "file", src.name)
     progress("Identifying the original")
-    info.size, info.crc, info.sha1 = _hash_path(target)
-    info.dat_game, info.dat_name = _identify(target)
+    info.size, info.crc, info.sha1 = _hash_path(target, cancel)
+    info.dat_game, info.dat_name = _identify(target, cancel)
     return info, target, ctx
 
 
-def finish(info: BaseInfo, patched: Path, ctx: dict, out: Path, work: Path, progress=lambda s, f=0.0: None) -> list[str]:
+def rename_tracks(cue_text: str, folder: Path, names: dict[Path, str]) -> str:
+    """A .cue's text with its tracks renamed - however they're written in it (quoted or not, with a folder …)."""
+    def line(m: re.Match) -> str:
+        new = names.get(folder / m[2])
+        return f'{m[1]}"{new}"{m[3]}' if new else m[0]
+    return re.sub(r'^([ \t]*FILE[ \t]+)"?(.+?)"?([ \t]+\S+[ \t]*\r?)$', line, cue_text, flags=re.I | re.M)
+
+
+def _place(made: Path, out: Path, cancel=None) -> None:
+    """Move a finished file to its real name; across drives it's copied beside it first, so a stop leaves nothing."""
+    import os
+    import uuid
+    try:
+        os.rename(made, out)
+        return
+    except OSError:
+        pass
+    tmp = out.with_name(f".romtools-{uuid.uuid4().hex[:8]}{out.suffix}")
+    try:
+        _copy(made, tmp, cancel)
+        if out.exists():
+            raise PatchError(f"{out.name} already exists")
+        os.rename(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def finish(info: BaseInfo, patched: Path, ctx: dict, out: Path, work: Path, progress=lambda s, f=0.0: None,
+           cancel=None) -> list[str]:
     """Turn the patched file into the final output (plain file, new .cue set, or a new CHD). Returns track SHA-1s."""
     from .chdman_tool import Process, chdman_bin
     if info.kind in ("file", "archive"):
-        shutil.move(str(patched), out)
-        return [_hash_path(out)[2]]
+        sha = [_hash_path(patched, cancel)[2]]
+        _place(patched, out, cancel)
+        return sha
     if info.kind == "cueset":
         tracks: list[Path] = ctx["tracks"]
-        cue_text = ctx["cue"].read_text(errors="replace")
+        sheet = textfile.read(ctx["cue"])
         many = len(tracks) > 1
-        sha, written = [], []
+        sha, written, names = [], [], {}
         try:
             for i, t in enumerate(tracks, 1):
                 new_name = f"{out.stem} (Track {i}){t.suffix}" if many else f"{out.stem}{t.suffix}"
@@ -568,65 +644,67 @@ def finish(info: BaseInfo, patched: Path, ctx: dict, out: Path, work: Path, prog
                 if dest.exists():
                     raise PatchError(f"{dest.name} already exists")
                 written.append(dest)
-                if t.name == info.target_name:
-                    shutil.move(str(patched), dest)
-                else:
-                    shutil.copyfile(t, dest)
-                cue_text = cue_text.replace(f'"{t.name}"', f'"{new_name}"')
-                sha.append(_hash_path(dest)[2])
-            out.write_text(cue_text)
-        except Exception:
+                _copy(patched if t.name == info.target_name else t, dest, cancel)
+                names[t] = new_name
+                sha.append(_hash_path(dest, cancel)[2])
+            out.write_bytes(sheet.with_text(rename_tracks(sheet.text, ctx["cue"].parent, names)).encode())
+        except BaseException:
             for f in written:
                 f.unlink(missing_ok=True)
             raise
         return sha
-    # CHD: put the patched track back and build a new CHD of the same type
-    if ctx["chd_kind"] == "cd":
-        orig_track = work / info.target_name
-        orig_track.unlink()
-        shutil.move(str(patched), orig_track)
-        sha = [_hash_path(t)[2] for t in ctx["tracks"]]
-        argv = [chdman_bin(), "createcd", "-i", str(ctx["cue"]), "-o", str(out), "-f"]
-    else:
-        iso = work / "disc.iso"
-        iso.unlink()
-        shutil.move(str(patched), iso)
-        sha = [_hash_path(iso)[2]]
-        argv = [chdman_bin(), "createdvd", "-i", str(iso), "-o", str(out), "-f"]
-    rc = Process(argv, on_progress=lambda f: progress("Creating the new CHD", f)).run()
-    if rc != 0:
-        out.unlink(missing_ok=True)
-        raise PatchError("chdman couldn't create the new CHD")
-    rc = Process([chdman_bin(), "verify", "-i", str(out)], on_progress=lambda f: progress("Verifying the new CHD", f)).run()
-    if rc != 0:
-        out.unlink(missing_ok=True)
-        raise PatchError("the new CHD failed chdman verify")
+    # CHD: put the patched track back and build a new CHD of the same type (it gets its name once it's verified)
+    new = out.with_name(f".romtools-{work.name}.chd")
+    try:
+        if ctx["chd_kind"] == "cd":
+            orig_track = work / info.target_name
+            orig_track.unlink()
+            shutil.move(str(patched), orig_track)
+            sha = [_hash_path(t, cancel)[2] for t in ctx["tracks"]]
+            argv = [chdman_bin(), "createcd", "-i", str(ctx["cue"]), "-o", str(new), "-f"]
+        else:
+            iso = work / "disc.iso"
+            iso.unlink()
+            shutil.move(str(patched), iso)
+            sha = [_hash_path(iso, cancel)[2]]
+            argv = [chdman_bin(), "createdvd", "-i", str(iso), "-o", str(new), "-f"]
+        rc = Process(argv, on_progress=lambda f: progress("Creating the new CHD", f)).run_until(cancel)
+        _check(cancel)
+        if rc != 0:
+            raise PatchError("chdman couldn't create the new CHD")
+        rc = Process([chdman_bin(), "verify", "-i", str(new)],
+                     on_progress=lambda f: progress("Verifying the new CHD", f)).run_until(cancel)
+        _check(cancel)
+        if rc != 0:
+            raise PatchError("the new CHD failed chdman verify")
+        _place(new, out, cancel)
+    finally:
+        new.unlink(missing_ok=True)
     return sha
 
 
 def patch_rom(src: Path, patches: list[Path], out: Path, tmp_root: Path, header: str = "auto", tag: str = "",
-              progress=lambda s, f=0.0: None) -> tuple[BaseInfo, ApplyResult]:
-    """Full job: unpack, patch, rebuild, tag. Never touches `src`; `out` must not exist yet."""
+              progress=lambda s, f=0.0: None, cancel=None) -> tuple[BaseInfo, ApplyResult]:
+    """Full job: unpack, patch, rebuild, tag. Never touches `src`; `out` must not exist yet, and gets its name once it's
+    complete. ``cancel`` (an Event) stops it at any point, leaving nothing behind."""
     import tempfile
     if out.exists():
         raise PatchError(f"{out.name} already exists")
     tmp_root.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="patch-", dir=tmp_root))
     try:
-        info, target, ctx = prepare(src, patches, work, progress)
+        info, target, ctx = prepare(src, patches, work, progress, cancel)
         progress("Applying the patch", 0.0)
         patched = work / ("patched" + target.suffix)
-        result = apply_file(target, patches, patched, header)
-        sha = finish(info, patched, ctx, out, work, progress)
+        result = apply_file(target, patches, patched, header, cancel)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        sha = finish(info, patched, ctx, out, work, progress, cancel)
         result.output = out
         if tag:
             from .config import get_config  # noqa: F401  (config dirs)
             from .tags import MarkStore
             MarkStore().set("sha1:" + ",".join(sha[:8]), tag, out.name)
         return info, result
-    except Exception:
-        out.unlink(missing_ok=True)
-        raise
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

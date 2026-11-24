@@ -223,6 +223,20 @@ def selftest(report: str | None) -> int:
         return (f"{mode}; config {config.CONFIG_DIR}, temp {config.DEFAULTS['tmp_dir']}, "
                 f"RAM mode {compat.ram_mode_supported()}")
 
+    def starting_apps():
+        """The three programs are where the "Open ROM …" buttons look for them, and they start."""
+        import importlib.util
+        import subprocess
+        from romtools import compat
+        for m in APPS:
+            cmd = compat.app_command(m)
+            if compat.FROZEN:
+                r = subprocess.run([*cmd, "--ping"], timeout=120, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"})
+                assert r.returncode == 0, f"{cmd[0]}: exit code {r.returncode}"
+            else:
+                assert importlib.util.find_spec(f"romtools.gui.{m}"), m
+        return "all three" + (" start" if compat.FROZEN else " found")
+
     # Windows keeps open files (e.g. the hash-cache database) locked, so leftovers may outlive the test.
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home:
         # isolate settings, data and cache for the self-test
@@ -233,7 +247,8 @@ def selftest(report: str | None) -> int:
         os.environ["ROMTOOLS_HOME"] = str(Path(home) / "portable")   # never touch the build's own data folder
         for label, fn in (("imports", imports), ("paths", paths), ("chdman", chdman), ("7-Zip", sevenzip),
                           ("hashing", hashing), ("DAT parsing", dats), ("GUI", gui), ("theme", theme),
-                          ("patching", patching), ("RVZ / NSZ / nstool tools", disc_tools), ("console packages", console_packages)):
+                          ("patching", patching), ("RVZ / NSZ / nstool tools", disc_tools), ("console packages", console_packages),
+                          ("starting the apps", starting_apps)):
             check(label, fn)
     lines.append("RESULT " + ("OK" if ok else "FAILED"))
     if report:
@@ -245,6 +260,8 @@ def selftest(report: str | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
+    if "--ping" in argv:                    # "does this program start?" (the self-test asks each of the three)
+        return 0
     if "--selftest" in argv:
         i = argv.index("--selftest")
         report = argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith("-") else None

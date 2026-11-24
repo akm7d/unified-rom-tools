@@ -10,8 +10,8 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QRect, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QGuiApplication, QDesktopServices
+from PySide6.QtCore import QRect, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QGuiApplication, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleOptionProgressBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QDialog)
 
 from .. import __version__
@@ -19,8 +19,8 @@ from .. import chdman_tool as ct
 from .. import converter as cv
 from .. import updater as up
 from ..config import get_config
-from ..compat import FROZEN, IS_WIN, find_tool, launch_app, resource_dir
-from .common import ThemeButton, add_app_buttons, UpdateButton, startup_update_check, Worker, human, is_dark, make_app, restore_geometry, save_geometry
+from ..compat import FROZEN, IS_WIN, find_tool
+from .common import ThemeButton, add_app_buttons, UpdateButton, startup_update_check, Worker, human, make_app, restore_geometry, save_geometry
 
 STATUS_COLOR = {"Queued": "#7f8790", "Running": "#2f7fd1", "Done": "#2e9d53", "Failed": "#d1452f",
                 "Skipped": "#d49a1b", "Cancelled": "#8a6fc9"}
@@ -1248,7 +1248,7 @@ class AutoMatchDialog(QDialog):
                 try:
                     if out.exists():
                         raise pt.PatchError(f"{out.name} already exists")
-                    pt.patch_rom(rom, [patch], out, tmp_root, header, tag)
+                    pt.patch_rom(rom, [patch], out, tmp_root, header, tag, cancel=w.cancel)
                     results.append((r, True, f"✔ saved {out.name}"))
                 except Exception as exc:  # noqa: BLE001
                     results.append((r, False, f"✘ {str(exc).split(': ', 1)[-1]}"))
@@ -1276,11 +1276,18 @@ class AutoMatchDialog(QDialog):
         self.status.setText(f"Done: {ok} of {len(results)} patched. Originals unchanged.")
         QApplication.alert(self)
 
-    def closeEvent(self, ev):
+    def _stop(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel.set()
             self.worker.wait(30000)
+
+    def closeEvent(self, ev):
+        self._stop()
         super().closeEvent(ev)
+
+    def reject(self):               # Esc
+        self._stop()
+        super().reject()
 
 
 class PatchTab(QWidget):
@@ -1346,6 +1353,9 @@ class PatchTab(QWidget):
         self.details.setPlaceholderText("Pick a ROM and a patch to see whether they belong together.")
         self.apply_btn = QPushButton(QIcon.fromTheme("document-save"), "Create patched copy")
         self.apply_btn.clicked.connect(self.apply)
+        self.stop_btn = QPushButton(QIcon.fromTheme("media-playback-stop"), "Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(lambda: self.worker and self.worker.cancel.set())
         self.auto_btn = QPushButton(QIcon.fromTheme("edit-find"), "Auto-match a folder of patches…")
         self.auto_btn.setToolTip("Finds the right ROM for every patch in a folder and patches them in one go")
         self.auto_btn.clicked.connect(lambda: AutoMatchDialog(self).exec())
@@ -1377,6 +1387,7 @@ class PatchTab(QWidget):
         form.addRow("Tag the result as:", self.tag)
         brow = QHBoxLayout()
         brow.addWidget(self.apply_btn)
+        brow.addWidget(self.stop_btn)
         brow.addWidget(self.auto_btn)
         brow.addWidget(self.bar, 1)
         lay = QVBoxLayout(self)
@@ -1511,12 +1522,13 @@ class PatchTab(QWidget):
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
         self.apply_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         self.win.set_busy(True)
         pt = self.pt
 
         def job(w: Worker):
             info, res = pt.patch_rom(src, pats, out, tmp_root, header, tag,
-                                     progress=lambda s, f=0.0: w.progress.emit(0, 0, s, f))
+                                     progress=lambda s, f=0.0: w.progress.emit(0, 0, s, f), cancel=w.cancel)
             return info, res
 
         self.worker = Worker(job, parent=self)
@@ -1535,6 +1547,7 @@ class PatchTab(QWidget):
     def _finish_ui(self):
         self.bar.setVisible(False)
         self.apply_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
         self.win.set_busy(False)
 
     def _done(self, result, out: Path, tag: str):
@@ -1556,6 +1569,11 @@ class PatchTab(QWidget):
 
     def _failed(self, msg: str):
         self._finish_ui()
+        if msg.startswith("Cancelled"):
+            self.log.appendPlainText("Stopped.")
+            self.details.setHtml("<h3 style='margin:0'>Stopped</h3>The original was not changed and no output was left "
+                                 "behind.")
+            return
         msg = msg.split(": ", 1)[-1] if msg.startswith("PatchError") else msg
         self.log.appendPlainText(f"Failed: {msg}")
         self.details.setHtml(f"<h3 style='margin:0;color:#d1452f'>Not patched</h3>{msg}<br>The original was not "
@@ -2106,7 +2124,16 @@ class ChdmanTab(QWidget):
         lay.addWidget(self.bar)
         lay.addWidget(self.log, 1)
         self.refresh()
-        QTimer.singleShot(300, self.check)
+        self.latest.setText("not checked yet")
+        self._asked = False
+
+    def showEvent(self, ev):
+        """Look for a newer chdman when the tab is first opened - not at every start of the app, and not at all when
+        looking for updates is turned off (Updates ▸ Check for updates when an app starts)."""
+        super().showEvent(ev)
+        if not self._asked and get_config()["check_updates_at_launch"]:
+            self._asked = True
+            QTimer.singleShot(300, self.check)
 
     def refresh(self):
         cfg = get_config()
@@ -2382,10 +2409,12 @@ class ConverterWindow(QMainWindow):
             for p in (self.commands.proc, self.chdman.proc):
                 if p:
                     p.cancel()
-            for w in (self.batch.worker, self.commands.worker, self.chdman.worker, self.patch.worker,
-                      self.space.worker):
-                if w:
-                    w.wait(10000)
+            workers = [w for w in (self.batch.worker, self.commands.worker, self.chdman.worker, self.patch.worker,
+                                   self.space.worker) if w and w.isRunning()]
+            for w in workers:
+                w.cancel.set()
+            for w in workers:
+                w.wait(15000)
         self.batch.save_state()
         save_geometry(self, "converter")
         super().closeEvent(ev)

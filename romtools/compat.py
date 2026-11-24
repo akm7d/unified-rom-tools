@@ -16,10 +16,12 @@ ROMTOOLS_HOME=<folder> forces that layout anywhere (used by the self-test).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 IS_WIN = os.name == "nt"
@@ -148,13 +150,71 @@ def trash(path: Path) -> bool:
         return False
 
 
+APP_FILES = {"verifier": ("ROM Verifier.exe", "rom-verifier"), "renamer": ("ROM Renamer.exe", "rom-renamer"),
+             "converter": ("ROM Optimizer.exe", "rom-optimizer")}
+
+
+def app_file(folder: Path, module: str) -> Path:
+    """The program that starts one of the three apps in a packaged build's folder."""
+    win, lin = APP_FILES[module]
+    return folder / (win if IS_WIN else lin)
+
+
+def app_command(module: str) -> list[str]:
+    return [str(app_file(app_dir(), module))] if FROZEN else [sys.executable, "-m", f"romtools.gui.{module}"]
+
+
 def launch_app(module: str) -> None:
-    """Start another of the three apps (verifier / renamer / converter)."""
-    if FROZEN:
-        names = {"verifier": "ROM Verifier.exe", "renamer": "ROM Renamer.exe", "converter": "ROM Optimizer.exe"}
-        subprocess.Popen([str(app_dir() / names[module])], cwd=str(app_dir()))
-    else:
-        subprocess.Popen([sys.executable, "-m", f"romtools.gui.{module}"], cwd=str(app_dir()))
+    """Start another of the three apps (verifier / renamer / converter). Raises OSError if it can't be started."""
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"} if FROZEN else None
+    subprocess.Popen(app_command(module), cwd=str(app_dir()), env=env)
+
+
+def lies_inside(path: Path, folder: Path) -> bool:
+    """Does this file really lie in (or below) that folder? (A .cue can name any path - "../x", a full path, a link.)"""
+    try:
+        return folder.resolve() in path.resolve().parents
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def file_lock(path: Path, timeout: float = 10.0):
+    """Keep other romtools windows from changing the same file at the same time (``path`` + ".lock"). Advisory; if it
+    can't be had in time, go on without it rather than fail."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = None
+    try:
+        fh = open(path.with_name(path.name + ".lock"), "a+b")
+        end = time.monotonic() + timeout
+        while True:
+            try:
+                if IS_WIN:
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > end:
+                    break
+                time.sleep(0.02)
+    except OSError:
+        pass                            # e.g. a read-only folder: the write itself will say so
+    try:
+        yield
+    finally:
+        if fh is not None:
+            if IS_WIN:
+                import msvcrt
+                try:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            fh.close()                  # (closing releases it on POSIX)
 
 
 def hide_console_windows() -> None:

@@ -9,12 +9,9 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable
 
 from .compat import find_tool, popen_session_kwargs, terminate
@@ -132,7 +129,7 @@ def commands(binary: str | None = None) -> list[Command]:
 
 def _run_text(argv: list[str]) -> str:
     """chdman prints usage/help to stdout or stderr depending on version: take both."""
-    r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+    r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
                        timeout=30)
     return r.stdout
 
@@ -203,6 +200,25 @@ class Process:
         if self.cancelled:
             self.on_line("[cancelled]")
         return rc
+
+    def run_until(self, cancel: threading.Event | None) -> int:
+        """run(), stopped as soon as ``cancel`` is set."""
+        if cancel is None:
+            return self.run()
+        over = threading.Event()
+
+        def watch():
+            while not over.is_set():
+                if cancel.wait(0.3):
+                    if not over.is_set():
+                        self.cancel()
+                    return
+        t = threading.Thread(target=watch, daemon=True)
+        t.start()
+        try:
+            return self.run()
+        finally:
+            over.set()
 
     def cancel(self) -> None:
         with self._lock:

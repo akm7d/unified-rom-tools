@@ -163,7 +163,7 @@ class _Keys:
     def _load(path, into: dict) -> None:
         if not path or not Path(path).is_file():
             return
-        for line in Path(path).read_text(errors="replace").splitlines():
+        for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             sep = "=" if "=" in line else "," if "," in line else None
             if sep:
                 name, val = line.split(sep, 1)
@@ -610,26 +610,30 @@ def is_extracted_package(d: Path) -> bool:
 
 
 def iter_packages(scope: Path, max_depth: int = 4, skip: set[str] | None = None):
-    """Package files (PS4 PKG, Switch NSP/XCI/…) and extracted Switch game folders under ``scope``, without
-    walking into the extracted games' thousands of romfs files. ``skip``: top-level folder names to leave out."""
-    import os
-    scope = Path(scope)
-    for dirpath, dirnames, filenames in os.walk(scope):
-        here = Path(dirpath)
-        depth = len(here.relative_to(scope).parts)
-        keep = []
-        for dn in sorted(dirnames):
-            if depth == 0 and skip and dn in skip:
-                continue
-            sub = here / dn
-            if is_extracted_package(sub):
-                yield sub
-            elif depth + 1 < max_depth and not dn.startswith("."):
-                keep.append(dn)
-        dirnames[:] = keep
-        for fn in sorted(filenames):
-            if Path(fn).suffix.lower() in PACKAGE_EXTS and not fn.startswith("."):
-                yield here / fn
+    """Package files (PS4 PKG, Switch NSP/XCI, …) under ``scope``, and extracted Switch / Wii U game folders. Never looks
+    inside extracted games, whose thousands of files aren't the library's. ``skip``: top-level folder names to leave out."""
+    from .identify import extracted_game
+    from .scanner import _entries, _leads_back
+
+    def walk(d: Path, depth: int, followed: frozenset):
+        files, dirs = _entries(d)
+        if depth:
+            game = extracted_game(d, {p.name.lower() for x in (files, dirs) for p in x})
+            if game is not None:
+                if game in ("switch", "wiiu") and is_extracted_package(d):
+                    yield d
+                return
+        if depth < max_depth:
+            for sub in dirs:
+                if depth == 0 and skip and sub.name in skip:
+                    continue
+                real = _leads_back(sub, followed) if sub.is_symlink() else ""
+                if real is not None:
+                    yield from walk(sub, depth + 1, followed | {real} if real else followed)
+        for f in files:
+            if f.suffix.lower() in PACKAGE_EXTS:
+                yield f
+    yield from walk(Path(scope), 0, frozenset())
 
 
 def read_switch_dir(d: Path) -> PackageInfo:

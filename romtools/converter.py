@@ -7,11 +7,12 @@ trash after success" - and even then only after the output was verified.
 from __future__ import annotations
 
 import itertools
+import os
 import re
 import shutil
-import subprocess
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Callable
 
 from . import chd, discdetect
 from .discdetect import CD, DVD
+from .compat import lies_inside
 from .chdman_tool import Process, build_argv, chdman_bin
 from .scanner import _cue_parts, _gdi_parts
 
@@ -402,10 +404,11 @@ def _plan_task(preset: str, src: Path, opts: Options) -> Job | None:
         except Exception as exc:  # noqa: BLE001
             return _skipped(f"{preset}: {src.name}", src, str(exc))
         if preset == TRIM:
-            return _task_job(f"trim: {src.name}", src, tasks.trim(src, out), "Trimming", [], [src], opts, detail)
+            return _task_job(f"trim: {src.name}", src, tasks.trim(src, out), "Trimming", [out] if out != src else [],
+                             [src], opts, detail)
         idx = opts.all_dats() if opts.all_dats else None
-        return _task_job(f"untrim: {src.name}", src, tasks.untrim(src, out, idx), "Untrimming", [], [src], opts,
-                         detail)
+        return _task_job(f"untrim: {src.name}", src, tasks.untrim(src, out, idx), "Untrimming",
+                         [out] if out != src else [], [src], opts, detail)
     if preset in (TO_RVZ, FROM_RVZ):
         out = out_dir / (src.stem + (".rvz" if preset == TO_RVZ else ".iso"))
         return _task_job(f"to {out.suffix[1:].upper()}: {src.name}", src, tasks.convert_disc_nod(src, out),
@@ -702,6 +705,9 @@ def _plan_one(preset: str, src: Path, opts: Options) -> Job | None:
         j.detail = note
         _log_line(j, f"Detected: {note}")
         j.trash = opts.trash_sources and opts.verify_after  # only ever after a verified output
+        if j.trash and not all(lies_inside(p, src.parent) for p in parts):
+            j.trash = False
+            _log_line(j, "The sources won't be moved to the trash: the sheet names tracks outside its own folder.")
         return j
     if preset == FROM_CHD:
         try:
@@ -838,6 +844,10 @@ class Runner:
     def _run_and_keep_log(self, job: Job) -> None:
         try:
             self._run_job(job)
+        except Exception as exc:  # noqa: BLE001 - one job's problem mustn't stop the others
+            job.status, job.message = "Failed", str(exc) or exc.__class__.__name__
+            job.finished, job.phase = time.time(), ""
+            _log_line(job, f"Failed: {exc}")
         finally:
             self._notify(job)          # final state onto any rows that follow this job
         if job.status == "Failed":
@@ -873,8 +883,29 @@ class Runner:
             o.parent.mkdir(parents=True, exist_ok=True)
         job.status, job.started = "Running", time.time()
         self.on_update(job)
-        n = len(job.steps)
-        for i, argv in enumerate(job.steps):
+        # planned jobs write into a work folder next to the output; the files only get their real names once every step
+        # (also verify) has succeeded. So nothing half-written or wrong is ever left under a real name, and with
+        # Overwrite the old file stays until the new one is ready.
+        work = None
+        steps = job.steps
+        if job.preset and job.outputs and steps[0][1] not in ("verify", "info"):
+            work = job.outputs[0].parent / f".romtools-job-{uuid.uuid4().hex[:8]}"
+            work.mkdir()
+            staged = {str(o): str(work / o.name) for o in job.outputs}
+            steps = [[staged.get(a, a) for a in argv] for argv in steps]
+        try:
+            self._run_steps(job, steps, existing, work, main_has_force)
+        finally:
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+        job.finished = time.time()
+        job.phase = ""
+        self.on_update(job)
+
+    def _run_steps(self, job: Job, steps: list[list[str]], existing: list[Path], work: Path | None,
+                   overwrite: bool) -> None:
+        n = len(steps)
+        for i, argv in enumerate(steps):
             job.step_index = i
             job.step_label = f"Step {i + 1}/{n} · {job.step_name}"
             job.step_progress, job.step_started, job.phase = 0.0, time.time(), "starting chdman…"
@@ -903,15 +934,20 @@ class Runner:
                 self._procs.pop(job.id, None)
             if p.cancelled:
                 job.status, job.message = "Cancelled", "stopped by user"
-                self._cleanup_partial(job, existing)
+                if work is None:
+                    self._cleanup_partial(job, existing)
                 break
             if rc != 0:
                 job.status = "Failed"
                 job.message = job.message or f"{argv[1]} exited with code {rc}"
-                if i == 0:
+                if argv[1] == "verify" and n > 1:
+                    job.message = f"the new file failed its check, so it wasn't kept: {job.message}"
+                if work is None and i == 0:
                     self._cleanup_partial(job, existing)
                 break
         else:
+            if work is not None:
+                _put_in_place(work, job.outputs[0].parent, overwrite)
             job.status, job.progress = "Done", 1.0
             if argv[1] == "verify" and n > 1:
                 job.message = "created and verified"
@@ -925,9 +961,6 @@ class Runner:
                 bad = [s for s in job.sources if s.exists() and not self.trash(s)]
                 job.message += ("; sources moved to trash" if not bad else
                                 f"; could not trash {len(bad)} source file(s)")
-        job.finished = time.time()
-        job.phase = ""
-        self.on_update(job)
 
     def _run_func(self, job: Job) -> None:
         """Run a Python task (see romtools/tasks.py) with the same progress / log / stop handling."""
@@ -971,6 +1004,43 @@ class Runner:
                     o.unlink()
                 except OSError:
                     pass
+
+
+def _put_in_place(work: Path, folder: Path, overwrite: bool) -> None:
+    """Give the finished files in ``work`` their real places. All or nothing: files they replace are kept aside until
+    everything is in place, and put back if something goes wrong."""
+    new = sorted(f for f in work.iterdir() if f.is_file())
+    if not new:
+        raise RuntimeError("no output was written")
+    taken = [f.name for f in new if (folder / f.name).exists()]
+    if taken and not overwrite:
+        raise RuntimeError(f"{taken[0]} already exists (tick Overwrite to replace)")
+    old = work / "old"
+    if taken:
+        old.mkdir()
+    done: list[str] = []
+    try:
+        for f in new:
+            if f.name in taken:
+                os.rename(folder / f.name, old / f.name)
+            done.append(f.name)
+            os.rename(f, folder / f.name)
+    except OSError:
+        for name in done:
+            try:
+                if not (work / name).exists():
+                    os.rename(folder / name, work / name)
+                if name in taken:
+                    os.rename(old / name, folder / name)
+            except OSError:
+                continue
+        # the old files must survive even if they couldn't be put back
+        left = list(old.iterdir()) if old.is_dir() else []
+        if left:
+            keep = folder / f"{left[0].stem} (replaced files)"
+            os.rename(old, keep)
+            raise RuntimeError(f"the new files couldn't be put in place; the old ones are in “{keep.name}”")
+        raise
 
 
 def _gio_trash(path: Path) -> bool:

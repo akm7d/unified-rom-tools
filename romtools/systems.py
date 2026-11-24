@@ -172,6 +172,28 @@ def guess_system(folder: str) -> System | None:
     return hit
 
 
+# Folders whose files belong where they are and are called what they're called, whatever is in them: emulators look for
+# BIOS files by name, and arcade sets (which can hold a console's ROM) and other platforms aren't in the catalogue above.
+_BIOS = {"bios", "firmware", "biosfiles", "systemfiles", "system"}
+_OTHER_PLATFORMS = {
+    "arcade", "mame", "mame2000", "mame2003", "mame2003plus", "mame2010", "mamelibretro", "mameadvmame", "fbneo", "fba",
+    "fbalpha", "finalburn", "finalburnneo", "neogeo", "neogeomvs", "cps", "cps1", "cps2", "cps3", "naomi", "naomi2",
+    "naomigd", "atomiswave", "hikaru", "model1", "model2", "model3", "triforce", "chihiro", "teknoparrot", "pgm", "stv",
+    "daphne", "laserdisc", "nss", "playchoice", "playchoice10", "vssystem", "gameandwatch", "lcdgames", "tiger",
+    "scummvm", "dos", "pc", "windows", "ports", "flash", "android", "openbor", "mugen", "easyrpg", "solarus", "pico8",
+    "tic80", "amiga", "amiga500", "amiga600", "amiga1200", "amigacd32", "cd32", "cdtv", "c16", "c64", "c128", "vic20",
+    "zxspectrum", "zx81", "amstradcpc", "gx4000", "atari800", "atarist", "atarixe", "jaguarcd", "x1", "x68000", "pc88",
+    "pc98", "pcfx", "fmtowns", "msx2", "msxturbor", "coleco", "colecovision", "intellivision", "odyssey2", "videopac",
+    "channelf", "vectrex", "psvita", "vita", "ps5", "xboxone", "n64dd", "satellaview", "sufami", "supervision", "zmachine",
+}
+
+
+def left_alone(folder: str) -> str:
+    """"bios" / "other platform" if files in a folder of this name are neither renamed nor sorted, else ""."""
+    n = _squash(folder)
+    return "bios" if n in _BIOS else "other platform" if n in _OTHER_PLATFORMS else ""
+
+
 # Systems where DATs are absent or the dumps are not plain files; we say so instead of "unknown".
 UNVERIFIABLE_HINT = {
     "switch": "No public DAT matches NSP/XCI dumps (they are personalised): they're identified from their own "

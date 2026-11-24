@@ -121,3 +121,44 @@ def test_bios_list_is_checked_before_its_kept(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         bios.download()
     assert not bios.LIST.exists() and bios.list_age_days() is None
+
+
+def test_a_link_is_not_a_copy(lib, tmp_path):
+    n, d = GAMES["snes"]
+    real = put(lib / "store" / n, d)
+    (lib / "snes").mkdir()
+    (lib / "snes" / n).symlink_to(real)
+    assert col.duplicates(scan(lib)) == []
+    other = put(lib / "snes" / "copy.sfc", d)                       # a real copy next to a file and a link to it
+    g, = col.duplicates(scan(lib))
+    assert {c.path for c in g.copies} == {real, other}
+
+
+def test_linked_folder_is_not_a_copy_either(lib, tmp_path):
+    n, d = GAMES["gba"]
+    real = put(tmp_path / "elsewhere" / "Game" / n, d)
+    put(lib / "gba" / "x" / "other.gba", GAMES["snes"][1])
+    (lib / "gba" / "A").symlink_to(real.parent)
+    (lib / "gba" / "B").symlink_to(real.parent)
+    res = scan(lib)
+    assert sum(r.game == "Advance Game (USA)" for r in res) == 2     # both are shown …
+    assert col.duplicates(res) == []                                 # … but there is one file
+
+
+def test_changed_or_missing_copies_are_noticed(lib):
+    import os
+    n, d = GAMES["snes"]
+    a, b = put(lib / "snes" / n, d), put(lib / "snes" / "copy.sfc", d)
+    g, = col.duplicates(scan(lib))
+    assert [c.problem() for c in g.copies] == ["", ""]
+    b.write_bytes(snes(99))
+    os.utime(b, (1, 1))
+    a.unlink()
+    assert {c.path.name: c.problem() for c in g.copies} == {n: "isn't there any more",
+                                                            "copy.sfc": "has changed since it was scanned"}
+
+
+def test_disc_whose_tracks_lie_elsewhere_cant_be_trashed(lib):
+    put(lib / "x" / "t.bin", b"x" * 5000)
+    it = scanner.Item("psx", put(lib / "psx" / "g.cue", b""), "cueset", [lib / "psx" / ".." / "x" / "t.bin"])
+    assert "outside" in col.Copy(scanner.Result(it, scanner.VERIFIED)).removable

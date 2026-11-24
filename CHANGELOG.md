@@ -3,6 +3,34 @@
 The version lives in `romtools/__init__.py` (`__version__`) and is bumped for every fix or feature:
 patch (1.2.x) for fixes, minor (1.x.0) for new features. Builds are named after it.
 
+## 1.17.1
+A review of the whole suite. Serious:
+- The **"Open ROM …" buttons** didn't work in the Linux build (they looked for .exe files). The self-test now starts all three
+  programs of a build.
+- **Settings and tags changed in one app were undone by another** that was open at the same time. Each window now saves only
+  what it changed. Settings that can't be read are kept as config.damaged-1.json instead of being overwritten.
+- **Duplicates** no longer takes a link for a copy, and refuses to trash anything that changed since it was scanned, or when
+  the copy that should stay isn't there.
+- **Converting and extracting with chdman** writes into a work folder; files only get their real names once every step,
+  also verify, has succeeded. Overwriting keeps the old file until then, a stopped extraction leaves nothing half-written,
+  and a CHD that fails its check isn't kept.
+- **Closing ROM Optimizer while patching** crashed it. Patching can be stopped (new Stop button) and leaves nothing behind.
+- **Windows**: .cue / .gdi files naming tracks with accents, and archives holding files with accents, weren't read correctly.
+
+Also fixed:
+- One job that fails in an unexpected way no longer stops the rest of the queue; output folders that don't exist yet are made.
+- Fix CHD types says so when the original couldn't be moved to the trash.
+- Playlists keep their encoding, line ends and byte order mark when discs are renamed, and Undo restores them exactly.
+- Linked game folders are searched again (since 1.13 they were skipped); package searches don't enter extracted PS4 games.
+- Sorting and renaming leave files in BIOS, arcade and other platforms' folders alone, BIOS files a DAT lists, and archives
+  of several files in which only one is recognised.
+- A patched .cue always names the patched track; IPS patches with a change at 0x454F46 ("EOF") are applied completely.
+- "Move sources to the trash" never touches tracks outside the sheet's own folder.
+- Archive members are taken literally whatever they're called, checked against the archive's checksums, and solid archives
+  are unpacked once. Password-protected archives are reported instead of waiting.
+- ROM Optimizer looks for a newer chdman when its tab is opened, not at every start, and only if update checks are on.
+- A huge file called .cue isn't read into memory; trimming a file that shrinks ends with an error; tools leave no threads.
+
 ## 1.17.0
 - **Wii U**: `.wua` archives and extracted games (code/content/meta, or title.tmd with its .app files) are identified from
   their own data - title, ID, Game / Update / DLC, version, region, product code - without keys or a DAT. Archives holding a

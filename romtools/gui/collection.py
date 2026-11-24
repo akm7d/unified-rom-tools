@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogBut
 from .. import bios as bi
 from .. import collection as col
 from .. import scanner as sc
+from .. import textfile
 from ..config import get_config
 from .common import STATUS_COLORS, Worker, human
 
@@ -165,11 +166,17 @@ class DuplicatesDialog(QDialog):
             QMessageBox.warning(self, "Duplicates", "Every copy of these games is ticked - leave at least one:\n\n" +
                                 "\n".join(full[:15]))
             return
-        # the copies that stay must really be there
-        for g, _c in ticked:
-            if not any(id(c) not in chosen and c.path.exists() for c in g.copies):
-                QMessageBox.warning(self, "Duplicates", f"The copy of “{g.title}” that should stay isn't there any more. "
-                                                        f"Scan again first.")
+        # everything must still be what was scanned: the copies that go, and one that stays, as a file of its own
+        for g, c in ticked:
+            wrong = c.problem()
+            if wrong:
+                QMessageBox.warning(self, "Duplicates", f"{c.path.name} {wrong}. Scan again first.")
+                return
+        for g in {id(g): g for g, _c in ticked}.values():
+            going = {col._identity(f) for c in g.copies if id(c) in chosen for f in c.files}
+            if not any(id(c) not in chosen and not c.problem() and col._identity(c.path) not in going for c in g.copies):
+                QMessageBox.warning(self, "Duplicates", f"The copy of “{g.title}” that should stay isn't there any more, or "
+                                                        f"has changed. Scan again first.")
                 return
         files = [f for _g, c in ticked for f in c.files if f.exists()]
         lists = {m for f in files for m in _playlists_with(f)}
@@ -207,7 +214,7 @@ def _playlists_with(path: Path) -> list[Path]:
     out = []
     try:
         for m in path.parent.glob("*.m3u"):
-            lines = m.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = textfile.read_text(m).splitlines()
             if any((m.parent / ln.strip()) == path for ln in lines if ln.strip() and not ln.startswith("#")):
                 out.append(m)
     except OSError:
